@@ -2,16 +2,17 @@ import type {
   AgentSideConnection,
   ContentBlock,
   McpServer,
+  PermissionOption,
   SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
-import { maybeAuthRequiredError } from './auth-required.js'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import {
@@ -48,6 +49,15 @@ type QueuedTurn = {
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
+
+type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
+
+const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
+  { optionId: 'yes', name: 'Yes', kind: 'allow_once' },
+  { optionId: 'no', name: 'No', kind: 'reject_once' }
+]
+const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
+const CHOICE_OPTION_PREFIX = 'choice-'
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -827,6 +837,18 @@ export class PiAcpSession {
         break
       }
 
+      case 'extension_ui_request': {
+        void this.handleExtensionUiRequest(ev).catch(() => {
+          const id = stringProp(ev, 'id')
+          if (!id) {
+            return
+          }
+
+          void this.proc.sendExtensionUiResponse({ id, cancelled: true }).catch(() => {})
+        })
+        break
+      }
+
       case 'auto_retry_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
@@ -907,6 +929,140 @@ export class PiAcpSession {
         break
     }
   }
+
+  private async handleExtensionUiRequest(ev: PiRpcEvent): Promise<void> {
+    const id = stringProp(ev, 'id')
+    const method = stringProp(ev, 'method')
+    if (!id) {
+      return
+    }
+
+    if (method === 'select') {
+      await this.handleExtensionSelect(ev, id)
+      return
+    }
+
+    if (method === 'confirm') {
+      await this.handleExtensionConfirm(ev, id)
+      return
+    }
+
+    if (method === 'input' || method === 'editor') {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
+        } satisfies ContentBlock
+      })
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    if (method === 'notify') {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
+      })
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+  }
+
+  private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
+    const rawOptions = ev.options
+    const options = Array.isArray(rawOptions) ? rawOptions.map(option => String(option)) : []
+    if (!options.length) {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    const permissionOptions: PermissionOption[] = options.map((name, index) => ({
+      optionId: `${CHOICE_OPTION_PREFIX}${index}`,
+      name,
+      kind: 'allow_once'
+    }))
+
+    const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
+    if (selected === null) {
+      return
+    }
+
+    const selectedOptionId = selected.outcome.outcome === 'selected' ? selected.outcome.optionId : null
+    const index = selectedOptionId === null ? null : optionIndex(selectedOptionId)
+    const value = index === null ? null : (options.at(index) ?? null)
+    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+  }
+
+  private async handleExtensionConfirm(ev: PiRpcEvent, id: string): Promise<void> {
+    const selected = await this.requestExtensionPermission(id, ev, CONFIRM_PERMISSION_OPTIONS)
+    if (selected === null) {
+      return
+    }
+
+    if (selected.outcome.outcome === 'cancelled') {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    await this.proc.sendExtensionUiResponse({ id, confirmed: selected.outcome.optionId === 'yes' })
+  }
+
+  private async requestExtensionPermission(
+    id: string,
+    ev: PiRpcEvent,
+    options: PermissionOption[]
+  ): Promise<PermissionResponse | null> {
+    try {
+      return await this.conn.requestPermission({
+        sessionId: this.sessionId,
+        toolCall: extensionUiToolCall(id, ev),
+        options
+      })
+    } catch {
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return null
+    }
+  }
+}
+
+function extensionUiToolCall(id: string, ev: PiRpcEvent) {
+  const method = stringProp(ev, 'method') ?? 'ui'
+  const title = stringProp(ev, 'title') ?? `Pi ${method}`
+  const rawInput: Record<string, unknown> = { method }
+
+  for (const key of EXTENSION_UI_RAW_INPUT_KEYS) {
+    if (Object.hasOwn(ev, key)) rawInput[key] = ev[key]
+  }
+
+  return {
+    toolCallId: `pi-ui-${id}`,
+    title,
+    kind: 'other' as const,
+    status: 'pending' as const,
+    rawInput
+  }
+}
+
+function stringProp(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key]
+  return typeof value === 'string' ? value : null
+}
+
+function optionIndex(optionId: string): number | null {
+  if (!optionId.startsWith(CHOICE_OPTION_PREFIX)) {
+    return null
+  }
+
+  const rawIndex = optionId.slice(CHOICE_OPTION_PREFIX.length)
+  if (!rawIndex) {
+    return null
+  }
+
+  const index = Number(rawIndex)
+  return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
