@@ -10,6 +10,7 @@ import {
   type ListSessionsResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type McpServer,
   type ModelInfo,
   type NewSessionRequest,
   type PromptRequest,
@@ -119,6 +120,52 @@ export class PiAcpAgent implements ACPAgent {
 
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
+
+  /**
+   * Returns the session for the given ID, auto-restoring it from session-map.json
+   * if pi-acp was restarted and the in-memory map no longer holds the session.
+   *
+   * Fixes: https://github.com/svkozak/pi-acp/issues/28
+   */
+  private async autoRestoreSession(sessionId: string, mcpServers?: McpServer[]) {
+    const existing = this.sessions.maybeGet(sessionId)
+    if (existing) return existing
+
+    const stored = this.store.get(sessionId)
+    if (!stored?.sessionFile) {
+      throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+    }
+
+    let proc: PiRpcProcess
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd: stored.cwd,
+        sessionPath: stored.sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND
+      })
+    } catch (err) {
+      throw RequestError.invalidParams(
+        `Unknown sessionId: ${sessionId} (failed to restore: ${err instanceof Error ? err.message : String(err)})`
+      )
+    }
+
+    const fileCommands = loadSlashCommands(stored.cwd)
+    const session = this.sessions.getOrCreate(sessionId, {
+      cwd: stored.cwd,
+      mcpServers: mcpServers ?? [],
+      conn: this.conn,
+      proc,
+      fileCommands
+    })
+
+    this.store.upsert({
+      sessionId,
+      cwd: stored.cwd,
+      sessionFile: stored.sessionFile
+    })
+
+    return session
+  }
 
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
@@ -342,7 +389,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const session = this.sessions.get(params.sessionId)
+    const session = await this.autoRestoreSession(params.sessionId)
 
     const { message, images } = promptToPiMessage(params.prompt)
 
@@ -799,7 +846,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId)
+    const session = await this.autoRestoreSession(params.sessionId)
     await session.cancel()
   }
 
@@ -1036,7 +1083,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
-    const session = this.sessions.get(params.sessionId)
+    const session = await this.autoRestoreSession(params.sessionId)
 
     // Accept either:
     //  - "provider/model" (preferred, matches how we advertise)
@@ -1070,7 +1117,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
-    const session = this.sessions.get(params.sessionId)
+    const session = await this.autoRestoreSession(params.sessionId)
 
     const mode = String(params.modeId)
     if (!isThinkingLevel(mode)) {
