@@ -1108,7 +1108,7 @@ var PiAcpSession = class {
               this.emit({
                 sessionUpdate: "tool_call",
                 toolCallId,
-                title: toolName,
+                title: toToolTitle(toolName, rawInput),
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -1178,7 +1178,7 @@ var PiAcpSession = class {
           this.emit({
             sessionUpdate: "tool_call",
             toolCallId,
-            title: toolName,
+            title: toToolTitle(toolName, args),
             kind: toToolKind(toolName),
             status: "in_progress",
             locations,
@@ -1469,6 +1469,11 @@ function formatAutoRetryMessage(ev) {
   let delaySeconds = Math.round(delayMs / 1e3);
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
+}
+function toToolTitle(toolName, args) {
+  const path = getToolPath(args);
+  if (path) return `${toolName}: ${path}`;
+  return toolName;
 }
 function toToolKind(toolName) {
   switch (toolName) {
