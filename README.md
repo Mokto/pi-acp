@@ -45,6 +45,35 @@ npm install -g @earendil-works/pi-coding-agent
 
 ## Install
 
+### Install this fork's release (`Mokto/pi-acp`)
+
+This fork is distributed as a **GitHub release** (the `pi-acp` name on npm belongs to upstream). Install the latest release globally:
+
+```bash
+npm install -g https://github.com/Mokto/pi-acp/releases/latest/download/pi-acp.tgz
+```
+
+To pin a specific version instead:
+
+```bash
+npm install -g https://github.com/Mokto/pi-acp/releases/download/v0.0.28/pi-acp-0.0.28.tgz
+```
+
+Then point your ACP client (e.g. Zed) at the installed `pi-acp` binary:
+
+```json
+  "agent_servers": {
+    "pi": {
+      "type": "custom",
+      "command": "pi-acp",
+      "args": [],
+      "env": {}
+    }
+  }
+```
+
+> Note: `npm i -g pi-acp` and `npx -y pi-acp` install the **upstream** npm package, not this fork. `npm i -g github:Mokto/pi-acp` is unreliable for global installs (npm symlinks the package into a transient cache dir), so use the release tarball above.
+
 ### Add pi-acp to your ACP client, e.g. [Zed](https://zed.dev/docs/agents/external-agents/)
 
 #### Using ACP Registry in Zed or other clients that support it:
