@@ -49,7 +49,7 @@ function terminalAuthLaunchSpec() {
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
 import { readFileSync as readFileSync3 } from "fs";
-import { isAbsolute, resolve as resolvePath } from "path";
+import { basename, isAbsolute, relative, resolve as resolvePath } from "path";
 
 // src/pi-rpc/process.ts
 import { spawn } from "child_process";
@@ -1108,7 +1108,7 @@ var PiAcpSession = class {
               this.emit({
                 sessionUpdate: "tool_call",
                 toolCallId,
-                title: toToolTitle(toolName, rawInput),
+                title: toToolTitle(toolName, rawInput, this.cwd),
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -1118,6 +1118,7 @@ var PiAcpSession = class {
               this.emit({
                 sessionUpdate: "tool_call_update",
                 toolCallId,
+                title: toToolTitle(toolName, rawInput, this.cwd),
                 status,
                 locations,
                 rawInput
@@ -1178,7 +1179,7 @@ var PiAcpSession = class {
           this.emit({
             sessionUpdate: "tool_call",
             toolCallId,
-            title: toToolTitle(toolName, args),
+            title: toToolTitle(toolName, args, this.cwd),
             kind: toToolKind(toolName),
             status: "in_progress",
             locations,
@@ -1190,6 +1191,7 @@ var PiAcpSession = class {
           this.emit({
             sessionUpdate: "tool_call_update",
             toolCallId,
+            title: toToolTitle(toolName, args, this.cwd),
             status: "in_progress",
             locations,
             content: initialFileContent,
@@ -1470,10 +1472,38 @@ function formatAutoRetryMessage(ev) {
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
-function toToolTitle(toolName, args) {
-  const path = getToolPath(args);
-  if (path) return `${toolName}: ${path}`;
-  return toolName;
+function toToolTitle(toolName, args, cwd) {
+  const p = getToolPath(args);
+  if (p) {
+    let display = p;
+    if (cwd) {
+      try {
+        const rel = relative(cwd, isAbsolute(p) ? p : resolvePath(cwd, p));
+        display = rel.length < p.length ? rel : basename(p);
+      } catch {
+        display = basename(p);
+      }
+    } else {
+      display = basename(p);
+    }
+    const verb = toolVerb(toolName);
+    return `${verb} ${display}`;
+  }
+  return toolVerb(toolName);
+}
+function toolVerb(toolName) {
+  switch (toolName) {
+    case "edit":
+      return "Edit";
+    case "write":
+      return "Write";
+    case "read":
+      return "Read";
+    case "bash":
+      return "Bash";
+    default:
+      return toolName.charAt(0).toUpperCase() + toolName.slice(1);
+  }
 }
 function toToolKind(toolName) {
   switch (toolName) {
@@ -2036,7 +2066,7 @@ function resolveEnabledModelIds(models, patterns) {
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute3 } from "path";
 import { existsSync as existsSync4, readFileSync as readFileSync6, realpathSync, readdirSync as readdirSync3, statSync as statSync2, unlinkSync } from "fs";
-import { join as join5, dirname as dirname2, basename } from "path";
+import { join as join5, dirname as dirname2, basename as basename2 } from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 function builtinAvailableCommands() {
@@ -3153,7 +3183,7 @@ function buildStartupInfo(opts) {
   const promptsDir = join5(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
     const prompts = readdirSync3(promptsDir).filter((f) => f.endsWith(".md"));
-    for (const f of prompts) promptsItems.push(`/${basename(f, ".md")}`);
+    for (const f of prompts) promptsItems.push(`/${basename2(f, ".md")}`);
   } catch {
   }
   addSection("Prompts", promptsItems);

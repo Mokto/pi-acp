@@ -11,7 +11,7 @@ import type {
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
-import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
@@ -724,7 +724,7 @@ export class PiAcpSession {
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: toolName,
+                title: toToolTitle(toolName, rawInput, this.cwd),
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -736,6 +736,7 @@ export class PiAcpSession {
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
+                title: toToolTitle(toolName, rawInput, this.cwd),
                 status,
                 locations,
                 rawInput
@@ -810,7 +811,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title: toToolTitle(toolName, args, this.cwd),
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -822,6 +823,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            title: toToolTitle(toolName, args, this.cwd),
             status: 'in_progress',
             locations,
             content: initialFileContent,
@@ -1168,6 +1170,42 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+}
+
+function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
+  const p = getToolPath(args)
+  if (p) {
+    // Show a short relative path when possible; fall back to basename, then full path.
+    let display = p
+    if (cwd) {
+      try {
+        const rel = relative(cwd, isAbsolute(p) ? p : resolvePath(cwd, p))
+        display = rel.length < p.length ? rel : basename(p)
+      } catch {
+        display = basename(p)
+      }
+    } else {
+      display = basename(p)
+    }
+    const verb = toolVerb(toolName)
+    return `${verb} ${display}`
+  }
+  return toolVerb(toolName)
+}
+
+function toolVerb(toolName: string): string {
+  switch (toolName) {
+    case 'edit':
+      return 'Edit'
+    case 'write':
+      return 'Write'
+    case 'read':
+      return 'Read'
+    case 'bash':
+      return 'Bash'
+    default:
+      return toolName.charAt(0).toUpperCase() + toolName.slice(1)
+  }
 }
 
 function toToolKind(toolName: string): ToolKind {
