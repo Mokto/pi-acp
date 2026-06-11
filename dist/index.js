@@ -827,6 +827,9 @@ var PiAcpSession = class {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
+  // Tracks cumulative session token counts from the last `getSessionStats` call so we
+  // can compute a per-turn delta and emit it after each `agent_end`.
+  lastTokenStats = null;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -1049,6 +1052,17 @@ var PiAcpSession = class {
     try {
       const configOptions = await refresh();
       this.emit({ sessionUpdate: "config_option_update", configOptions });
+    } catch {
+    }
+  }
+  async maybeEmitTokenStats() {
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
+    try {
+      const stats = await this.proc.getSessionStats();
+      const line = buildTokenDeltaLine(stats?.tokens, this.lastTokenStats);
+      const current = extractTokenCounts(stats?.tokens);
+      if (current) this.lastTokenStats = current;
+      if (line) this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: line } });
     } catch {
     }
   }
@@ -1333,9 +1347,12 @@ var PiAcpSession = class {
         break;
       }
       case "agent_end": {
-        void this.flushEmits().finally(() => {
+        void (async () => {
+          await this.flushEmits();
+          await this.maybeEmitTokenStats();
+          await this.flushEmits();
           this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
-        });
+        })();
         break;
       }
       case "agent_error":
@@ -1517,6 +1534,36 @@ function toToolKind(toolName) {
     default:
       return "other";
   }
+}
+function extractTokenCounts(t) {
+  if (!t || typeof t !== "object") return null;
+  const r = t;
+  return {
+    input: typeof r.input === "number" ? r.input : 0,
+    output: typeof r.output === "number" ? r.output : 0,
+    cacheRead: typeof r.cacheRead === "number" ? r.cacheRead : 0,
+    cacheWrite: typeof r.cacheWrite === "number" ? r.cacheWrite : 0,
+    total: typeof r.total === "number" ? r.total : 0
+  };
+}
+function buildTokenDeltaLine(rawTokens, prev) {
+  const current = extractTokenCounts(rawTokens);
+  if (!current) return null;
+  const delta = prev ? {
+    input: current.input - prev.input,
+    output: current.output - prev.output,
+    cacheRead: current.cacheRead - prev.cacheRead,
+    cacheWrite: current.cacheWrite - prev.cacheWrite,
+    total: current.total - prev.total
+  } : current;
+  if (delta.total <= 0 && delta.input <= 0 && delta.output <= 0) return null;
+  const parts = [];
+  if (delta.input > 0) parts.push(`in ${delta.input.toLocaleString()}`);
+  if (delta.output > 0) parts.push(`out ${delta.output.toLocaleString()}`);
+  if (delta.cacheRead > 0) parts.push(`cache\u2191 ${delta.cacheRead.toLocaleString()}`);
+  if (delta.cacheWrite > 0) parts.push(`cache\u2193 ${delta.cacheWrite.toLocaleString()}`);
+  if (delta.total > 0) parts.push(`total ${delta.total.toLocaleString()}`);
+  return parts.length ? `\u21B3 ${parts.join(" \xB7 ")}` : null;
 }
 
 // src/acp/pi-sessions.ts
