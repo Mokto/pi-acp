@@ -1089,29 +1089,28 @@ var PiAcpSession = class {
     const accDelta = subtractTokenCounts(this.turnTokenAccumulator, this.turnTokenBaseline);
     const hasAccDelta = accDelta.total > 0 || accDelta.input > 0 || accDelta.output > 0;
     const hasStatsDelta = statsTokens && (statsTokens.total > 0 || statsTokens.input > 0);
-    let tokenLine = null;
-    if (hasAccDelta) {
-      tokenLine = buildTokenCountsLine(accDelta);
-    } else if (hasStatsDelta) {
-      tokenLine = buildTokenCountsLine(statsTokens);
-    }
-    let contextLine = null;
+    const turnTotal = hasAccDelta ? accDelta.total || accDelta.input + accDelta.output + accDelta.cacheRead + accDelta.cacheWrite : hasStatsDelta ? statsTokens.total || statsTokens.input + statsTokens.output : 0;
+    let contextPct = null;
     if (contextTokens !== null && contextTokens > 0 && contextWindow) {
-      const pct = contextPercent !== null ? contextPercent : Math.round(contextTokens / contextWindow * 100);
-      contextLine = `context: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${pct}%)`;
+      const raw = contextPercent !== null ? contextPercent : contextTokens / contextWindow * 100;
+      contextPct = `${Math.round(raw * 10) / 10}%`;
     }
     if (debug) {
       this.emit({
         sessionUpdate: "agent_message_chunk",
         content: {
           type: "text",
-          text: `[token debug] stats=${JSON.stringify(stats?.tokens)} acc=${JSON.stringify(accDelta)} hasAccDelta=${hasAccDelta} hasStatsDelta=${hasStatsDelta}`
+          text: `
+[token debug] stats=${JSON.stringify(stats?.tokens)} acc=${JSON.stringify(accDelta)} hasAccDelta=${hasAccDelta} hasStatsDelta=${hasStatsDelta}`
         }
       });
     }
-    const parts = [tokenLine, contextLine].filter(Boolean);
+    const parts = [];
+    if (turnTotal > 0) parts.push(`${turnTotal.toLocaleString()} tokens`);
+    if (contextPct) parts.push(`${contextPct} context`);
     if (parts.length)
-      this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\u21B3 ${parts.join(" \xB7 ")}` } });
+      this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
+\u21B3 ${parts.join(" \xB7 ")}` } });
   }
   handlePiEvent(ev) {
     const type = String(ev.type ?? "");
@@ -1612,15 +1611,6 @@ function subtractTokenCounts(a, b) {
     cacheWrite: a.cacheWrite - b.cacheWrite,
     total: a.total - b.total
   };
-}
-function buildTokenCountsLine(t) {
-  const parts = [];
-  if (t.input > 0) parts.push(`in ${t.input.toLocaleString()}`);
-  if (t.output > 0) parts.push(`out ${t.output.toLocaleString()}`);
-  if (t.cacheRead > 0) parts.push(`cache\u2191 ${t.cacheRead.toLocaleString()}`);
-  if (t.cacheWrite > 0) parts.push(`cache\u2193 ${t.cacheWrite.toLocaleString()}`);
-  if (t.total > 0) parts.push(`total ${t.total.toLocaleString()}`);
-  return parts.length ? parts.join(" \xB7 ") : null;
 }
 
 // src/acp/pi-sessions.ts
