@@ -827,11 +827,6 @@ var PiAcpSession = class {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
-  // Token counts accumulated from `turn_end` events (inline usage, when pi provides it).
-  // Also used as fallback from `getSessionStats()` after `agent_end`.
-  turnTokenAccumulator = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-  // Snapshot at the start of each turn so we can compute a per-turn delta.
-  turnTokenBaseline = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   // Context window size reported by pi (updated from getSessionStats).
   contextWindow = null;
   // For ACP diff support: capture file contents before edit/write mutations,
@@ -985,7 +980,6 @@ var PiAcpSession = class {
   startTurn(t) {
     this.cancelRequested = false;
     this.inAgentLoop = false;
-    this.turnTokenBaseline = { ...this.turnTokenAccumulator };
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.emit({
       sessionUpdate: "session_info_update",
@@ -1085,29 +1079,21 @@ var PiAcpSession = class {
           content: { type: "text", text: `[token debug] getSessionStats error: ${String(err)}` }
         });
     }
-    const statsTokens = extractTokenCounts(stats?.tokens);
-    const accDelta = subtractTokenCounts(this.turnTokenAccumulator, this.turnTokenBaseline);
-    const hasAccDelta = accDelta.total > 0 || accDelta.input > 0 || accDelta.output > 0;
-    const hasStatsDelta = statsTokens && (statsTokens.total > 0 || statsTokens.input > 0);
-    const turnTotal = hasAccDelta ? accDelta.total || accDelta.input + accDelta.output + accDelta.cacheRead + accDelta.cacheWrite : hasStatsDelta ? statsTokens.total || statsTokens.input + statsTokens.output : 0;
-    let contextPct = null;
-    if (contextTokens !== null && contextTokens > 0 && contextWindow) {
-      const raw = contextPercent !== null ? contextPercent : contextTokens / contextWindow * 100;
-      contextPct = `${Math.round(raw * 10) / 10}%`;
-    }
     if (debug) {
       this.emit({
         sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: `
-[token debug] stats=${JSON.stringify(stats?.tokens)} acc=${JSON.stringify(accDelta)} hasAccDelta=${hasAccDelta} hasStatsDelta=${hasStatsDelta}`
-        }
+        content: { type: "text", text: `
+[token debug] contextUsage=${JSON.stringify(stats?.contextUsage)}` }
       });
     }
     const parts = [];
-    if (turnTotal > 0) parts.push(`${turnTotal.toLocaleString()} tokens`);
-    if (contextPct) parts.push(contextPct);
+    if (contextTokens !== null && contextTokens > 0) {
+      parts.push(`${contextTokens.toLocaleString()} tokens`);
+      if (contextWindow) {
+        const raw = contextPercent !== null ? contextPercent : contextTokens / contextWindow * 100;
+        parts.push(`${Math.round(raw * 10) / 10}%`);
+      }
+    }
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
 
@@ -1391,17 +1377,6 @@ var PiAcpSession = class {
         break;
       }
       case "turn_end": {
-        const usage = ev?.usage ?? ev?.message?.usage;
-        if (usage && typeof usage === "object") {
-          const u = usage;
-          if (typeof u.input_tokens === "number") this.turnTokenAccumulator.input += u.input_tokens;
-          if (typeof u.output_tokens === "number") this.turnTokenAccumulator.output += u.output_tokens;
-          if (typeof u.cache_read_input_tokens === "number")
-            this.turnTokenAccumulator.cacheRead += u.cache_read_input_tokens;
-          if (typeof u.cache_creation_input_tokens === "number")
-            this.turnTokenAccumulator.cacheWrite += u.cache_creation_input_tokens;
-          this.turnTokenAccumulator.total = this.turnTokenAccumulator.input + this.turnTokenAccumulator.output + this.turnTokenAccumulator.cacheRead + this.turnTokenAccumulator.cacheWrite;
-        }
         break;
       }
       case "agent_end": {
@@ -1592,26 +1567,6 @@ function toToolKind(toolName) {
     default:
       return "other";
   }
-}
-function extractTokenCounts(t) {
-  if (!t || typeof t !== "object") return null;
-  const r = t;
-  return {
-    input: typeof r.input === "number" ? r.input : 0,
-    output: typeof r.output === "number" ? r.output : 0,
-    cacheRead: typeof r.cacheRead === "number" ? r.cacheRead : 0,
-    cacheWrite: typeof r.cacheWrite === "number" ? r.cacheWrite : 0,
-    total: typeof r.total === "number" ? r.total : 0
-  };
-}
-function subtractTokenCounts(a, b) {
-  return {
-    input: a.input - b.input,
-    output: a.output - b.output,
-    cacheRead: a.cacheRead - b.cacheRead,
-    cacheWrite: a.cacheWrite - b.cacheWrite,
-    total: a.total - b.total
-  };
 }
 
 // src/acp/pi-sessions.ts
