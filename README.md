@@ -26,6 +26,8 @@ Expect some minor breaking changes.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
+- Model picker respects pi's `enabledModels` setting
+  - When `enabledModels` is set in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`), the ACP model picker is scoped to those models, matching pi's own resolution (exact ids, `provider/*` globs, and partial matches). Patterns that resolve to no model are ignored just like in pi — note these are model **ids** (e.g. `anthropic/claude-sonnet-4-6`), not display names (`anthropic/Claude Sonnet 4.6`). The active model is always kept selectable.
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
@@ -163,7 +165,9 @@ Other built-in commands:
 
 - Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
 
-**Note**: Slash commands provided by pi extensions are not currently supported.
+#### 4) Extension commands
+
+- Slash commands contributed by pi extensions (from `pi`'s `get_commands`) are forwarded to the ACP client and run by sending the command to `pi`. Enabled by default; set `enableExtensionCommands: false` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`) to hide them.
 
 ## Authentication (ACP Registry support)
 

@@ -3,6 +3,7 @@ import type {
   ContentBlock,
   McpServer,
   PermissionOption,
+  SessionConfigOption,
   SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
@@ -313,6 +314,16 @@ export class PiAcpSession {
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
   private readonly turnQueue: QueuedTurn[] = []
+
+  // Names of pi-contributed slash commands (e.g. extension commands) advertised
+  // to the client. pi runs these synchronously and emits NO agent loop / `agent_end`,
+  // so a turn carrying such a command is completed on the prompt response instead.
+  private piExtensionCommandNames: Set<string> = new Set()
+
+  // Rebuilds the full ACP config-option set (model + thinking) from current pi
+  // state. Supplied by the agent so the session can refresh selectors when pi
+  // changes thinking/model outside of an ACP set request.
+  private refreshConfigOptions: (() => Promise<SessionConfigOption[]>) | null = null
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -357,6 +368,19 @@ export class PiAcpSession {
     this.startupInfo = text
     this.startupInfoSentOutOfTurn = false
     this.startupInfoSentInPrompt = false
+  }
+
+  // Register the pi-contributed slash commands the client may invoke. Used to
+  // recognise command turns that complete without an agent loop. Set independently
+  // of whether the commands are advertised, so manually-typed commands still resolve.
+  setPiExtensionCommands(names: Iterable<string>): void {
+    this.piExtensionCommandNames = new Set(names)
+  }
+
+  // Provide the builder used to refresh model/thinking selectors after pi changes
+  // them on its own (see the `thinking_level_changed` handler).
+  setConfigOptionsRefresher(refresh: () => Promise<SessionConfigOption[]>): void {
+    this.refreshConfigOptions = refresh
   }
 
   /**
@@ -541,38 +565,92 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
     // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          // Surface error message to client before completing the turn.
-          const errorMessage = String((err as any)?.message ?? err ?? 'Unknown error')
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Error: ${errorMessage}` }
-          })
-
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
-
-        this.pendingTurn = null
-        this.inAgentLoop = false
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+    this.proc.prompt(t.message, t.images).then(
+      () => {
+        // Recognised pi commands (e.g. extension slash commands) run synchronously and
+        // emit no agent loop, so pi never sends `agent_end`. Complete the turn on the
+        // prompt response instead. Model turns answer the prompt request early (before
+        // `agent_start`), so this only fires for known command messages.
+        if (!this.isExtensionCommandMessage(t.message)) return
+        void this.flushEmits().finally(() => {
+          this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
         })
+      },
+      err => {
+        // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
+        // Also ensure we flush any already-enqueued updates first.
+        void this.flushEmits().finally(() => {
+          // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
+          const authErr = maybeAuthRequiredError(err)
+          if (authErr) {
+            this.pendingTurn?.reject(authErr)
+          } else {
+            // Surface error message to client before completing the turn.
+            const errorMessage = err instanceof Error ? err.message : String(err ?? 'Unknown error')
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Error: ${errorMessage}` }
+            })
+
+            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+            this.pendingTurn?.resolve(reason)
+          }
+
+          this.pendingTurn = null
+          this.inAgentLoop = false
+
+          // If the prompt failed, do not automatically proceed—pi may be unhealthy.
+          // But we still clear the queueDepth metadata.
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          })
+        })
+      }
+    )
+  }
+
+  private isExtensionCommandMessage(message: string): boolean {
+    const trimmed = message.trimStart()
+    if (!trimmed.startsWith('/')) return false
+    const space = trimmed.indexOf(' ')
+    const name = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).trim()
+    return name.length > 0 && this.piExtensionCommandNames.has(name)
+  }
+
+  // Resolve the current turn and start the next queued one (if any). Shared by the
+  // `agent_end` event and synchronous command turns that produce no agent loop.
+  private completeTurn(reason: StopReason): void {
+    this.pendingTurn?.resolve(reason)
+    this.pendingTurn = null
+    this.inAgentLoop = false
+
+    const next = this.turnQueue.shift()
+    if (next) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
       })
-      void err
-    })
+      this.startTurn(next)
+    } else {
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { queueDepth: 0, running: false } }
+      })
+    }
+  }
+
+  // Best-effort refresh of the model/thinking selectors. A stale selector is
+  // preferable to crashing the event loop, so failures are swallowed.
+  private async pushConfigOptionUpdate(): Promise<void> {
+    const refresh = this.refreshConfigOptions
+    if (!refresh) return
+    try {
+      const configOptions = await refresh()
+      this.emit({ sessionUpdate: 'config_option_update', configOptions })
+    } catch {
+      // ignore
+    }
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -899,6 +977,19 @@ export class PiAcpSession {
         break
       }
 
+      case 'thinking_level_changed': {
+        // pi changed the reasoning level outside of an ACP set request (e.g. a model
+        // switch re-clamped it, or an extension/command changed it). Keep the client's
+        // selectors in sync: `current_mode_update` for legacy mode clients and a full
+        // `config_option_update` for config-option clients.
+        const level = stringProp(ev, 'level')
+        if (level) {
+          this.emit({ sessionUpdate: 'current_mode_update', currentModeId: level })
+        }
+        void this.pushConfigOptionUpdate()
+        break
+      }
+
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
         // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
@@ -909,25 +1000,7 @@ export class PiAcpSession {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
-          this.inAgentLoop = false
-
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
+          this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
         })
         break
       }

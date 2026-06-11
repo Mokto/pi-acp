@@ -25,20 +25,27 @@ export function toAvailableCommandsFromPiGetCommands(
 ): {
   commands: AvailableCommand[]
   raw: PiRpcCommandInfo[]
+  extensionCommandNames: string[]
 } {
   const enableSkillCommands = opts?.enableSkillCommands ?? true
   const includeExtensionCommands = opts?.includeExtensionCommands ?? false
 
   const root: any = data
-  const commandsRaw: PiRpcCommandInfo[] = Array.isArray(root?.commands) ? root.commands : Array.isArray(root?.data?.commands) ? root.data.commands : []
+  const commandsRaw: PiRpcCommandInfo[] = Array.isArray(root?.commands)
+    ? root.commands
+    : Array.isArray(root?.data?.commands)
+      ? root.data.commands
+      : []
 
   const out: AvailableCommand[] = []
+  const extensionCommandNames: string[] = []
 
   for (const c of commandsRaw) {
     const name = typeof c?.name === 'string' ? c.name.trim() : ''
     if (!name) continue
 
     const source = typeof c?.source === 'string' ? c.source : ''
+    if (source === 'extension') extensionCommandNames.push(name)
     if (!includeExtensionCommands && source === 'extension') continue
 
     if (!enableSkillCommands && name.startsWith('skill:')) continue
@@ -51,5 +58,5 @@ export function toAvailableCommandsFromPiGetCommands(
     })
   }
 
-  return { commands: out, raw: commandsRaw }
+  return { commands: out, raw: commandsRaw, extensionCommandNames }
 }

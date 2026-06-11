@@ -16,6 +16,8 @@ import {
   type PromptRequest,
   type PromptResponse,
   type SessionInfo,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
   type StopReason
@@ -37,10 +39,18 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
+import { buildSessionConfigOptions, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import {
+  getAgentDir,
+  getEnableExtensionCommands,
+  getEnableSkillCommands,
+  getEnabledModels,
+  getQuietStartup
+} from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
+import { resolveEnabledModelIds, type ScopeModel } from './model-scope.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
@@ -234,6 +244,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
@@ -302,8 +313,17 @@ export class PiAcpAgent implements ACPAgent {
       )
     }
 
-    const models = await getModelState(session.proc, { state, availableModels })
+    const models = await getModelState(session.proc, { state, availableModels, cwd: params.cwd })
     const thinking = await getThinkingState(session.proc, { state })
+
+    // Keep the client's model/thinking selectors in sync when pi changes them on
+    // its own (e.g. a model switch re-clamps thinking). Queries fresh state.
+    session.setConfigOptionsRefresher(async () =>
+      buildSessionConfigOptions(
+        await getModelState(session.proc, { cwd: params.cwd }),
+        await getThinkingState(session.proc)
+      )
+    )
 
     const quietStartup = getQuietStartup(params.cwd)
     const updateNotice = buildUpdateNotice()
@@ -334,6 +354,7 @@ export class PiAcpAgent implements ACPAgent {
       sessionId: session.sessionId,
       models,
       modes: thinking,
+      configOptions: buildSessionConfigOptions(models, thinking),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -352,10 +373,11 @@ export class PiAcpAgent implements ACPAgent {
       void (async () => {
         try {
           const pi = (await session.proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+          const { commands, extensionCommandNames } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: enableExtensionCommands
           })
+          session.setPiExtensionCommands(extensionCommandNames)
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -917,6 +939,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
@@ -1034,12 +1057,20 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const models = await getModelState(proc)
+    const models = await getModelState(proc, { cwd: params.cwd })
     const thinking = await getThinkingState(proc)
+
+    session.setConfigOptionsRefresher(async () =>
+      buildSessionConfigOptions(
+        await getModelState(session.proc, { cwd: params.cwd }),
+        await getThinkingState(session.proc)
+      )
+    )
 
     const response = {
       models,
       modes: thinking,
+      configOptions: buildSessionConfigOptions(models, thinking),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -1052,10 +1083,11 @@ export class PiAcpAgent implements ACPAgent {
       void (async () => {
         try {
           const pi = (await proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+          const { commands, extensionCommandNames } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
-            includeExtensionCommands: false
+            includeExtensionCommands: enableExtensionCommands
           })
+          session.setPiExtensionCommands(extensionCommandNames)
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -1084,36 +1116,67 @@ export class PiAcpAgent implements ACPAgent {
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = await this.autoRestoreSession(params.sessionId)
+    await this.applyModelSelection(session, params.modelId)
+  }
 
-    // Accept either:
-    //  - "provider/model" (preferred, matches how we advertise)
-    //  - "model" (fallback, we try to resolve via available models)
+  // Resolve a model identifier and apply it to the session's pi process.
+  // Accepts either "provider/model" (preferred, matches how we advertise) or a
+  // bare "model" id (resolved against pi's available models).
+  private async applyModelSelection(session: { proc: PiRpcProcess }, modelIdParam: string): Promise<void> {
     let provider: string | null = null
     let modelId: string | null = null
 
-    if (params.modelId.includes('/')) {
-      const [p, ...rest] = params.modelId.split('/')
+    if (modelIdParam.includes('/')) {
+      const [p, ...rest] = modelIdParam.split('/')
       provider = p
       modelId = rest.join('/')
     } else {
-      modelId = params.modelId
+      modelId = modelIdParam
     }
 
     if (!provider) {
-      const data = (await session.proc.getAvailableModels()) as any
-      const models: any[] = Array.isArray(data?.models) ? data.models : []
-      const found = models.find(m => String(m?.id) === modelId)
+      const found = findPiModelById(await session.proc.getAvailableModels(), modelId)
       if (found) {
-        provider = String(found.provider)
-        modelId = String(found.id)
+        provider = found.provider
+        modelId = found.id
       }
     }
 
     if (!provider || !modelId) {
-      throw RequestError.invalidParams(`Unknown modelId: ${params.modelId}`)
+      throw RequestError.invalidParams(`Unknown modelId: ${modelIdParam}`)
     }
 
     await session.proc.setModel(provider, modelId)
+  }
+
+  // ACP `session/set_config_option`. Recent clients drive both the model and
+  // reasoning pickers through config options rather than the `models`/`modes`
+  // fields. Apply the change, then return the full refreshed option set (which
+  // also reflects any thinking-level reclamping pi performs on a model switch).
+  async unstable_setSessionConfigOption(
+    params: SetSessionConfigOptionRequest
+  ): Promise<SetSessionConfigOptionResponse> {
+    const session = await this.autoRestoreSession(params.sessionId)
+
+    switch (params.configId) {
+      case MODEL_CONFIG_ID:
+        await this.applyModelSelection(session, String(params.value))
+        break
+      case THINKING_CONFIG_ID: {
+        const level = String(params.value)
+        if (!isThinkingLevel(level)) {
+          throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
+        }
+        await session.proc.setThinkingLevel(level)
+        break
+      }
+      default:
+        throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
+    }
+
+    const models = await getModelState(session.proc, { cwd: session.cwd })
+    const thinking = await getThinkingState(session.proc)
+    return { configOptions: buildSessionConfigOptions(models, thinking) }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1141,6 +1204,24 @@ export class PiAcpAgent implements ACPAgent {
 
 function isThinkingLevel(x: string): x is ThinkingLevel {
   return x === 'off' || x === 'minimal' || x === 'low' || x === 'medium' || x === 'high' || x === 'xhigh'
+}
+
+// Resolve a bare model id against pi's `get_available_models` payload (unknown
+// shape from the RPC bridge), returning the matching provider + id pair.
+function findPiModelById(data: unknown, id: string | null): { provider: string; id: string } | undefined {
+  if (!id || !data || typeof data !== 'object') return undefined
+  const models = (data as { models?: unknown }).models
+  if (!Array.isArray(models)) return undefined
+
+  for (const entry of models) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as { id?: unknown; provider?: unknown }
+    if (String(record.id) !== id) continue
+    const provider = String(record.provider ?? '').trim()
+    if (provider) return { provider, id }
+  }
+
+  return undefined
 }
 
 async function getThinkingState(
@@ -1184,7 +1265,7 @@ async function getThinkingState(
 
 async function getModelState(
   proc: PiRpcProcess,
-  pre?: { state?: any | null; availableModels?: any | null }
+  pre?: { state?: any | null; availableModels?: any | null; cwd?: string }
 ): Promise<{
   availableModels: ModelInfo[]
   currentModelId: string
@@ -1236,6 +1317,27 @@ async function getModelState(
     const provider = String((model as any).provider ?? '').trim()
     const id = String((model as any).id ?? '').trim()
     if (provider && id) currentModelId = `${provider}/${id}`
+  }
+
+  // Scope the advertised models to pi's `enabledModels` setting (pi never
+  // exposes its resolved scope over RPC, so we reproduce the matching). The
+  // active model is always kept so the picker's current selection stays valid.
+  if (pre?.cwd) {
+    const patterns = getEnabledModels(pre.cwd)
+    if (patterns) {
+      const scopeModels: ScopeModel[] = []
+      for (const m of models) {
+        const provider = String(m?.provider ?? '').trim()
+        const id = String(m?.id ?? '').trim()
+        if (!provider || !id) continue
+        scopeModels.push({ provider, id, name: typeof m?.name === 'string' ? m.name : undefined })
+      }
+
+      const allowed = resolveEnabledModelIds(scopeModels, patterns)
+      if (allowed.size > 0) {
+        availableModels = availableModels.filter(m => allowed.has(m.modelId) || m.modelId === currentModelId)
+      }
+    }
   }
 
   if (!availableModels.length && !currentModelId) return null

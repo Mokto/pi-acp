@@ -52,6 +52,9 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
       },
       sendStartupInfoIfPending() {
         // may be called when an update notice is available
+      },
+      setConfigOptionsRefresher(_refresh: () => Promise<unknown>) {
+        // no-op; selector refresh is not exercised here
       }
     }
 

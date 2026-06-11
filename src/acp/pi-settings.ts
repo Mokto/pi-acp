@@ -58,6 +58,35 @@ export function getEnableSkillCommands(cwd: string): boolean {
 }
 
 /**
+ * Whether slash commands contributed by pi extensions are forwarded to the ACP
+ * client. Defaults to true; set `enableExtensionCommands: false` in pi settings
+ * to hide them.
+ */
+export function getEnableExtensionCommands(cwd: string): boolean {
+  const merged = getMergedSettings(cwd)
+
+  const direct = merged.enableExtensionCommands
+  if (typeof direct === 'boolean') return direct
+
+  return true
+}
+
+/**
+ * Mirror pi's `enabledModels` setting (global + project merge, project overrides
+ * global): the list of model patterns the user has scoped their model picker to.
+ * Returns undefined when unset or empty, meaning "all models".
+ */
+export function getEnabledModels(cwd: string): string[] | undefined {
+  const merged = getMergedSettings(cwd)
+
+  const value = merged.enabledModels
+  if (!Array.isArray(value)) return undefined
+
+  const patterns = value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+  return patterns.length > 0 ? patterns : undefined
+}
+
+/**
  * Mirror pi's quietStartup setting: if true, pi suppresses the verbose startup prelude.
  * We use it to decide whether to synthesize + emit our own "startup info" message.
  */
