@@ -827,9 +827,13 @@ var PiAcpSession = class {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
-  // Tracks cumulative session token counts from the last `getSessionStats` call so we
-  // can compute a per-turn delta and emit it after each `agent_end`.
-  lastTokenStats = null;
+  // Token counts accumulated from `turn_end` events (inline usage, when pi provides it).
+  // Also used as fallback from `getSessionStats()` after `agent_end`.
+  turnTokenAccumulator = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  // Snapshot at the start of each turn so we can compute a per-turn delta.
+  turnTokenBaseline = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  // Context window size reported by pi (updated from getSessionStats).
+  contextWindow = null;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -981,6 +985,7 @@ var PiAcpSession = class {
   startTurn(t) {
     this.cancelRequested = false;
     this.inAgentLoop = false;
+    this.turnTokenBaseline = { ...this.turnTokenAccumulator };
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.emit({
       sessionUpdate: "session_info_update",
@@ -1057,14 +1062,56 @@ var PiAcpSession = class {
   }
   async maybeEmitTokenStats() {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
+    const debug = process.env.PI_ACP_DEBUG_TOKEN_USAGE === "true";
+    let stats = null;
+    let contextWindow = this.contextWindow;
+    let contextTokens = null;
+    let contextPercent = null;
     try {
-      const stats = await this.proc.getSessionStats();
-      const line = buildTokenDeltaLine(stats?.tokens, this.lastTokenStats);
-      const current = extractTokenCounts(stats?.tokens);
-      if (current) this.lastTokenStats = current;
-      if (line) this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: line } });
-    } catch {
+      stats = await this.proc.getSessionStats();
+      if (stats?.contextUsage && typeof stats.contextUsage === "object") {
+        const cu = stats.contextUsage;
+        if (typeof cu.contextWindow === "number") {
+          contextWindow = cu.contextWindow;
+          this.contextWindow = contextWindow;
+        }
+        if (typeof cu.tokens === "number") contextTokens = cu.tokens;
+        if (typeof cu.percent === "number") contextPercent = cu.percent;
+      }
+    } catch (err) {
+      if (debug)
+        this.emit({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `[token debug] getSessionStats error: ${String(err)}` }
+        });
     }
+    const statsTokens = extractTokenCounts(stats?.tokens);
+    const accDelta = subtractTokenCounts(this.turnTokenAccumulator, this.turnTokenBaseline);
+    const hasAccDelta = accDelta.total > 0 || accDelta.input > 0 || accDelta.output > 0;
+    const hasStatsDelta = statsTokens && (statsTokens.total > 0 || statsTokens.input > 0);
+    let tokenLine = null;
+    if (hasAccDelta) {
+      tokenLine = buildTokenCountsLine(accDelta);
+    } else if (hasStatsDelta) {
+      tokenLine = buildTokenCountsLine(statsTokens);
+    }
+    let contextLine = null;
+    if (contextTokens !== null && contextTokens > 0 && contextWindow) {
+      const pct = contextPercent !== null ? contextPercent : Math.round(contextTokens / contextWindow * 100);
+      contextLine = `context: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${pct}%)`;
+    }
+    if (debug) {
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: `[token debug] stats=${JSON.stringify(stats?.tokens)} acc=${JSON.stringify(accDelta)} hasAccDelta=${hasAccDelta} hasStatsDelta=${hasStatsDelta}`
+        }
+      });
+    }
+    const parts = [tokenLine, contextLine].filter(Boolean);
+    if (parts.length)
+      this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\u21B3 ${parts.join(" \xB7 ")}` } });
   }
   handlePiEvent(ev) {
     const type = String(ev.type ?? "");
@@ -1344,6 +1391,17 @@ var PiAcpSession = class {
         break;
       }
       case "turn_end": {
+        const usage = ev?.usage ?? ev?.message?.usage;
+        if (usage && typeof usage === "object") {
+          const u = usage;
+          if (typeof u.input_tokens === "number") this.turnTokenAccumulator.input += u.input_tokens;
+          if (typeof u.output_tokens === "number") this.turnTokenAccumulator.output += u.output_tokens;
+          if (typeof u.cache_read_input_tokens === "number")
+            this.turnTokenAccumulator.cacheRead += u.cache_read_input_tokens;
+          if (typeof u.cache_creation_input_tokens === "number")
+            this.turnTokenAccumulator.cacheWrite += u.cache_creation_input_tokens;
+          this.turnTokenAccumulator.total = this.turnTokenAccumulator.input + this.turnTokenAccumulator.output + this.turnTokenAccumulator.cacheRead + this.turnTokenAccumulator.cacheWrite;
+        }
         break;
       }
       case "agent_end": {
@@ -1546,24 +1604,23 @@ function extractTokenCounts(t) {
     total: typeof r.total === "number" ? r.total : 0
   };
 }
-function buildTokenDeltaLine(rawTokens, prev) {
-  const current = extractTokenCounts(rawTokens);
-  if (!current) return null;
-  const delta = prev ? {
-    input: current.input - prev.input,
-    output: current.output - prev.output,
-    cacheRead: current.cacheRead - prev.cacheRead,
-    cacheWrite: current.cacheWrite - prev.cacheWrite,
-    total: current.total - prev.total
-  } : current;
-  if (delta.total <= 0 && delta.input <= 0 && delta.output <= 0) return null;
+function subtractTokenCounts(a, b) {
+  return {
+    input: a.input - b.input,
+    output: a.output - b.output,
+    cacheRead: a.cacheRead - b.cacheRead,
+    cacheWrite: a.cacheWrite - b.cacheWrite,
+    total: a.total - b.total
+  };
+}
+function buildTokenCountsLine(t) {
   const parts = [];
-  if (delta.input > 0) parts.push(`in ${delta.input.toLocaleString()}`);
-  if (delta.output > 0) parts.push(`out ${delta.output.toLocaleString()}`);
-  if (delta.cacheRead > 0) parts.push(`cache\u2191 ${delta.cacheRead.toLocaleString()}`);
-  if (delta.cacheWrite > 0) parts.push(`cache\u2193 ${delta.cacheWrite.toLocaleString()}`);
-  if (delta.total > 0) parts.push(`total ${delta.total.toLocaleString()}`);
-  return parts.length ? `\u21B3 ${parts.join(" \xB7 ")}` : null;
+  if (t.input > 0) parts.push(`in ${t.input.toLocaleString()}`);
+  if (t.output > 0) parts.push(`out ${t.output.toLocaleString()}`);
+  if (t.cacheRead > 0) parts.push(`cache\u2191 ${t.cacheRead.toLocaleString()}`);
+  if (t.cacheWrite > 0) parts.push(`cache\u2193 ${t.cacheWrite.toLocaleString()}`);
+  if (t.total > 0) parts.push(`total ${t.total.toLocaleString()}`);
+  return parts.length ? parts.join(" \xB7 ") : null;
 }
 
 // src/acp/pi-sessions.ts
