@@ -1107,9 +1107,10 @@ var PiAcpSession = class {
     }
     const parts = [];
     if (turnTotal > 0) parts.push(`${turnTotal.toLocaleString()} tokens`);
-    if (contextPct) parts.push(`${contextPct} context`);
+    if (contextPct) parts.push(contextPct);
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
+
 \u21B3 ${parts.join(" \xB7 ")}` } });
   }
   handlePiEvent(ev) {
