@@ -69,6 +69,44 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 
 - **DO NOT** commit unless explicitly asked!
 
+## Releasing (this fork: `Mokto/pi-acp`)
+
+This fork ships as a **GitHub release with a prebuilt tarball asset**, not on npm — the `pi-acp` npm name belongs to upstream (`deepstereo`/svkozak). Users install with `npm i -g <release-asset-url>` (see the README "Install this fork's release" section).
+
+To cut a release for version `X.Y.Z`:
+
+1. Clean working tree on `main`. Run the gate: `npm run typecheck && npm run lint && npm run test` — all must pass.
+2. Bump the version without a git tag: `npm version <patch|minor|major> --no-git-tag-version`.
+3. Rebuild and commit the built output:
+   ```bash
+   npm run build
+   git add package.json package-lock.json dist
+   git commit -m "release: vX.Y.Z"
+   ```
+4. Tag and push: `git tag -a vX.Y.Z -m "pi-acp vX.Y.Z" && git push origin main vX.Y.Z`.
+5. Build the install tarballs and create the release (attach **both** the versioned tarball and a stable-named `pi-acp.tgz` so `releases/latest/download/pi-acp.tgz` keeps resolving):
+   ```bash
+   npm pack                       # -> pi-acp-X.Y.Z.tgz
+   cp pi-acp-X.Y.Z.tgz pi-acp.tgz
+   gh release create vX.Y.Z --repo Mokto/pi-acp --title "vX.Y.Z" --generate-notes \
+     pi-acp-X.Y.Z.tgz pi-acp.tgz
+   rm -f pi-acp-X.Y.Z.tgz pi-acp.tgz
+   ```
+6. Verify the published install in an isolated prefix (expect a JSON-RPC result reporting the new version):
+   ```bash
+   PFX=$(mktemp -d)
+   npm i -g --prefix "$PFX" https://github.com/Mokto/pi-acp/releases/latest/download/pi-acp.tgz
+   printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n' \
+     | node "$PFX/bin/pi-acp"
+   ```
+
+### Release gotchas (why it works this way)
+
+- **Do NOT advertise `npm i -g github:Mokto/pi-acp#vX.Y.Z`** — it is broken. npm symlinks global git-dependency installs into a transient `_cacache/tmp` clone that is then deleted, leaving the `bin` dangling with no `dist`. The release-asset tarball avoids this.
+- **`dist/` is committed on purpose** (tracked in git, but excluded from prettier/lint) so the repo is self-contained and `npm pack` always ships a current build. There is intentionally **no `prepack`/`prepare` script**: those run a build during git/pack/install flows where devDependencies are unavailable (`tsup: command not found`) and break installs. `prepublishOnly` still builds before any future `npm publish`.
+- **Always `npm run build` before committing/packing** so committed `dist/` never drifts from `src/`.
+- **`github-release.yml` does not auto-run on a freshly forked repo** until Actions is enabled once via the GitHub UI (repo → Actions tab → enable). Until then, create releases manually with `gh release create` as above. `npm-publish.yml` targets the npm path and would 403 on this fork (the npm name isn't ours).
+
 ## Client information
 
 - Current ACP client is Zed
