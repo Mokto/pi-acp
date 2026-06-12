@@ -1255,13 +1255,21 @@ var PiAcpSession = class {
           this.emitBashOutputUpdate({ toolCallId, status: "in_progress", result: partial });
           break;
         }
-        const text = this.fileMutationToolCallIds.has(toolCallId) ? "" : toolResultToText(partial);
         const customTitle = typeof partial?.details?._label === "string" ? partial.details._label : void 0;
+        if (customTitle) {
+          this.emit({
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "in_progress",
+            title: customTitle
+          });
+          break;
+        }
+        const text = this.fileMutationToolCallIds.has(toolCallId) ? "" : toolResultToText(partial);
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: "in_progress",
-          ...customTitle ? { title: customTitle } : {},
           content: text ? [{ type: "content", content: { type: "text", text } }] : void 0,
           ...this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial }
         });

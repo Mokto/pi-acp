@@ -896,14 +896,27 @@ export class PiAcpSession {
           break
         }
 
-        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
         // Extensions can pass a custom ACP title via onUpdate({ details: { _label: '...' } })
         const customTitle = typeof partial?.details?._label === 'string' ? partial.details._label : undefined
+        // Label-only updates: just update the title, skip content/rawOutput to avoid sending
+        // the partial result object (e.g. { content: [], details: { _label: '...' } }) as rawOutput,
+        // which would cause toolResultToText to JSON-stringify it and Zed to treat it as the
+        // tool's final result (empty content → hidden tool card).
+        if (customTitle) {
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'in_progress',
+            title: customTitle
+          })
+          break
+        }
+
+        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: 'in_progress',
-          ...(customTitle ? { title: customTitle } : {}),
           content: text
             ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
             : undefined,
