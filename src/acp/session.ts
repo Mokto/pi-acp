@@ -51,6 +51,10 @@ type QueuedTurn = {
   reject: (err: unknown) => void
 }
 
+type DeferredModel = { provider: string; modelId: string }
+
+const DEFAULT_TURN_WATCHDOG_MS = 60_000
+
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
 const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
@@ -314,6 +318,12 @@ export class PiAcpSession {
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
   private readonly turnQueue: QueuedTurn[] = []
+  private turnWatchdog: ReturnType<typeof setTimeout> | null = null
+
+  // Model/thinking changes from the client are deferred while a turn is active so
+  // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
+  private deferredModel: DeferredModel | null = null
+  private deferredThinkingLevel: string | null = null
 
   // Names of pi-contributed slash commands (e.g. extension commands) advertised
   // to the client. pi runs these synchronously and emits NO agent loop / `agent_end`,
@@ -479,6 +489,26 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
+  hasActiveTurn(): boolean {
+    return this.pendingTurn !== null
+  }
+
+  async setModelWhenIdle(provider: string, modelId: string): Promise<void> {
+    if (this.pendingTurn) {
+      this.deferredModel = { provider, modelId }
+      return
+    }
+    await this.proc.setModel(provider, modelId)
+  }
+
+  async setThinkingLevelWhenIdle(level: string): Promise<void> {
+    if (this.pendingTurn) {
+      this.deferredThinkingLevel = level
+      return
+    }
+    await this.proc.setThinkingLevel(level as Parameters<PiRpcProcess['setThinkingLevel']>[0])
+  }
+
   private emit(update: SessionUpdate): void {
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
@@ -553,10 +583,64 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
+  private turnWatchdogMs(): number {
+    const raw = process.env.PI_ACP_TURN_TIMEOUT_MS
+    if (!raw) return DEFAULT_TURN_WATCHDOG_MS
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_WATCHDOG_MS
+  }
+
+  private armTurnWatchdog(): void {
+    this.clearTurnWatchdog()
+    this.turnWatchdog = setTimeout(() => {
+      void this.handleTurnWatchdog()
+    }, this.turnWatchdogMs())
+  }
+
+  private clearTurnWatchdog(): void {
+    if (!this.turnWatchdog) return
+    clearTimeout(this.turnWatchdog)
+    this.turnWatchdog = null
+  }
+
+  private async handleTurnWatchdog(): Promise<void> {
+    if (!this.pendingTurn) return
+
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Turn timed out waiting for pi to finish; aborting and recovering.'
+      }
+    })
+
+    try {
+      await this.proc.abort()
+    } catch {
+      // ignore
+    }
+
+    await this.flushEmits()
+    this.completeTurn('error')
+  }
+
+  private async flushDeferredConfig(): Promise<void> {
+    const model = this.deferredModel
+    const thinking = this.deferredThinkingLevel
+    this.deferredModel = null
+    this.deferredThinkingLevel = null
+
+    if (model) await this.proc.setModel(model.provider, model.modelId)
+    if (thinking) {
+      await this.proc.setThinkingLevel(thinking as Parameters<PiRpcProcess['setThinkingLevel']>[0])
+    }
+  }
+
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.armTurnWatchdog()
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -600,6 +684,7 @@ export class PiAcpSession {
 
           this.pendingTurn = null
           this.inAgentLoop = false
+          this.clearTurnWatchdog()
 
           // If the prompt failed, do not automatically proceed—pi may be unhealthy.
           // But we still clear the queueDepth metadata.
@@ -623,10 +708,15 @@ export class PiAcpSession {
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
   private completeTurn(reason: StopReason): void {
+    this.clearTurnWatchdog()
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
     this.inAgentLoop = false
 
+    void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn())
+  }
+
+  private startNextQueuedTurn(): void {
     const next = this.turnQueue.shift()
     if (next) {
       this.emit({
@@ -634,12 +724,13 @@ export class PiAcpSession {
         content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
       })
       this.startTurn(next)
-    } else {
-      this.emit({
-        sessionUpdate: 'session_info_update',
-        _meta: { piAcp: { queueDepth: 0, running: false } }
-      })
+      return
     }
+
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: 0, running: false } }
+    })
   }
 
   // Best-effort refresh of the model/thinking selectors. A stale selector is
@@ -1269,10 +1360,14 @@ function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
 
   // For tools with a query/url/command arg, append it for context.
   const a = args as Record<string, unknown> | null | undefined
-  const hint = typeof a?.query === 'string' ? a.query
-    : typeof a?.url === 'string' ? a.url
-    : typeof a?.command === 'string' ? a.command
-    : undefined
+  const hint =
+    typeof a?.query === 'string'
+      ? a.query
+      : typeof a?.url === 'string'
+        ? a.url
+        : typeof a?.command === 'string'
+          ? a.command
+          : undefined
   if (hint) return `${toolVerb(toolName)}: ${truncateTitle(hint)}`
 
   return toolVerb(toolName)
@@ -1310,5 +1405,3 @@ function toToolKind(toolName: string): ToolKind {
       return 'other'
   }
 }
-
-

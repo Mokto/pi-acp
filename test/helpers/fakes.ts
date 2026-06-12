@@ -53,12 +53,27 @@ export class FakePiRpcProcess {
     this.extensionUiResponses.push(response)
   }
 
-  async getState(): Promise<any> {
-    return {}
-  }
+  readonly setModelCalls: Array<{ provider: string; modelId: string }> = []
+  readonly setThinkingCalls: string[] = []
+  private currentModel = { provider: 'test', id: 'model' }
+  private thinkingLevel = 'medium'
 
   async getAvailableModels(): Promise<any> {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
+  }
+
+  async getState(): Promise<any> {
+    return { model: this.currentModel, thinkingLevel: this.thinkingLevel }
+  }
+
+  async setModel(provider: string, modelId: string): Promise<void> {
+    this.setModelCalls.push({ provider, modelId })
+    this.currentModel = { provider, id: modelId }
+  }
+
+  async setThinkingLevel(level: string): Promise<void> {
+    this.setThinkingCalls.push(level)
+    this.thinkingLevel = level
   }
 
   async getMessages(): Promise<any> {

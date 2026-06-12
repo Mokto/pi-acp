@@ -23,7 +23,7 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager } from './session.js'
+import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
@@ -1122,7 +1122,7 @@ export class PiAcpAgent implements ACPAgent {
   // Resolve a model identifier and apply it to the session's pi process.
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
-  private async applyModelSelection(session: { proc: PiRpcProcess }, modelIdParam: string): Promise<void> {
+  private async applyModelSelection(session: PiAcpSession, modelIdParam: string): Promise<void> {
     let provider: string | null = null
     let modelId: string | null = null
 
@@ -1146,7 +1146,7 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown modelId: ${modelIdParam}`)
     }
 
-    await session.proc.setModel(provider, modelId)
+    await session.setModelWhenIdle(provider, modelId)
   }
 
   // ACP `session/set_config_option`. Recent clients drive both the model and
@@ -1167,7 +1167,7 @@ export class PiAcpAgent implements ACPAgent {
         if (!isThinkingLevel(level)) {
           throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
         }
-        await session.proc.setThinkingLevel(level)
+        await session.setThinkingLevelWhenIdle(level)
         break
       }
       default:
@@ -1187,7 +1187,7 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown modeId: ${mode}`)
     }
 
-    await session.proc.setThinkingLevel(mode)
+    await session.setThinkingLevelWhenIdle(mode)
 
     // Let the client know the current mode changed (keeps the dropdown in sync).
     void this.conn.sessionUpdate({

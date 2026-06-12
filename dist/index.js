@@ -604,6 +604,7 @@ function expandSlashCommand(text, fileCommands) {
 }
 
 // src/acp/session.ts
+var DEFAULT_TURN_WATCHDOG_MS = 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
   { optionId: "no", name: "No", kind: "reject_once" }
@@ -812,6 +813,11 @@ var PiAcpSession = class {
   // Current in-flight turn (if any). Additional prompts are queued.
   pendingTurn = null;
   turnQueue = [];
+  turnWatchdog = null;
+  // Model/thinking changes from the client are deferred while a turn is active so
+  // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
+  deferredModel = null;
+  deferredThinkingLevel = null;
   // Names of pi-contributed slash commands (e.g. extension commands) advertised
   // to the client. pi runs these synchronously and emits NO agent loop / `agent_end`,
   // so a turn carrying such a command is completed on the prompt response instead.
@@ -929,6 +935,23 @@ var PiAcpSession = class {
   wasCancelRequested() {
     return this.cancelRequested;
   }
+  hasActiveTurn() {
+    return this.pendingTurn !== null;
+  }
+  async setModelWhenIdle(provider, modelId) {
+    if (this.pendingTurn) {
+      this.deferredModel = { provider, modelId };
+      return;
+    }
+    await this.proc.setModel(provider, modelId);
+  }
+  async setThinkingLevelWhenIdle(level) {
+    if (this.pendingTurn) {
+      this.deferredThinkingLevel = level;
+      return;
+    }
+    await this.proc.setThinkingLevel(level);
+  }
   emit(update) {
     this.lastEmit = this.lastEmit.then(
       () => this.conn.sessionUpdate({
@@ -977,10 +1000,54 @@ var PiAcpSession = class {
     this.bashToolCallIds.delete(toolCallId);
     this.bashOutputSnapshots.delete(toolCallId);
   }
+  turnWatchdogMs() {
+    const raw = process.env.PI_ACP_TURN_TIMEOUT_MS;
+    if (!raw) return DEFAULT_TURN_WATCHDOG_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_WATCHDOG_MS;
+  }
+  armTurnWatchdog() {
+    this.clearTurnWatchdog();
+    this.turnWatchdog = setTimeout(() => {
+      void this.handleTurnWatchdog();
+    }, this.turnWatchdogMs());
+  }
+  clearTurnWatchdog() {
+    if (!this.turnWatchdog) return;
+    clearTimeout(this.turnWatchdog);
+    this.turnWatchdog = null;
+  }
+  async handleTurnWatchdog() {
+    if (!this.pendingTurn) return;
+    this.emit({
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "Turn timed out waiting for pi to finish; aborting and recovering."
+      }
+    });
+    try {
+      await this.proc.abort();
+    } catch {
+    }
+    await this.flushEmits();
+    this.completeTurn("error");
+  }
+  async flushDeferredConfig() {
+    const model = this.deferredModel;
+    const thinking = this.deferredThinkingLevel;
+    this.deferredModel = null;
+    this.deferredThinkingLevel = null;
+    if (model) await this.proc.setModel(model.provider, model.modelId);
+    if (thinking) {
+      await this.proc.setThinkingLevel(thinking);
+    }
+  }
   startTurn(t) {
     this.cancelRequested = false;
     this.inAgentLoop = false;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
+    this.armTurnWatchdog();
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -1008,6 +1075,7 @@ var PiAcpSession = class {
           }
           this.pendingTurn = null;
           this.inAgentLoop = false;
+          this.clearTurnWatchdog();
           this.emit({
             sessionUpdate: "session_info_update",
             _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
@@ -1026,9 +1094,13 @@ var PiAcpSession = class {
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
   completeTurn(reason) {
+    this.clearTurnWatchdog();
     this.pendingTurn?.resolve(reason);
     this.pendingTurn = null;
     this.inAgentLoop = false;
+    void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn());
+  }
+  startNextQueuedTurn() {
     const next = this.turnQueue.shift();
     if (next) {
       this.emit({
@@ -1036,12 +1108,12 @@ var PiAcpSession = class {
         content: { type: "text", text: `Starting queued message. (${this.turnQueue.length} remaining)` }
       });
       this.startTurn(next);
-    } else {
-      this.emit({
-        sessionUpdate: "session_info_update",
-        _meta: { piAcp: { queueDepth: 0, running: false } }
-      });
+      return;
     }
+    this.emit({
+      sessionUpdate: "session_info_update",
+      _meta: { piAcp: { queueDepth: 0, running: false } }
+    });
   }
   // Best-effort refresh of the model/thinking selectors. A stale selector is
   // preferable to crashing the event loop, so failures are swallowed.
@@ -2997,7 +3069,7 @@ ${JSON.stringify(stats, null, 2)}`;
     if (!provider || !modelId) {
       throw RequestError3.invalidParams(`Unknown modelId: ${modelIdParam}`);
     }
-    await session.proc.setModel(provider, modelId);
+    await session.setModelWhenIdle(provider, modelId);
   }
   // ACP `session/set_config_option`. Recent clients drive both the model and
   // reasoning pickers through config options rather than the `models`/`modes`
@@ -3014,7 +3086,7 @@ ${JSON.stringify(stats, null, 2)}`;
         if (!isThinkingLevel(level)) {
           throw RequestError3.invalidParams(`Unknown thinking level: ${params.value}`);
         }
-        await session.proc.setThinkingLevel(level);
+        await session.setThinkingLevelWhenIdle(level);
         break;
       }
       default:
@@ -3030,7 +3102,7 @@ ${JSON.stringify(stats, null, 2)}`;
     if (!isThinkingLevel(mode)) {
       throw RequestError3.invalidParams(`Unknown modeId: ${mode}`);
     }
-    await session.proc.setThinkingLevel(mode);
+    await session.setThinkingLevelWhenIdle(mode);
     void this.conn.sessionUpdate({
       sessionId: session.sessionId,
       update: {

@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from '../../src/acp/agent.js'
+import { PiAcpSession } from '../../src/acp/session.js'
+import type { PiRpcProcess } from '../../src/pi-rpc/process.js'
 
 type PiModel = { provider: string; id: string; name: string }
 
@@ -37,10 +39,14 @@ class FakeProc {
     this.setThinkingCalls.push(level)
     this.thinkingLevel = level
   }
+
+  onEvent() {
+    return () => {}
+  }
 }
 
 class FakeSessions {
-  constructor(private readonly session: { sessionId: string; proc: FakeProc }) {}
+  constructor(private readonly session: PiAcpSession) {}
   maybeGet() {
     return this.session
   }
@@ -52,7 +58,15 @@ class FakeSessions {
 function makeAgent(proc: FakeProc): PiAcpAgent {
   const conn = { async sessionUpdate() {} } as unknown as AgentSideConnection
   const agent = new PiAcpAgent(conn)
-  ;(agent as unknown as { sessions: FakeSessions }).sessions = new FakeSessions({ sessionId: 's1', proc })
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn,
+    fileCommands: []
+  })
+  ;(agent as unknown as { sessions: FakeSessions }).sessions = new FakeSessions(session)
   return agent
 }
 
