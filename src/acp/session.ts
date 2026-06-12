@@ -897,10 +897,13 @@ export class PiAcpSession {
         }
 
         const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+        // Extensions can pass a custom ACP title via onUpdate({ details: { _label: '...' } })
+        const customTitle = typeof partial?.details?._label === 'string' ? partial.details._label : undefined
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: 'in_progress',
+          ...(customTitle ? { title: customTitle } : {}),
           content: text
             ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
             : undefined,
@@ -1227,31 +1230,12 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 
-/**
- * Static labels for zero-argument gateway tools (ocean-debug-tools).
- * These tools have no args so toToolTitle can't derive context from them.
- */
-const GATEWAY_TOOL_TITLES: Record<string, string> = {
-  sentry: 'Loading Sentry tools...',
-  k8s: 'Loading Kubernetes tools...',
-  rabbitmq: 'Loading RabbitMQ tools...',
-  postgresql: 'Loading PostgreSQL tools...',
-  scylladb: 'Loading ScyllaDB tools...',
-  clickhouse: 'Loading ClickHouse tools...',
-  redis: 'Loading Redis tools...',
-  elasticsearch: 'Loading Elasticsearch tools...',
-  argocd: 'Loading ArgoCD tools...',
-}
-
 /** Truncate a string for display in tool titles. */
 function truncateTitle(s: string, max = 60): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`
 }
 
 function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
-  const gatewayTitle = GATEWAY_TOOL_TITLES[toolName]
-  if (gatewayTitle) return gatewayTitle
-
   const p = getToolPath(args)
   if (p) {
     // Show a short relative path when possible; fall back to basename, then full path.

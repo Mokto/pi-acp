@@ -1256,10 +1256,12 @@ var PiAcpSession = class {
           break;
         }
         const text = this.fileMutationToolCallIds.has(toolCallId) ? "" : toolResultToText(partial);
+        const customTitle = typeof partial?.details?._label === "string" ? partial.details._label : void 0;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: "in_progress",
+          ...customTitle ? { title: customTitle } : {},
           content: text ? [{ type: "content", content: { type: "text", text } }] : void 0,
           ...this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial }
         });
@@ -1522,23 +1524,10 @@ function formatAutoRetryMessage(ev) {
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
-var GATEWAY_TOOL_TITLES = {
-  sentry: "Loading Sentry tools...",
-  k8s: "Loading Kubernetes tools...",
-  rabbitmq: "Loading RabbitMQ tools...",
-  postgresql: "Loading PostgreSQL tools...",
-  scylladb: "Loading ScyllaDB tools...",
-  clickhouse: "Loading ClickHouse tools...",
-  redis: "Loading Redis tools...",
-  elasticsearch: "Loading Elasticsearch tools...",
-  argocd: "Loading ArgoCD tools..."
-};
 function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
 }
 function toToolTitle(toolName, args, cwd) {
-  const gatewayTitle = GATEWAY_TOOL_TITLES[toolName];
-  if (gatewayTitle) return gatewayTitle;
   const p = getToolPath(args);
   if (p) {
     let display = p;
