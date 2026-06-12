@@ -604,7 +604,7 @@ function expandSlashCommand(text, fileCommands) {
 }
 
 // src/acp/session.ts
-var DEFAULT_TURN_WATCHDOG_MS = 6e4;
+var DEFAULT_TURN_INACTIVITY_MS = 5 * 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
   { optionId: "no", name: "No", kind: "reject_once" }
@@ -1000,17 +1000,18 @@ var PiAcpSession = class {
     this.bashToolCallIds.delete(toolCallId);
     this.bashOutputSnapshots.delete(toolCallId);
   }
-  turnWatchdogMs() {
-    const raw = process.env.PI_ACP_TURN_TIMEOUT_MS;
-    if (!raw) return DEFAULT_TURN_WATCHDOG_MS;
+  turnInactivityMs() {
+    const raw = process.env.PI_ACP_TURN_INACTIVITY_MS ?? process.env.PI_ACP_TURN_TIMEOUT_MS;
+    if (!raw) return DEFAULT_TURN_INACTIVITY_MS;
     const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_WATCHDOG_MS;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_INACTIVITY_MS;
   }
-  armTurnWatchdog() {
+  resetTurnWatchdog() {
+    if (!this.pendingTurn) return;
     this.clearTurnWatchdog();
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog();
-    }, this.turnWatchdogMs());
+    }, this.turnInactivityMs());
   }
   clearTurnWatchdog() {
     if (!this.turnWatchdog) return;
@@ -1023,7 +1024,7 @@ var PiAcpSession = class {
       sessionUpdate: "agent_message_chunk",
       content: {
         type: "text",
-        text: "Turn timed out waiting for pi to finish; aborting and recovering."
+        text: "Turn timed out due to pi inactivity; aborting and recovering."
       }
     });
     try {
@@ -1047,7 +1048,7 @@ var PiAcpSession = class {
     this.cancelRequested = false;
     this.inAgentLoop = false;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
-    this.armTurnWatchdog();
+    this.resetTurnWatchdog();
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -1172,6 +1173,7 @@ var PiAcpSession = class {
 \u21B3 ${parts.join(" \xB7 ")}` } });
   }
   handlePiEvent(ev) {
+    if (this.pendingTurn) this.resetTurnWatchdog();
     const type = String(ev.type ?? "");
     switch (type) {
       case "message_update": {

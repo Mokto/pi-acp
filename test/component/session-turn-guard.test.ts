@@ -51,9 +51,31 @@ test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes a
   assert.deepEqual(proc.setThinkingCalls, ['high'])
 })
 
+test('PiAcpSession: pi activity resets the inactivity watchdog', async () => {
+  const previousTimeout = process.env.PI_ACP_TURN_INACTIVITY_MS
+  process.env.PI_ACP_TURN_INACTIVITY_MS = '40'
+
+  try {
+    const proc = new FakePiRpcProcess()
+    const session = makeSession(proc)
+
+    const pending = session.prompt('hello')
+    await new Promise(resolve => setTimeout(resolve, 25))
+    proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
+    await new Promise(resolve => setTimeout(resolve, 25))
+    proc.emit({ type: 'agent_end' })
+
+    assert.equal(await pending, 'end_turn')
+    assert.equal(proc.abortCount, 0)
+  } finally {
+    if (previousTimeout === undefined) delete process.env.PI_ACP_TURN_INACTIVITY_MS
+    else process.env.PI_ACP_TURN_INACTIVITY_MS = previousTimeout
+  }
+})
+
 test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', async () => {
-  const previousTimeout = process.env.PI_ACP_TURN_TIMEOUT_MS
-  process.env.PI_ACP_TURN_TIMEOUT_MS = '30'
+  const previousTimeout = process.env.PI_ACP_TURN_INACTIVITY_MS
+  process.env.PI_ACP_TURN_INACTIVITY_MS = '30'
 
   try {
     const conn = new FakeAgentSideConnection()
@@ -80,11 +102,11 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
     const timeoutMsg = conn.updates.find(
       u =>
         u.update.sessionUpdate === 'agent_message_chunk' &&
-        (u.update as { content?: { text?: string } }).content?.text?.includes('timed out')
+        (u.update as { content?: { text?: string } }).content?.text?.includes('inactivity')
     )
-    assert.ok(timeoutMsg, 'expected a turn timeout message')
+    assert.ok(timeoutMsg, 'expected a turn inactivity timeout message')
   } finally {
-    if (previousTimeout === undefined) delete process.env.PI_ACP_TURN_TIMEOUT_MS
-    else process.env.PI_ACP_TURN_TIMEOUT_MS = previousTimeout
+    if (previousTimeout === undefined) delete process.env.PI_ACP_TURN_INACTIVITY_MS
+    else process.env.PI_ACP_TURN_INACTIVITY_MS = previousTimeout
   }
 })

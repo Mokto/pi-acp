@@ -53,7 +53,7 @@ type QueuedTurn = {
 
 type DeferredModel = { provider: string; modelId: string }
 
-const DEFAULT_TURN_WATCHDOG_MS = 60_000
+const DEFAULT_TURN_INACTIVITY_MS = 5 * 60_000
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
@@ -583,18 +583,19 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
-  private turnWatchdogMs(): number {
-    const raw = process.env.PI_ACP_TURN_TIMEOUT_MS
-    if (!raw) return DEFAULT_TURN_WATCHDOG_MS
+  private turnInactivityMs(): number {
+    const raw = process.env.PI_ACP_TURN_INACTIVITY_MS ?? process.env.PI_ACP_TURN_TIMEOUT_MS
+    if (!raw) return DEFAULT_TURN_INACTIVITY_MS
     const parsed = Number(raw)
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_WATCHDOG_MS
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_INACTIVITY_MS
   }
 
-  private armTurnWatchdog(): void {
+  private resetTurnWatchdog(): void {
+    if (!this.pendingTurn) return
     this.clearTurnWatchdog()
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog()
-    }, this.turnWatchdogMs())
+    }, this.turnInactivityMs())
   }
 
   private clearTurnWatchdog(): void {
@@ -610,7 +611,7 @@ export class PiAcpSession {
       sessionUpdate: 'agent_message_chunk',
       content: {
         type: 'text',
-        text: 'Turn timed out waiting for pi to finish; aborting and recovering.'
+        text: 'Turn timed out due to pi inactivity; aborting and recovering.'
       }
     })
 
@@ -640,7 +641,7 @@ export class PiAcpSession {
     this.cancelRequested = false
     this.inAgentLoop = false
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
-    this.armTurnWatchdog()
+    this.resetTurnWatchdog()
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -797,6 +798,8 @@ export class PiAcpSession {
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
+    if (this.pendingTurn) this.resetTurnWatchdog()
+
     const type = String((ev as any).type ?? '')
 
     switch (type) {
