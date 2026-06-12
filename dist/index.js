@@ -605,6 +605,7 @@ function expandSlashCommand(text, fileCommands) {
 
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 5 * 6e4;
+var DEFAULT_INFERENCE_STARTUP_MS = 15 * 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
   { optionId: "no", name: "No", kind: "reject_once" }
@@ -814,6 +815,7 @@ var PiAcpSession = class {
   pendingTurn = null;
   turnQueue = [];
   turnWatchdog = null;
+  inferenceStartup = false;
   // Model/thinking changes from the client are deferred while a turn is active so
   // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
   deferredModel = null;
@@ -1006,12 +1008,19 @@ var PiAcpSession = class {
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_INACTIVITY_MS;
   }
+  inferenceStartupMs() {
+    const raw = process.env.PI_ACP_INFERENCE_STARTUP_MS;
+    if (!raw) return DEFAULT_INFERENCE_STARTUP_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_INFERENCE_STARTUP_MS;
+  }
   resetTurnWatchdog() {
     if (!this.pendingTurn) return;
     this.clearTurnWatchdog();
+    const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs();
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog();
-    }, this.turnInactivityMs());
+    }, ms);
   }
   clearTurnWatchdog() {
     if (!this.turnWatchdog) return;
@@ -1047,6 +1056,7 @@ var PiAcpSession = class {
   startTurn(t) {
     this.cancelRequested = false;
     this.inAgentLoop = false;
+    this.inferenceStartup = true;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.resetTurnWatchdog();
     this.emit({
@@ -1179,6 +1189,7 @@ var PiAcpSession = class {
       case "message_update": {
         const ame = ev.assistantMessageEvent;
         if (ame?.type === "text_delta" && typeof ame.delta === "string") {
+          this.inferenceStartup = false;
           this.emit({
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: ame.delta }
@@ -1186,11 +1197,15 @@ var PiAcpSession = class {
           break;
         }
         if (ame?.type === "thinking_delta" && typeof ame.delta === "string") {
+          this.inferenceStartup = false;
           this.emit({
             sessionUpdate: "agent_thought_chunk",
             content: { type: "text", text: ame.delta }
           });
           break;
+        }
+        if (ame?.type === "toolcall_start") {
+          this.inferenceStartup = false;
         }
         if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
           const toolCall = (
@@ -1461,6 +1476,7 @@ var PiAcpSession = class {
         break;
       }
       case "turn_end": {
+        this.inferenceStartup = true;
         break;
       }
       case "agent_end": {
