@@ -1522,6 +1522,9 @@ function formatAutoRetryMessage(ev) {
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
+function truncateTitle(s, max = 60) {
+  return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
+}
 function toToolTitle(toolName, args, cwd) {
   const p = getToolPath(args);
   if (p) {
@@ -1539,6 +1542,9 @@ function toToolTitle(toolName, args, cwd) {
     const verb = toolVerb(toolName);
     return `${verb} ${display}`;
   }
+  const a = args;
+  const hint = typeof a?.query === "string" ? a.query : typeof a?.url === "string" ? a.url : typeof a?.command === "string" ? a.command : void 0;
+  if (hint) return `${toolVerb(toolName)}: ${truncateTitle(hint)}`;
   return toolVerb(toolName);
 }
 function toolVerb(toolName) {
@@ -1552,7 +1558,7 @@ function toolVerb(toolName) {
     case "bash":
       return "Bash";
     default:
-      return toolName.charAt(0).toUpperCase() + toolName.slice(1);
+      return toolName.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
   }
 }
 function toToolKind(toolName) {

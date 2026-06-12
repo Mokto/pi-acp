@@ -333,6 +333,9 @@ export class PiAcpSession {
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
 
+  // Context window size reported by pi (updated from getSessionStats).
+  private contextWindow: number | null = null
+
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -553,7 +556,6 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
-
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -651,6 +653,56 @@ export class PiAcpSession {
     } catch {
       // ignore
     }
+  }
+
+  private async maybeEmitTokenStats(): Promise<void> {
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE === 'false') return
+    const debug = process.env.PI_ACP_DEBUG_TOKEN_USAGE === 'true'
+
+    // Prefer inline usage accumulated from turn_end events (zero latency, no extra RPC call).
+    // Fall back to getSessionStats() with one retry if pi fires agent_end before updating stats.
+    let stats: any = null
+    let contextWindow: number | null = this.contextWindow
+    let contextTokens: number | null = null
+    let contextPercent: number | null = null
+
+    try {
+      stats = (await this.proc.getSessionStats()) as any
+      if (stats?.contextUsage && typeof stats.contextUsage === 'object') {
+        const cu = stats.contextUsage as Record<string, unknown>
+        if (typeof cu.contextWindow === 'number') {
+          contextWindow = cu.contextWindow
+          this.contextWindow = contextWindow
+        }
+        if (typeof cu.tokens === 'number') contextTokens = cu.tokens
+        if (typeof cu.percent === 'number') contextPercent = cu.percent
+      }
+    } catch (err) {
+      if (debug)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `[token debug] getSessionStats error: ${String(err)}` }
+        })
+    }
+
+    if (debug) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `\n[token debug] contextUsage=${JSON.stringify(stats?.contextUsage)}` }
+      })
+    }
+
+    // Show current context window usage: tokens currently in context and how full it is.
+    const parts: string[] = []
+    if (contextTokens !== null && contextTokens > 0) {
+      parts.push(`${contextTokens.toLocaleString()} tokens`)
+      if (contextWindow) {
+        const raw = contextPercent !== null ? contextPercent : (contextTokens / contextWindow) * 100
+        parts.push(`${Math.round(raw * 10) / 10}%`)
+      }
+    }
+    if (parts.length)
+      this.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n↳ ${parts.join(' · ')}` } })
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -1001,9 +1053,12 @@ export class PiAcpSession {
       case 'agent_end': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
+        void (async () => {
+          await this.flushEmits()
+          await this.maybeEmitTokenStats()
+          await this.flushEmits()
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
-        })
+        })()
         break
       }
 
@@ -1172,6 +1227,11 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 
+/** Truncate a string for display in tool titles. */
+function truncateTitle(s: string, max = 60): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…`
+}
+
 function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
   const p = getToolPath(args)
   if (p) {
@@ -1190,6 +1250,15 @@ function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
     const verb = toolVerb(toolName)
     return `${verb} ${display}`
   }
+
+  // For tools with a query/url/command arg, append it for context.
+  const a = args as Record<string, unknown> | null | undefined
+  const hint = typeof a?.query === 'string' ? a.query
+    : typeof a?.url === 'string' ? a.url
+    : typeof a?.command === 'string' ? a.command
+    : undefined
+  if (hint) return `${toolVerb(toolName)}: ${truncateTitle(hint)}`
+
   return toolVerb(toolName)
 }
 
@@ -1204,7 +1273,11 @@ function toolVerb(toolName: string): string {
     case 'bash':
       return 'Bash'
     default:
-      return toolName.charAt(0).toUpperCase() + toolName.slice(1)
+      // Convert snake_case to Title Case (e.g. web_search → Web Search)
+      return toolName
+        .split('_')
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ')
   }
 }
 
@@ -1221,3 +1294,5 @@ function toToolKind(toolName: string): ToolKind {
       return 'other'
   }
 }
+
+
