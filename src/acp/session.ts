@@ -54,6 +54,7 @@ type QueuedTurn = {
 type DeferredModel = { provider: string; modelId: string }
 
 const DEFAULT_TURN_INACTIVITY_MS = 5 * 60_000
+const DEFAULT_INFERENCE_STARTUP_MS = 15 * 60_000
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
@@ -319,6 +320,7 @@ export class PiAcpSession {
   private pendingTurn: PendingTurn | null = null
   private readonly turnQueue: QueuedTurn[] = []
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null
+  private inferenceStartup = false
 
   // Model/thinking changes from the client are deferred while a turn is active so
   // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
@@ -354,6 +356,9 @@ export class PiAcpSession {
   private fileMutationDiffsEmitted = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
+  // Tracks synthetic tool call IDs emitted for subagent child tool calls.
+  // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
+  private subagentToolCalls = new Map<string, string>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -581,6 +586,14 @@ export class PiAcpSession {
     this.fileMutationDiffsEmitted.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    // Clean up any subagent tool calls spawned under this parent
+    const prefix = `${toolCallId}__`
+    for (const [key, syntheticId] of this.subagentToolCalls) {
+      if (key.startsWith(prefix)) {
+        this.currentToolCalls.delete(syntheticId)
+        this.subagentToolCalls.delete(key)
+      }
+    }
   }
 
   private turnInactivityMs(): number {
@@ -590,12 +603,23 @@ export class PiAcpSession {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_INACTIVITY_MS
   }
 
+  private inferenceStartupMs(): number {
+    const raw = process.env.PI_ACP_INFERENCE_STARTUP_MS
+    if (!raw) return DEFAULT_INFERENCE_STARTUP_MS
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_INFERENCE_STARTUP_MS
+  }
+
   private resetTurnWatchdog(): void {
     if (!this.pendingTurn) return
     this.clearTurnWatchdog()
+    // Use the longer inference-startup timeout when waiting for the LLM to begin
+    // streaming after a turn_end (tool results sent, no tokens yet). Switch back
+    // to the normal inactivity timeout once the model starts producing output.
+    const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs()
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog()
-    }, this.turnInactivityMs())
+    }, ms)
   }
 
   private clearTurnWatchdog(): void {
@@ -640,6 +664,7 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.inferenceStartup = true
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
     this.resetTurnWatchdog()
 
@@ -808,6 +833,7 @@ export class PiAcpSession {
 
         // Stream assistant text.
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
+          this.inferenceStartup = false
           this.emit({
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
@@ -816,11 +842,16 @@ export class PiAcpSession {
         }
 
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
+          this.inferenceStartup = false
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
           break
+        }
+
+        if (ame?.type === 'toolcall_start') {
+          this.inferenceStartup = false
         }
 
         // Surface tool calls ASAP so clients (e.g. Zed) can show a tool-in-use/loading UI
@@ -987,6 +1018,42 @@ export class PiAcpSession {
         const partial = (ev as any).partialResult
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({ toolCallId, status: 'in_progress', result: partial })
+          break
+        }
+
+        // Scout extension relays child tool calls via _subagent_tool_call details.
+        // Emit them as real tool_call / tool_call_update events with a ↳ prefix.
+        const subCall = (partial?.details as Record<string, unknown> | null | undefined)
+          ?._subagent_tool_call as
+          | { id: string; name?: string; args?: unknown; status: 'in_progress' | 'completed' }
+          | undefined
+        if (subCall) {
+          const mapKey = `${toolCallId}__${subCall.id}`
+          if (subCall.status === 'in_progress' && subCall.name) {
+            if (!this.subagentToolCalls.has(mapKey)) {
+              const syntheticId = `sub__${toolCallId}__${subCall.id}`
+              this.subagentToolCalls.set(mapKey, syntheticId)
+              this.currentToolCalls.set(syntheticId, 'in_progress')
+              this.emit({
+                sessionUpdate: 'tool_call',
+                toolCallId: syntheticId,
+                title: `${toToolTitle(subCall.name, subCall.args)} (⎇)`,
+                kind: 'search',
+                status: 'in_progress',
+                rawInput: subCall.args
+              })
+            }
+          } else if (subCall.status === 'completed') {
+            const syntheticId = this.subagentToolCalls.get(mapKey)
+            if (syntheticId) {
+              this.emit({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: syntheticId,
+                status: 'completed',
+                content: [{ type: 'content', content: { type: 'text', text: '(result in scout summary)' } }] satisfies ToolCallContent[]
+              })
+            }
+          }
           break
         }
 
@@ -1157,6 +1224,9 @@ export class PiAcpSession {
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
         // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
+        // Re-arm inference-startup mode: the model is about to receive tool results and
+        // may take a while before it starts streaming the next response.
+        this.inferenceStartup = true
         break
       }
 

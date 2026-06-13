@@ -845,6 +845,9 @@ var PiAcpSession = class {
   fileMutationDiffsEmitted = /* @__PURE__ */ new Set();
   bashToolCallIds = /* @__PURE__ */ new Set();
   bashOutputSnapshots = /* @__PURE__ */ new Map();
+  // Tracks synthetic tool call IDs emitted for subagent child tool calls.
+  // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
+  subagentToolCalls = /* @__PURE__ */ new Map();
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   lastEmit = Promise.resolve();
@@ -1001,6 +1004,13 @@ var PiAcpSession = class {
     this.fileMutationDiffsEmitted.delete(toolCallId);
     this.bashToolCallIds.delete(toolCallId);
     this.bashOutputSnapshots.delete(toolCallId);
+    const prefix = `${toolCallId}__`;
+    for (const [key, syntheticId] of this.subagentToolCalls) {
+      if (key.startsWith(prefix)) {
+        this.currentToolCalls.delete(syntheticId);
+        this.subagentToolCalls.delete(key);
+      }
+    }
   }
   turnInactivityMs() {
     const raw = process.env.PI_ACP_TURN_INACTIVITY_MS ?? process.env.PI_ACP_TURN_TIMEOUT_MS;
@@ -1342,6 +1352,36 @@ var PiAcpSession = class {
         const partial = ev.partialResult;
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({ toolCallId, status: "in_progress", result: partial });
+          break;
+        }
+        const subCall = partial?.details?._subagent_tool_call;
+        if (subCall) {
+          const mapKey = `${toolCallId}__${subCall.id}`;
+          if (subCall.status === "in_progress" && subCall.name) {
+            if (!this.subagentToolCalls.has(mapKey)) {
+              const syntheticId = `sub__${toolCallId}__${subCall.id}`;
+              this.subagentToolCalls.set(mapKey, syntheticId);
+              this.currentToolCalls.set(syntheticId, "in_progress");
+              this.emit({
+                sessionUpdate: "tool_call",
+                toolCallId: syntheticId,
+                title: `${toToolTitle(subCall.name, subCall.args)} (\u2387)`,
+                kind: "search",
+                status: "in_progress",
+                rawInput: subCall.args
+              });
+            }
+          } else if (subCall.status === "completed") {
+            const syntheticId = this.subagentToolCalls.get(mapKey);
+            if (syntheticId) {
+              this.emit({
+                sessionUpdate: "tool_call_update",
+                toolCallId: syntheticId,
+                status: "completed",
+                content: [{ type: "content", content: { type: "text", text: "(result in scout summary)" } }]
+              });
+            }
+          }
           break;
         }
         const customTitle = typeof partial?.details?._label === "string" ? partial.details._label : void 0;

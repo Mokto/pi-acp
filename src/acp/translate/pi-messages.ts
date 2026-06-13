@@ -1,3 +1,4 @@
+/** Converts a pi message content value (string or block array) to a plain string. */
 export function normalizePiMessageText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
