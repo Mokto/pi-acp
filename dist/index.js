@@ -1387,7 +1387,9 @@ var PiAcpSession = class {
                 sessionUpdate: "tool_call_update",
                 toolCallId: syntheticId,
                 status: "completed",
-                content: [{ type: "content", content: { type: "text", text: "(result in scout summary)" } }]
+                content: [
+                  { type: "content", content: { type: "text", text: "(result in scout summary)" } }
+                ]
               });
             }
           }
@@ -2500,10 +2502,12 @@ var PiAcpAgent = class {
     );
     const quietStartup = getQuietStartup(params.cwd);
     const updateNotice = buildUpdateNotice();
-    const preludeText = quietStartup ? updateNotice ? updateNotice + "\n" : "" : buildStartupInfo({
+    const sessionLine = `Session: ${session.sessionId}`;
+    const preludeText = quietStartup ? [updateNotice, sessionLine].filter(Boolean).join("\n") + "\n" : buildStartupInfo({
       cwd: params.cwd,
       fileCommands,
-      updateNotice
+      updateNotice,
+      sessionId: session.sessionId
     });
     if (preludeText)
       session.setStartupInfo(preludeText);
@@ -3324,19 +3328,20 @@ function buildUpdateNotice() {
 function buildStartupInfo(opts) {
   void opts.fileCommands;
   const md = [];
+  let headerLine = "";
   try {
     const piVersion = spawnSync("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
     );
-    if (installed) {
-      md.push(`pi v${installed}`);
-      md.push("---");
-      md.push("");
-    }
+    if (installed) headerLine = `pi v${installed}`;
   } catch {
   }
+  headerLine = [headerLine, `session ${opts.sessionId}`].filter(Boolean).join(" \xB7 ");
+  md.push(headerLine);
+  md.push("---");
+  md.push("");
   const addSection = (title, items) => {
     const cleaned = items.map((s) => s.trim()).filter(Boolean);
     if (!cleaned.length) return;
