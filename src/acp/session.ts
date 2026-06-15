@@ -348,6 +348,12 @@ export class PiAcpSession {
   // Context window size reported by pi (updated from getSessionStats).
   private contextWindow: number | null = null
 
+  // Peak context tokens seen this session. Context only grows, so we never
+  // decrease this — guards against Cursor Composer's "take-once" input
+  // accounting where intermediate tool-call turns report input=0, making the
+  // last assistant message's totalTokens look tiny.
+  private peakContextTokens: number = 0
+
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -810,11 +816,19 @@ export class PiAcpSession {
     }
 
     // Show current context window usage: tokens currently in context and how full it is.
-    const parts: string[] = []
+    // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
+    // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
     if (contextTokens !== null && contextTokens > 0) {
-      parts.push(`${contextTokens.toLocaleString()} tokens`)
+      this.peakContextTokens = Math.max(this.peakContextTokens, contextTokens)
+    }
+    const displayTokens = this.peakContextTokens > 0 ? this.peakContextTokens : contextTokens
+    const parts: string[] = []
+    if (displayTokens !== null && displayTokens > 0) {
+      parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const raw = contextPercent !== null ? contextPercent : (contextTokens / contextWindow) * 100
+        const raw = contextPercent !== null && displayTokens === contextTokens
+          ? contextPercent
+          : (displayTokens / contextWindow) * 100
         parts.push(`${Math.round(raw * 10) / 10}%`)
       }
     }
@@ -1181,25 +1195,39 @@ export class PiAcpSession {
         break
       }
 
+      // pi emits compaction_start/end (with reason: "auto" | "manual").
+      // The old auto_compaction_start/end cases below are kept as dead-code
+      // fallbacks in case older pi versions still send them.
+      case 'compaction_start':
       case 'auto_compaction_start': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: 'Context nearing limit, running automatic compaction...'
-          } satisfies ContentBlock
-        })
+        const isAuto = (ev as any).reason !== 'manual'
+        if (isAuto) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context nearing limit, running automatic compaction...'
+            } satisfies ContentBlock
+          })
+        }
         break
       }
 
+      case 'compaction_end':
       case 'auto_compaction_end': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: 'Automatic compaction finished; context was summarized to continue the session.'
-          } satisfies ContentBlock
-        })
+        // After compaction the context shrinks significantly; reset peak so the
+        // next turn shows the actual (smaller) post-compaction context size.
+        this.peakContextTokens = 0
+        const isAuto = (ev as any).reason !== 'manual'
+        if (isAuto) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Automatic compaction finished; context was summarized to continue the session.'
+            } satisfies ContentBlock
+          })
+        }
         break
       }
 

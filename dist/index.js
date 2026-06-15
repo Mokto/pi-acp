@@ -837,6 +837,11 @@ var PiAcpSession = class {
   inAgentLoop = false;
   // Context window size reported by pi (updated from getSessionStats).
   contextWindow = null;
+  // Peak context tokens seen this session. Context only grows, so we never
+  // decrease this — guards against Cursor Composer's "take-once" input
+  // accounting where intermediate tool-call turns report input=0, making the
+  // last assistant message's totalTokens look tiny.
+  peakContextTokens = 0;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -1179,11 +1184,15 @@ var PiAcpSession = class {
 [token debug] contextUsage=${JSON.stringify(stats?.contextUsage)}` }
       });
     }
-    const parts = [];
     if (contextTokens !== null && contextTokens > 0) {
-      parts.push(`${contextTokens.toLocaleString()} tokens`);
+      this.peakContextTokens = Math.max(this.peakContextTokens, contextTokens);
+    }
+    const displayTokens = this.peakContextTokens > 0 ? this.peakContextTokens : contextTokens;
+    const parts = [];
+    if (displayTokens !== null && displayTokens > 0) {
+      parts.push(`${displayTokens.toLocaleString()} tokens`);
       if (contextWindow) {
-        const raw = contextPercent !== null ? contextPercent : contextTokens / contextWindow * 100;
+        const raw = contextPercent !== null && displayTokens === contextTokens ? contextPercent : displayTokens / contextWindow * 100;
         parts.push(`${Math.round(raw * 10) / 10}%`);
       }
     }
@@ -1483,24 +1492,36 @@ var PiAcpSession = class {
         });
         break;
       }
+      // pi emits compaction_start/end (with reason: "auto" | "manual").
+      // The old auto_compaction_start/end cases below are kept as dead-code
+      // fallbacks in case older pi versions still send them.
+      case "compaction_start":
       case "auto_compaction_start": {
-        this.emit({
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text: "Context nearing limit, running automatic compaction..."
-          }
-        });
+        const isAuto = ev.reason !== "manual";
+        if (isAuto) {
+          this.emit({
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: "Context nearing limit, running automatic compaction..."
+            }
+          });
+        }
         break;
       }
+      case "compaction_end":
       case "auto_compaction_end": {
-        this.emit({
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text: "Automatic compaction finished; context was summarized to continue the session."
-          }
-        });
+        this.peakContextTokens = 0;
+        const isAuto = ev.reason !== "manual";
+        if (isAuto) {
+          this.emit({
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: "Automatic compaction finished; context was summarized to continue the session."
+            }
+          });
+        }
         break;
       }
       case "agent_start": {
