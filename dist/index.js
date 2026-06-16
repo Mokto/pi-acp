@@ -612,7 +612,7 @@ function expandSlashCommand(text, fileCommands) {
 }
 
 // src/acp/session.ts
-var DEFAULT_TURN_INACTIVITY_MS = 5 * 6e4;
+var DEFAULT_TURN_INACTIVITY_MS = 15 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
@@ -682,20 +682,11 @@ function getEditOldTexts(args) {
   }
   return oldTexts;
 }
-function getInitialFileDiffContent(toolName, args, snapshotOldText) {
-  const path = getToolPath(args);
-  if (!path) return void 0;
-  if (toolName === "edit") {
-    const content = getParsedEdits(args).map(
-      (edit) => ({
-        type: "diff",
-        path,
-        oldText: edit.oldText || null,
-        newText: edit.newText
-      })
-    );
-    return content.length ? content : void 0;
-  }
+function getInitialFileDiffContent(toolName, args, cwd, snapshotOldText) {
+  const rawPath = getToolPath(args);
+  if (!rawPath) return void 0;
+  const path = isAbsolute(rawPath) ? rawPath : resolvePath(cwd, rawPath);
+  if (toolName === "edit") return void 0;
   if (toolName === "write") {
     const content = args?.content;
     if (typeof content !== "string") return void 0;
@@ -1325,7 +1316,7 @@ var PiAcpSession = class {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p);
               snapshotOldText = readFileSync3(abs, "utf8");
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: snapshotOldText });
+              this.fileSnapshots.set(toolCallId, { path: abs, oldText: snapshotOldText });
               if (toolName === "edit") {
                 for (const needle of getEditOldTexts(args)) {
                   line = findUniqueLineNumber(snapshotOldText, needle);
@@ -1334,12 +1325,13 @@ var PiAcpSession = class {
               }
             } catch {
               snapshotOldText = null;
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: null });
+              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p);
+              this.fileSnapshots.set(toolCallId, { path: abs, oldText: null });
             }
           }
         }
         const locations = toToolCallLocations(args, this.cwd, line);
-        const initialFileContent = isFileMutation ? getInitialFileDiffContent(toolName, args, snapshotOldText) : void 0;
+        const initialFileContent = isFileMutation ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText) : void 0;
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId);
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, "in_progress");
@@ -1452,8 +1444,7 @@ var PiAcpSession = class {
         }
         if (!isError && !initialDiffEmitted && snapshot) {
           try {
-            const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path);
-            const newText = readFileSync3(abs, "utf8");
+            const newText = readFileSync3(snapshot.path, "utf8");
             if (snapshot.oldText === null || newText !== snapshot.oldText) {
               hasStructuredDiff = true;
               content = [
@@ -2411,7 +2402,6 @@ var PiAcpAgent = class {
   }
   toAcpStopReason(result, cancelRequested) {
     if (result === "cancelled" || cancelRequested) return "cancelled";
-    if (result === "error") return "refusal";
     return "end_turn";
   }
   cleanupFailedNewSession(sessionId, state) {
