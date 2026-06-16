@@ -93,6 +93,7 @@ var PiRpcProcess = class _PiRpcProcess {
   child;
   pending = /* @__PURE__ */ new Map();
   eventHandlers = [];
+  exitHandlers = [];
   preludeLines = [];
   constructor(child) {
     this.child = child;
@@ -124,6 +125,7 @@ var PiRpcProcess = class _PiRpcProcess {
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`);
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
+      for (const h of this.exitHandlers) h(code, signal);
     });
     child.on("error", (err) => {
       for (const [, p] of this.pending) p.reject(err);
@@ -189,6 +191,12 @@ var PiRpcProcess = class _PiRpcProcess {
     this.eventHandlers.push(handler);
     return () => {
       this.eventHandlers = this.eventHandlers.filter((h) => h !== handler);
+    };
+  }
+  onExit(handler) {
+    this.exitHandlers.push(handler);
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter((h) => h !== handler);
     };
   }
   dispose(signal = "SIGTERM") {
@@ -605,7 +613,7 @@ function expandSlashCommand(text, fileCommands) {
 
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 5 * 6e4;
-var DEFAULT_INFERENCE_STARTUP_MS = 15 * 6e4;
+var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
   { optionId: "no", name: "No", kind: "reject_once" }
@@ -732,13 +740,6 @@ var SessionManager = class {
     }
     this.sessions.delete(sessionId);
   }
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId) {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue;
-      this.close(id);
-    }
-  }
   async create(params) {
     let proc;
     try {
@@ -864,6 +865,9 @@ var PiAcpSession = class {
     this.conn = opts.conn;
     this.fileCommands = opts.fileCommands ?? [];
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
+    this.proc.onExit?.((code, signal) => {
+      void this.handleProcessExit(code, signal);
+    });
   }
   setStartupInfo(text) {
     this.startupInfo = text;
@@ -1044,12 +1048,10 @@ var PiAcpSession = class {
   }
   async handleTurnWatchdog() {
     if (!this.pendingTurn) return;
+    const timeoutMsg = this.inferenceStartup ? "Turn timed out waiting for pi to begin inference; aborting and recovering." : "Turn timed out due to pi inactivity (no output); aborting and recovering.";
     this.emit({
       sessionUpdate: "agent_message_chunk",
-      content: {
-        type: "text",
-        text: "Turn timed out due to pi inactivity; aborting and recovering."
-      }
+      content: { type: "text", text: timeoutMsg }
     });
     try {
       await this.proc.abort();
@@ -1057,6 +1059,16 @@ var PiAcpSession = class {
     }
     await this.flushEmits();
     this.completeTurn("error");
+  }
+  async handleProcessExit(code, signal) {
+    if (!this.pendingTurn) return;
+    const detail = signal ? `signal ${signal}` : `code ${code}`;
+    this.emit({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: `Error: pi process exited (${detail})` }
+    });
+    await this.flushEmits();
+    this.completeTurn(this.cancelRequested ? "cancelled" : "error");
   }
   async flushDeferredConfig() {
     const model = this.deferredModel;
@@ -1558,6 +1570,10 @@ var PiAcpSession = class {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `Error: ${message}` }
         });
+        void (async () => {
+          await this.flushEmits();
+          this.completeTurn(this.cancelRequested ? "cancelled" : "error");
+        })();
         break;
       }
       default:
@@ -2393,6 +2409,11 @@ var PiAcpAgent = class {
     this.conn = conn;
     void _config;
   }
+  toAcpStopReason(result, cancelRequested) {
+    if (result === "cancelled" || cancelRequested) return "cancelled";
+    if (result === "error") return "refusal";
+    return "end_turn";
+  }
   cleanupFailedNewSession(sessionId, state) {
     this.sessions.close(sessionId);
     const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile : this.store.get(sessionId)?.sessionFile;
@@ -2502,16 +2523,12 @@ var PiAcpAgent = class {
     );
     const quietStartup = getQuietStartup(params.cwd);
     const updateNotice = buildUpdateNotice();
-    const sessionLine = `Session: ${session.sessionId}`;
-    const preludeText = quietStartup ? [updateNotice, sessionLine].filter(Boolean).join("\n") + "\n" : buildStartupInfo({
+    const preludeText = quietStartup ? updateNotice ? updateNotice + "\n" : "" : buildStartupInfo({
       cwd: params.cwd,
       fileCommands,
-      updateNotice,
-      sessionId: session.sessionId
+      updateNotice
     });
-    if (preludeText)
-      session.setStartupInfo(preludeText);
-    this.sessions.closeAllExcept?.(session.sessionId);
+    if (preludeText) session.setStartupInfo(preludeText);
     const response = {
       sessionId: session.sessionId,
       models,
@@ -2927,8 +2944,7 @@ ${JSON.stringify(stats, null, 2)}`;
       }
     }
     const result = await session.prompt(message, images);
-    const stopReason = result === "error" ? session.wasCancelRequested() ? "cancelled" : "end_turn" : result;
-    return { stopReason };
+    return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) };
   }
   async cancel(params) {
     const session = await this.autoRestoreSession(params.sessionId);
@@ -2955,12 +2971,20 @@ ${JSON.stringify(stats, null, 2)}`;
     if (!isAbsolute3(params.cwd)) {
       throw RequestError3.invalidParams(`cwd must be an absolute path: ${params.cwd}`);
     }
-    this.sessions.close(params.sessionId);
     this.lastSessionCwd = params.cwd;
     const stored = this.store.get(params.sessionId);
     const sessionFile = stored?.sessionFile ?? findPiSessionFile(params.sessionId);
     if (!sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${params.sessionId}`);
+    }
+    this.store.upsert({
+      sessionId: params.sessionId,
+      cwd: params.cwd,
+      sessionFile
+    });
+    const existing = this.sessions.maybeGet(params.sessionId);
+    if (existing) {
+      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false });
     }
     let proc;
     try {
@@ -2976,8 +3000,6 @@ ${JSON.stringify(stats, null, 2)}`;
       throw e;
     }
     const fileCommands = loadSlashCommands(params.cwd);
-    const enableSkillCommands = getEnableSkillCommands(params.cwd);
-    const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -2985,96 +3007,98 @@ ${JSON.stringify(stats, null, 2)}`;
       proc,
       fileCommands
     });
-    this.sessions.closeAllExcept?.(session.sessionId);
-    this.store.upsert({
-      sessionId: params.sessionId,
-      cwd: params.cwd,
-      sessionFile
-    });
-    const data = await proc.getMessages();
-    const messages = Array.isArray(data?.messages) ? data.messages : [];
-    for (const m of messages) {
-      const role = String(m?.role ?? "");
-      if (role === "user") {
-        const text = normalizePiMessageText(m?.content);
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: "user_message_chunk",
-              content: { type: "text", text }
-            }
-          });
+    return this.finishLoadSession(session, proc, params, { replayHistory: true });
+  }
+  async finishLoadSession(session, proc, params, opts) {
+    const fileCommands = loadSlashCommands(params.cwd);
+    const enableSkillCommands = getEnableSkillCommands(params.cwd);
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
+    if (opts.replayHistory) {
+      const data = await proc.getMessages();
+      const messages = Array.isArray(data?.messages) ? data.messages : [];
+      for (const m of messages) {
+        const role = String(m?.role ?? "");
+        if (role === "user") {
+          const text = normalizePiMessageText(m?.content);
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: "user_message_chunk",
+                content: { type: "text", text }
+              }
+            });
+          }
         }
-      }
-      if (role === "assistant") {
-        const text = normalizePiAssistantText(m?.content);
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text }
-            }
-          });
+        if (role === "assistant") {
+          const text = normalizePiAssistantText(m?.content);
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text }
+              }
+            });
+          }
         }
-      }
-      if (role === "toolResult") {
-        const toolName = String(m?.toolName ?? "tool");
-        const toolCallId = String(m?.toolCallId ?? crypto.randomUUID());
-        const isError = Boolean(m?.isError);
-        const isBash = isBashTool(toolName);
-        if (isBash) {
-          const text2 = bashResultText(m);
+        if (role === "toolResult") {
+          const toolName = String(m?.toolName ?? "tool");
+          const toolCallId = String(m?.toolCallId ?? crypto.randomUUID());
+          const isError = Boolean(m?.isError);
+          const isBash = isBashTool(toolName);
+          if (isBash) {
+            const text2 = bashResultText(m);
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: "tool_call",
+                toolCallId,
+                title: bashCommand(m) ?? toolName,
+                kind: "execute",
+                status: "completed",
+                content: bashTerminalContent(toolCallId),
+                _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              }
+            });
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId,
+                status: isError ? "failed" : "completed",
+                _meta: {
+                  ...text2 ? bashTerminalOutputMeta(toolCallId, text2) : {},
+                  ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
+                }
+              }
+            });
+            continue;
+          }
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: "tool_call",
               toolCallId,
-              title: bashCommand(m) ?? toolName,
-              kind: "execute",
+              title: toolName,
+              kind: toolName === "read" ? "read" : toolName === "write" || toolName === "edit" ? "edit" : "other",
               status: "completed",
-              content: bashTerminalContent(toolCallId),
-              _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              rawInput: null,
+              rawOutput: m
             }
           });
+          const text = toolResultToText(m);
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: "tool_call_update",
               toolCallId,
               status: isError ? "failed" : "completed",
-              _meta: {
-                ...text2 ? bashTerminalOutputMeta(toolCallId, text2) : {},
-                ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
-              }
+              content: text ? [{ type: "content", content: { type: "text", text } }] : null,
+              rawOutput: m
             }
           });
-          continue;
         }
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            toolCallId,
-            title: toolName,
-            kind: toolName === "read" ? "read" : toolName === "write" || toolName === "edit" ? "edit" : "other",
-            status: "completed",
-            rawInput: null,
-            rawOutput: m
-          }
-        });
-        const text = toolResultToText(m);
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId,
-            status: isError ? "failed" : "completed",
-            content: text ? [{ type: "content", content: { type: "text", text } }] : null,
-            rawOutput: m
-          }
-        });
       }
     }
     const models = await getModelState(proc, { cwd: params.cwd });
@@ -3338,7 +3362,6 @@ function buildStartupInfo(opts) {
     if (installed) headerLine = `pi v${installed}`;
   } catch {
   }
-  headerLine = [headerLine, `session ${opts.sessionId}`].filter(Boolean).join(" \xB7 ");
   md.push(headerLine);
   md.push("---");
   md.push("");

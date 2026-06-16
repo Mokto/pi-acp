@@ -21,6 +21,8 @@ Expect some minor breaking changes.
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
+  - Multiple ACP sessions can be live at once within a single client connection (one pi subprocess per `sessionId`). Opening or loading a different session no longer tears down siblings.
+  - `session/load` reuses an in-memory session when the same `sessionId` is already active (no respawn, no history replay)
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
@@ -145,6 +147,8 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+- `PI_ACP_TURN_INACTIVITY_MS` — max idle time (ms) while waiting for pi events during a turn (default: `120000` / 2 min).
+- `PI_ACP_INFERENCE_STARTUP_MS` — max wait (ms) for the first model output after a prompt (default: `300000` / 5 min).
 
 You can add the environment variable in the Zed settings with:
 

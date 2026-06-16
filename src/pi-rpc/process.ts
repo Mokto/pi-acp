@@ -80,6 +80,7 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   private readonly preludeLines: string[] = []
 
   private constructor(child: ChildProcessWithoutNullStreams) {
@@ -118,6 +119,7 @@ export class PiRpcProcess {
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
+      for (const h of this.exitHandlers) h(code, signal)
     })
 
     child.on('error', err => {
@@ -209,6 +211,13 @@ export class PiRpcProcess {
     this.eventHandlers.push(handler)
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
+    }
+  }
+
+  onExit(handler: (code: number | null, signal: NodeJS.Signals | null) => void): () => void {
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
     }
   }
 

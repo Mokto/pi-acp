@@ -23,7 +23,7 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
@@ -180,6 +180,12 @@ export class PiAcpAgent implements ACPAgent {
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
+  }
+
+  private toAcpStopReason(result: PiStopReason, cancelRequested: boolean): StopReason {
+    if (result === 'cancelled' || cancelRequested) return 'cancelled'
+    if (result === 'error') return 'refusal'
+    return 'end_turn'
   }
 
   private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
@@ -340,15 +346,7 @@ export class PiAcpAgent implements ACPAgent {
           updateNotice
         })
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    if (preludeText) session.setStartupInfo(preludeText)
 
     const response = {
       sessionId: session.sessionId,
@@ -859,12 +857,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const result = await session.prompt(message, images)
 
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
-
-    return { stopReason }
+    return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -906,15 +899,8 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
 
-    // If the client is re-loading a session that is already active, tear down the existing
-    // pi subprocess so we can start fresh and re-advertise commands reliably.
-    // (Some clients may call session/load when restoring from history.)
-    this.sessions.close(params.sessionId)
-
     this.lastSessionCwd = params.cwd
 
-    // MVP: ignore mcpServers.
-    // Prefer ACP-created mapping first (fast path), otherwise scan pi sessions dir.
     const stored = this.store.get(params.sessionId)
     const sessionFile = stored?.sessionFile ?? findPiSessionFile(params.sessionId)
 
@@ -922,7 +908,17 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
     }
 
-    // Spawn pi and point it directly at the session file.
+    this.store.upsert({
+      sessionId: params.sessionId,
+      cwd: params.cwd,
+      sessionFile
+    })
+
+    const existing = this.sessions.maybeGet(params.sessionId)
+    if (existing) {
+      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false })
+    }
+
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
@@ -938,9 +934,6 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const fileCommands = loadSlashCommands(params.cwd)
-    const enableSkillCommands = getEnableSkillCommands(params.cwd)
-    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
-
     const session = this.sessions.getOrCreate(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -949,111 +942,114 @@ export class PiAcpAgent implements ACPAgent {
       fileCommands
     })
 
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    return this.finishLoadSession(session, proc, params, { replayHistory: true })
+  }
 
-    // (Optional) ensure mapping stays fresh.
-    this.store.upsert({
-      sessionId: params.sessionId,
-      cwd: params.cwd,
-      sessionFile
-    })
+  private async finishLoadSession(
+    session: PiAcpSession,
+    proc: PiRpcProcess,
+    params: LoadSessionRequest,
+    opts: { replayHistory: boolean }
+  ): Promise<LoadSessionResponse> {
+    const fileCommands = loadSlashCommands(params.cwd)
+    const enableSkillCommands = getEnableSkillCommands(params.cwd)
+    const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
-    // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
-    const messages = Array.isArray(data?.messages) ? data.messages : []
+    if (opts.replayHistory) {
+      const data = (await proc.getMessages()) as any
+      const messages = Array.isArray(data?.messages) ? data.messages : []
 
-    for (const m of messages) {
-      const role = String(m?.role ?? '')
+      for (const m of messages) {
+        const role = String(m?.role ?? '')
 
-      if (role === 'user') {
-        const text = normalizePiMessageText(m?.content)
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text }
-            }
-          })
+        if (role === 'user') {
+          const text = normalizePiMessageText(m?.content)
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text }
+              }
+            })
+          }
         }
-      }
 
-      if (role === 'assistant') {
-        const text = normalizePiAssistantText(m?.content)
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text }
-            }
-          })
+        if (role === 'assistant') {
+          const text = normalizePiAssistantText(m?.content)
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text }
+              }
+            })
+          }
         }
-      }
 
-      if (role === 'toolResult') {
-        const toolName = String((m as any)?.toolName ?? 'tool')
-        const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
-        const isError = Boolean((m as any)?.isError)
-        const isBash = isBashTool(toolName)
+        if (role === 'toolResult') {
+          const toolName = String((m as any)?.toolName ?? 'tool')
+          const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
+          const isError = Boolean((m as any)?.isError)
+          const isBash = isBashTool(toolName)
 
-        if (isBash) {
-          const text = bashResultText(m)
+          if (isBash) {
+            const text = bashResultText(m)
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId,
+                title: bashCommand(m) ?? toolName,
+                kind: 'execute',
+                status: 'completed',
+                content: bashTerminalContent(toolCallId),
+                _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              }
+            })
+
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId,
+                status: isError ? 'failed' : 'completed',
+                _meta: {
+                  ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
+                  ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
+                }
+              }
+            })
+            continue
+          }
+
+          // Create a synthetic ACP tool call to render historic tool usage.
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call',
               toolCallId,
-              title: bashCommand(m) ?? toolName,
-              kind: 'execute',
+              title: toolName,
+              kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
               status: 'completed',
-              content: bashTerminalContent(toolCallId),
-              _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              rawInput: null,
+              rawOutput: m
             }
           })
 
+          const text = toolResultToText(m)
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
-              _meta: {
-                ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
-                ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
-              }
+              content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
+              rawOutput: m
             }
           })
-          continue
         }
-
-        // Create a synthetic ACP tool call to render historic tool usage.
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
-            status: 'completed',
-            rawInput: null,
-            rawOutput: m
-          }
-        })
-
-        const text = toolResultToText(m)
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'tool_call_update',
-            toolCallId,
-            status: isError ? 'failed' : 'completed',
-            content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            rawOutput: m
-          }
-        })
       }
     }
 
@@ -1412,21 +1408,22 @@ function buildStartupInfo(opts: {
 
   const md: string[] = []
 
-  // pi version header
+  // pi version + session ID header
+  let headerLine = ''
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
     const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
       /^v/i,
       ''
     )
-    if (installed) {
-      md.push(`pi v${installed}`)
-      md.push('---')
-      md.push('')
-    }
+    if (installed) headerLine = `pi v${installed}`
   } catch {
     // ignore
   }
+  // (session ID display removed — use PI_ACP_SESSION_ID_IN_PRELUDE if you want to add it back)
+  md.push(headerLine)
+  md.push('---')
+  md.push('')
 
   const addSection = (title: string, items: string[]) => {
     const cleaned = items.map(s => s.trim()).filter(Boolean)

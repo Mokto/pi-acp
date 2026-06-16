@@ -24,6 +24,7 @@ export class FakeAgentSideConnection {
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
@@ -35,6 +36,17 @@ export class FakePiRpcProcess {
     return () => {
       this.handlers = this.handlers.filter(h => h !== handler)
     }
+  }
+
+  onExit(handler: (code: number | null, signal: NodeJS.Signals | null) => void): () => void {
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
+  emitExit(code: number | null, signal: NodeJS.Signals | null = null) {
+    for (const h of this.exitHandlers) h(code, signal)
   }
 
   emit(ev: PiRpcEvent) {

@@ -54,7 +54,7 @@ type QueuedTurn = {
 type DeferredModel = { provider: string; modelId: string }
 
 const DEFAULT_TURN_INACTIVITY_MS = 5 * 60_000
-const DEFAULT_INFERENCE_STARTUP_MS = 15 * 60_000
+const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
@@ -220,14 +220,6 @@ export class SessionManager {
     this.sessions.delete(sessionId)
   }
 
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
-    }
-  }
-
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
@@ -386,6 +378,9 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.proc.onExit?.((code, signal) => {
+      void this.handleProcessExit(code, signal)
+    })
   }
 
   setStartupInfo(text: string) {
@@ -637,12 +632,12 @@ export class PiAcpSession {
   private async handleTurnWatchdog(): Promise<void> {
     if (!this.pendingTurn) return
 
+    const timeoutMsg = this.inferenceStartup
+      ? 'Turn timed out waiting for pi to begin inference; aborting and recovering.'
+      : 'Turn timed out due to pi inactivity (no output); aborting and recovering.'
     this.emit({
       sessionUpdate: 'agent_message_chunk',
-      content: {
-        type: 'text',
-        text: 'Turn timed out due to pi inactivity; aborting and recovering.'
-      }
+      content: { type: 'text', text: timeoutMsg }
     })
 
     try {
@@ -653,6 +648,19 @@ export class PiAcpSession {
 
     await this.flushEmits()
     this.completeTurn('error')
+  }
+
+  private async handleProcessExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
+    if (!this.pendingTurn) return
+
+    const detail = signal ? `signal ${signal}` : `code ${code}`
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `Error: pi process exited (${detail})` }
+    })
+
+    await this.flushEmits()
+    this.completeTurn(this.cancelRequested ? 'cancelled' : 'error')
   }
 
   private async flushDeferredConfig(): Promise<void> {
@@ -826,9 +834,10 @@ export class PiAcpSession {
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const raw = contextPercent !== null && displayTokens === contextTokens
-          ? contextPercent
-          : (displayTokens / contextWindow) * 100
+        const raw =
+          contextPercent !== null && displayTokens === contextTokens
+            ? contextPercent
+            : (displayTokens / contextWindow) * 100
         parts.push(`${Math.round(raw * 10) / 10}%`)
       }
     }
@@ -1037,8 +1046,7 @@ export class PiAcpSession {
 
         // Scout extension relays child tool calls via _subagent_tool_call details.
         // Emit them as real tool_call / tool_call_update events with a ↳ prefix.
-        const subCall = (partial?.details as Record<string, unknown> | null | undefined)
-          ?._subagent_tool_call as
+        const subCall = (partial?.details as Record<string, unknown> | null | undefined)?._subagent_tool_call as
           | { id: string; name?: string; args?: unknown; status: 'in_progress' | 'completed' }
           | undefined
         if (subCall) {
@@ -1064,7 +1072,9 @@ export class PiAcpSession {
                 sessionUpdate: 'tool_call_update',
                 toolCallId: syntheticId,
                 status: 'completed',
-                content: [{ type: 'content', content: { type: 'text', text: '(result in scout summary)' } }] satisfies ToolCallContent[]
+                content: [
+                  { type: 'content', content: { type: 'text', text: '(result in scout summary)' } }
+                ] satisfies ToolCallContent[]
               })
             }
           }
@@ -1277,6 +1287,10 @@ export class PiAcpSession {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: `Error: ${message}` } satisfies ContentBlock
         })
+        void (async () => {
+          await this.flushEmits()
+          this.completeTurn(this.cancelRequested ? 'cancelled' : 'error')
+        })()
         break
       }
 
