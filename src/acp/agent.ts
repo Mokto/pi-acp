@@ -53,10 +53,92 @@ import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { resolveEnabledModelIds, type ScopeModel } from './model-scope.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+
+/** How long to wait for pi's get_messages RPC before giving up and falling back to the summary path. */
+function getMessagesTimeoutMs(): number {
+  const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS)
+  return Number.isFinite(v) && v > 0 ? v : 15_000
+}
+
+/**
+ * Races `promise` against a timeout. Rejects with a TimeoutError if the timeout fires first.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms)
+    promise.then(
+      v => { clearTimeout(timer); resolve(v) },
+      e => { clearTimeout(timer); reject(e) }
+    )
+  })
+}
+
+class TimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Timed out after ${ms}ms`)
+    this.name = 'TimeoutError'
+  }
+}
+
+/**
+ * Reads a pi session JSONL file and returns a compact markdown transcript
+ * (user + assistant text only — no tool inputs or results).
+ * Used as a fallback when the history replay RPC times out.
+ */
+function buildSessionSummaryFromFile(sessionFile: string): string {
+  let raw: string
+  try {
+    raw = readFileSync(sessionFile, 'utf-8')
+  } catch {
+    return ''
+  }
+
+  const lines = raw.split('\n').filter(l => l.trim())
+  const parts: string[] = []
+  let messageCount = 0
+
+  for (const line of lines) {
+    let obj: any
+    try { obj = JSON.parse(line) } catch { continue }
+    if (obj?.type !== 'message') continue
+
+    const msg = obj?.message ?? {}
+    const role: string = String(msg?.role ?? '')
+    const content: unknown[] = Array.isArray(msg?.content) ? msg.content : []
+
+    const textBlocks = content
+      .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+      .filter(c => c['type'] === 'text')
+      .map(c => String(c['text'] ?? '').trim())
+      .filter(Boolean)
+
+    if (!textBlocks.length) continue
+
+    if (role === 'user') {
+      parts.push(`**You:** ${textBlocks.join(' ')}`)
+      messageCount++
+    } else if (role === 'assistant') {
+      const full = textBlocks.join('\n')
+      const truncated = full.length > 1000 ? full.slice(0, 1000) + '…' : full
+      parts.push(`**Assistant:** ${truncated}`)
+      messageCount++
+    }
+  }
+
+  if (messageCount === 0) return ''
+  return [
+    `# Previous session — summary (${messageCount} messages)`,
+    '',
+    ...parts,
+    '',
+    '---',
+    '_Auto-generated from session JSONL. History was too large to replay in the UI._'
+  ].join('\n\n')
+}
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -184,7 +266,10 @@ export class PiAcpAgent implements ACPAgent {
 
   private toAcpStopReason(result: PiStopReason, cancelRequested: boolean): StopReason {
     if (result === 'cancelled' || cancelRequested) return 'cancelled'
-    if (result === 'error') return 'refusal'
+    // Internal errors (inactivity timeout, process crash) have no dedicated ACP
+    // stop reason. Reporting `refusal` makes clients show a misleading
+    // content-policy banner, so end the turn normally; the explanatory text
+    // chunk already emitted carries the real reason.
     return 'end_turn'
   }
 
@@ -916,7 +1001,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const existing = this.sessions.maybeGet(params.sessionId)
     if (existing) {
-      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false })
+      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false, sessionFile })
     }
 
     let proc: PiRpcProcess
@@ -942,22 +1027,51 @@ export class PiAcpAgent implements ACPAgent {
       fileCommands
     })
 
-    return this.finishLoadSession(session, proc, params, { replayHistory: true })
+    return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile })
   }
 
   private async finishLoadSession(
     session: PiAcpSession,
     proc: PiRpcProcess,
     params: LoadSessionRequest,
-    opts: { replayHistory: boolean }
+    opts: { replayHistory: boolean; sessionFile?: string }
   ): Promise<LoadSessionResponse> {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
     const enableExtensionCommands = getEnableExtensionCommands(params.cwd)
 
     if (opts.replayHistory) {
-      const data = (await proc.getMessages()) as any
-      const messages = Array.isArray(data?.messages) ? data.messages : []
+      let data: unknown
+      let replayTimedOut = false
+
+      try {
+        data = await withTimeout(proc.getMessages(), getMessagesTimeoutMs())
+      } catch (e) {
+        if (e instanceof TimeoutError) {
+          replayTimedOut = true
+        } else {
+          throw e
+        }
+      }
+
+      if (replayTimedOut) {
+        // Session too large — generate a compact summary from the JSONL and surface it.
+        const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : ''
+        if (summary) {
+          const summaryPath = join(params.cwd, '.pi-history-summary.md')
+          try {
+            writeFileSync(summaryPath, summary, 'utf-8')
+          } catch { /* ignore write errors (e.g. read-only cwd) */ }
+          session.setStartupInfo(
+            `⚠️  Session history was too large to load (timed out after ${getMessagesTimeoutMs() / 1000}s).\n` +
+            `A summary of the previous conversation has been saved to \`.pi-history-summary.md\`.\n` +
+            `Reference it in your next message: _"see .pi-history-summary.md"_`
+          )
+          setTimeout(() => session.sendStartupInfoIfPending(), 0)
+        }
+      }
+
+      const messages = Array.isArray((data as any)?.messages) ? (data as any).messages : []
 
       for (const m of messages) {
         const role = String(m?.role ?? '')

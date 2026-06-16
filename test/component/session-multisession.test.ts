@@ -2,7 +2,7 @@
  * Tests for multi-session behavior:
  *  1. Two concurrent sessions keep separate pi subprocesses (closeAllExcept removed)
  *  2. session/load reuses an in-memory session without respawning or replaying history
- *  3. prompt maps internal 'error' stop reason to ACP 'refusal'
+ *  3. prompt maps internal 'error' stop reason to ACP 'end_turn'
  *
  * NOTE: PiRpcProcess.spawn cannot be reliably mocked from test files because
  * tsx (module: ESNext, moduleResolution: Bundler) resolves the class to a
@@ -45,7 +45,6 @@ function injectSession(agent: PiAcpAgent, session: PiAcpSession): void {
 // ─── test suite (serial – tests share process.env / SessionStore) ─────────────
 
 test('PiAcpAgent: multisession', { concurrency: 1 }, async t => {
-
   // ── 1. Two concurrent sessions keep separate subprocesses ──────────────────
   await t.test('two concurrent sessions keep separate pi subprocesses', async () => {
     const conn = new FakeAgentSideConnection()
@@ -159,8 +158,8 @@ test('PiAcpAgent: multisession', { concurrency: 1 }, async t => {
     }
   })
 
-  // ── 3. prompt maps internal 'error' stop reason to ACP 'refusal' ───────────
-  await t.test('prompt maps internal error stop reason to refusal', async () => {
+  // ── 3. prompt maps internal 'error' stop reason to ACP 'end_turn' ───────────
+  await t.test('prompt maps internal error stop reason to end_turn', async () => {
     const conn = new FakeAgentSideConnection()
     const agent = new PiAcpAgent(asAgentConn(conn))
 
@@ -185,6 +184,6 @@ test('PiAcpAgent: multisession', { concurrency: 1 }, async t => {
       prompt: [{ type: 'text', text: 'hi' }]
     } as any)
 
-    assert.equal(res.stopReason, 'refusal')
+    assert.equal(res.stopReason, 'end_turn')
   })
 })

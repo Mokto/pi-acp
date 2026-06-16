@@ -75,7 +75,9 @@ test('PiAcpSession: pi activity resets the inactivity watchdog', async () => {
 
 test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', async () => {
   const previousTimeout = process.env.PI_ACP_TURN_INACTIVITY_MS
+  const previousStartup = process.env.PI_ACP_INFERENCE_STARTUP_MS
   process.env.PI_ACP_TURN_INACTIVITY_MS = '30'
+  process.env.PI_ACP_INFERENCE_STARTUP_MS = '30'
 
   try {
     const conn = new FakeAgentSideConnection()
@@ -91,6 +93,9 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
 
     const first = session.prompt('stuck')
     const second = session.prompt('queued')
+
+    // Move past inference startup so the *inactivity* watchdog is the one that fires.
+    proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
 
     assert.equal(await first, 'error')
     assert.equal(proc.abortCount, 1)
@@ -108,7 +113,7 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
   } finally {
     if (previousTimeout === undefined) delete process.env.PI_ACP_TURN_INACTIVITY_MS
     else process.env.PI_ACP_TURN_INACTIVITY_MS = previousTimeout
+    if (previousStartup === undefined) delete process.env.PI_ACP_INFERENCE_STARTUP_MS
+    else process.env.PI_ACP_INFERENCE_STARTUP_MS = previousStartup
   }
 })
-
-

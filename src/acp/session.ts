@@ -53,7 +53,7 @@ type QueuedTurn = {
 
 type DeferredModel = { provider: string; modelId: string }
 
-const DEFAULT_TURN_INACTIVITY_MS = 5 * 60_000
+const DEFAULT_TURN_INACTIVITY_MS = 15 * 60_000
 const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -148,23 +148,19 @@ function getEditOldTexts(args: unknown): string[] {
 function getInitialFileDiffContent(
   toolName: string,
   args: unknown,
+  cwd: string,
   snapshotOldText?: string | null
 ): ToolCallContent[] | undefined {
-  const path = getToolPath(args)
-  if (!path) return undefined
+  const rawPath = getToolPath(args)
+  if (!rawPath) return undefined
+  // Always use absolute paths so clients (e.g. Zed) can locate the file for
+  // their "files changed" / "Review Changes" panels.
+  const path = isAbsolute(rawPath) ? rawPath : resolvePath(cwd, rawPath)
 
-  if (toolName === 'edit') {
-    const content = getParsedEdits(args).map(
-      edit =>
-        ({
-          type: 'diff',
-          path,
-          oldText: edit.oldText || null,
-          newText: edit.newText
-        }) satisfies ToolCallContent
-    )
-    return content.length ? content : undefined
-  }
+  // For edit: do NOT emit fragment diffs (oldText/newText are just the replaced
+  // text chunk, not the full file). Defer to tool_execution_end where we have
+  // the complete before/after file content from the snapshot.
+  if (toolName === 'edit') return undefined
 
   if (toolName === 'write') {
     const content = (args as { content?: unknown } | null | undefined)?.content
@@ -984,7 +980,9 @@ export class PiAcpSession {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
               snapshotOldText = readFileSync(abs, 'utf8')
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: snapshotOldText })
+              // Store absolute path so diff content emitted at tool_execution_end
+              // also uses an absolute path (required by ACP clients like Zed).
+              this.fileSnapshots.set(toolCallId, { path: abs, oldText: snapshotOldText })
 
               if (toolName === 'edit') {
                 for (const needle of getEditOldTexts(args)) {
@@ -994,14 +992,15 @@ export class PiAcpSession {
               }
             } catch {
               snapshotOldText = null
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: null })
+              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
+              this.fileSnapshots.set(toolCallId, { path: abs, oldText: null })
             }
           }
         }
 
         const locations = toToolCallLocations(args, this.cwd, line)
         const initialFileContent = isFileMutation
-          ? getInitialFileDiffContent(toolName, args, snapshotOldText)
+          ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText)
           : undefined
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId)
 
@@ -1143,8 +1142,8 @@ export class PiAcpSession {
 
         if (!isError && !initialDiffEmitted && snapshot) {
           try {
-            const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
-            const newText = readFileSync(abs, 'utf8')
+            // snapshot.path is always absolute (stored that way in tool_execution_start).
+            const newText = readFileSync(snapshot.path, 'utf8')
             if (snapshot.oldText === null || newText !== snapshot.oldText) {
               hasStructuredDiff = true
               content = [

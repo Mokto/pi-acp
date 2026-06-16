@@ -2291,10 +2291,78 @@ function resolveEnabledModelIds(models, patterns) {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute3 } from "path";
-import { existsSync as existsSync4, readFileSync as readFileSync6, realpathSync, readdirSync as readdirSync3, statSync as statSync2, unlinkSync } from "fs";
+import { existsSync as existsSync4, readFileSync as readFileSync6, realpathSync, readdirSync as readdirSync3, statSync as statSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
 import { join as join5, dirname as dirname2, basename as basename2 } from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
+function getMessagesTimeoutMs() {
+  const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 15e3;
+}
+function withTimeout(promise, ms) {
+  return new Promise((resolve4, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve4(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+var TimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Timed out after ${ms}ms`);
+    this.name = "TimeoutError";
+  }
+};
+function buildSessionSummaryFromFile(sessionFile) {
+  let raw;
+  try {
+    raw = readFileSync6(sessionFile, "utf-8");
+  } catch {
+    return "";
+  }
+  const lines = raw.split("\n").filter((l) => l.trim());
+  const parts = [];
+  let messageCount = 0;
+  for (const line of lines) {
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (obj?.type !== "message") continue;
+    const msg = obj?.message ?? {};
+    const role = String(msg?.role ?? "");
+    const content = Array.isArray(msg?.content) ? msg.content : [];
+    const textBlocks = content.filter((c) => typeof c === "object" && c !== null).filter((c) => c["type"] === "text").map((c) => String(c["text"] ?? "").trim()).filter(Boolean);
+    if (!textBlocks.length) continue;
+    if (role === "user") {
+      parts.push(`**You:** ${textBlocks.join(" ")}`);
+      messageCount++;
+    } else if (role === "assistant") {
+      const full = textBlocks.join("\n");
+      const truncated = full.length > 1e3 ? full.slice(0, 1e3) + "\u2026" : full;
+      parts.push(`**Assistant:** ${truncated}`);
+      messageCount++;
+    }
+  }
+  if (messageCount === 0) return "";
+  return [
+    `# Previous session \u2014 summary (${messageCount} messages)`,
+    "",
+    ...parts,
+    "",
+    "---",
+    "_Auto-generated from session JSONL. History was too large to replay in the UI._"
+  ].join("\n\n");
+}
 function builtinAvailableCommands() {
   return [
     {
@@ -2974,7 +3042,7 @@ ${JSON.stringify(stats, null, 2)}`;
     });
     const existing = this.sessions.maybeGet(params.sessionId);
     if (existing) {
-      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false });
+      return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false, sessionFile });
     }
     let proc;
     try {
@@ -2997,14 +3065,40 @@ ${JSON.stringify(stats, null, 2)}`;
       proc,
       fileCommands
     });
-    return this.finishLoadSession(session, proc, params, { replayHistory: true });
+    return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile });
   }
   async finishLoadSession(session, proc, params, opts) {
     const fileCommands = loadSlashCommands(params.cwd);
     const enableSkillCommands = getEnableSkillCommands(params.cwd);
     const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
     if (opts.replayHistory) {
-      const data = await proc.getMessages();
+      let data;
+      let replayTimedOut = false;
+      try {
+        data = await withTimeout(proc.getMessages(), getMessagesTimeoutMs());
+      } catch (e) {
+        if (e instanceof TimeoutError) {
+          replayTimedOut = true;
+        } else {
+          throw e;
+        }
+      }
+      if (replayTimedOut) {
+        const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
+        if (summary) {
+          const summaryPath = join5(params.cwd, ".pi-history-summary.md");
+          try {
+            writeFileSync2(summaryPath, summary, "utf-8");
+          } catch {
+          }
+          session.setStartupInfo(
+            `\u26A0\uFE0F  Session history was too large to load (timed out after ${getMessagesTimeoutMs() / 1e3}s).
+A summary of the previous conversation has been saved to \`.pi-history-summary.md\`.
+Reference it in your next message: _"see .pi-history-summary.md"_`
+          );
+          setTimeout(() => session.sendStartupInfoIfPending(), 0);
+        }
+      }
       const messages = Array.isArray(data?.messages) ? data.messages : [];
       for (const m of messages) {
         const role = String(m?.role ?? "");
