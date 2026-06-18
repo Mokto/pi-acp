@@ -241,7 +241,18 @@ export class PiRpcProcess {
 
   async prompt(message: string, images: unknown[] = []): Promise<void> {
     const res = await this.request({ type: 'prompt', message, images })
-    if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+    if (!res.success) {
+      const errText = res.error ?? JSON.stringify(res.data)
+      // Pi can momentarily report "already processing" right after emitting agent_end
+      // (before it fully resets its state). Retry once after a short delay.
+      if (typeof errText === 'string' && errText.includes('already processing')) {
+        await new Promise<void>(resolve => setTimeout(resolve, 300))
+        const retry = await this.request({ type: 'prompt', message, images })
+        if (!retry.success) throw new Error(`pi prompt failed: ${retry.error ?? JSON.stringify(retry.data)}`)
+        return
+      }
+      throw new Error(`pi prompt failed: ${errText}`)
+    }
   }
 
   async abort(): Promise<void> {

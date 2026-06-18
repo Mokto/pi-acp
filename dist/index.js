@@ -216,7 +216,16 @@ var PiRpcProcess = class _PiRpcProcess {
   }
   async prompt(message, images = []) {
     const res = await this.request({ type: "prompt", message, images });
-    if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`);
+    if (!res.success) {
+      const errText = res.error ?? JSON.stringify(res.data);
+      if (typeof errText === "string" && errText.includes("already processing")) {
+        await new Promise((resolve4) => setTimeout(resolve4, 300));
+        const retry = await this.request({ type: "prompt", message, images });
+        if (!retry.success) throw new Error(`pi prompt failed: ${retry.error ?? JSON.stringify(retry.data)}`);
+        return;
+      }
+      throw new Error(`pi prompt failed: ${errText}`);
+    }
   }
   async abort() {
     const res = await this.request({ type: "abort" });
@@ -902,7 +911,7 @@ var PiAcpSession = class {
     const expandedMessage = expandSlashCommand(message, this.fileCommands);
     const turnPromise = new Promise((resolve4, reject) => {
       const queued = { message: expandedMessage, images, resolve: resolve4, reject };
-      if (this.pendingTurn) {
+      if (this.pendingTurn || this.turnQueue.length > 0) {
         this.turnQueue.push(queued);
         this.emit({
           sessionUpdate: "agent_message_chunk",

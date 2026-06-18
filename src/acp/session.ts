@@ -434,8 +434,10 @@ export class PiAcpSession {
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
       const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
 
-      // If a turn is already running, enqueue.
-      if (this.pendingTurn) {
+      // If a turn is running OR there are already-queued turns waiting to start (prevent
+      // a new prompt from racing past the queue during the brief window between
+      // completeTurn setting pendingTurn=null and startNextQueuedTurn firing).
+      if (this.pendingTurn || this.turnQueue.length > 0) {
         this.turnQueue.push(queued)
 
         // Best-effort: notify client that a prompt was queued.
