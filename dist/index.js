@@ -52,7 +52,7 @@ import { readFileSync as readFileSync3 } from "fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "path";
 
 // src/pi-rpc/process.ts
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import * as readline from "readline";
 
 // src/pi-rpc/command.ts
@@ -228,8 +228,20 @@ var PiRpcProcess = class _PiRpcProcess {
     }
   }
   async abort() {
+    this.killChildren();
     const res = await this.request({ type: "abort" });
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`);
+  }
+  // ponytail: pkill -P kills direct children only; grandchildren die when their
+  // parent dies (SIGHUP from terminal loss covers most shells). Upgrade path:
+  // recursive pgrep walk if we ever see zombie grandchildren.
+  killChildren(signal = "TERM") {
+    const pid = this.child.pid;
+    if (!pid || process.platform === "win32") return;
+    try {
+      execFileSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
+    } catch {
+    }
   }
   async getState() {
     const res = await this.request({ type: "get_state" });
