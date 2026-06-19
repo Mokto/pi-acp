@@ -633,7 +633,7 @@ function expandSlashCommand(text, fileCommands) {
 }
 
 // src/acp/session.ts
-var DEFAULT_TURN_INACTIVITY_MS = 15 * 6e4;
+var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
