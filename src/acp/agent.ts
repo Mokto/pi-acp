@@ -71,8 +71,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new TimeoutError(ms)), ms)
     promise.then(
-      v => { clearTimeout(timer); resolve(v) },
-      e => { clearTimeout(timer); reject(e) }
+      v => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      e => {
+        clearTimeout(timer)
+        reject(e)
+      }
     )
   })
 }
@@ -103,7 +109,11 @@ function buildSessionSummaryFromFile(sessionFile: string): string {
 
   for (const line of lines) {
     let obj: any
-    try { obj = JSON.parse(line) } catch { continue }
+    try {
+      obj = JSON.parse(line)
+    } catch {
+      continue
+    }
     if (obj?.type !== 'message') continue
 
     const msg = obj?.message ?? {}
@@ -1061,11 +1071,13 @@ export class PiAcpAgent implements ACPAgent {
           const summaryPath = join(params.cwd, '.pi-history-summary.md')
           try {
             writeFileSync(summaryPath, summary, 'utf-8')
-          } catch { /* ignore write errors (e.g. read-only cwd) */ }
+          } catch {
+            /* ignore write errors (e.g. read-only cwd) */
+          }
           session.setStartupInfo(
             `⚠️  Session history was too large to load (timed out after ${getMessagesTimeoutMs() / 1000}s).\n` +
-            `A summary of the previous conversation has been saved to \`.pi-history-summary.md\`.\n` +
-            `Reference it in your next message: _"see .pi-history-summary.md"_`
+              `A summary of the previous conversation has been saved to \`.pi-history-summary.md\`.\n` +
+              `Reference it in your next message: _"see .pi-history-summary.md"_`
           )
           setTimeout(() => session.sendStartupInfoIfPending(), 0)
         }

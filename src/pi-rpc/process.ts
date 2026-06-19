@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
@@ -256,8 +256,24 @@ export class PiRpcProcess {
   }
 
   async abort(): Promise<void> {
+    // Kill bash scripts and hooks (pi's children) first so hung subprocesses
+    // don't block pi from processing the RPC abort.
+    this.killChildren()
     const res = await this.request({ type: 'abort' })
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  // ponytail: pkill -P kills direct children only; grandchildren die when their
+  // parent dies (SIGHUP from terminal loss covers most shells). Upgrade path:
+  // recursive pgrep walk if we ever see zombie grandchildren.
+  private killChildren(signal: string = 'TERM'): void {
+    const pid = this.child.pid
+    if (!pid || process.platform === 'win32') return
+    try {
+      execFileSync('pkill', [`-${signal}`, '-P', String(pid)], { stdio: 'ignore' })
+    } catch {
+      // pkill exits 1 when no matching processes — that's fine
+    }
   }
 
   async getState(): Promise<unknown> {

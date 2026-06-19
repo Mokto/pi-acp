@@ -53,7 +53,7 @@ type QueuedTurn = {
 
 type DeferredModel = { provider: string; modelId: string }
 
-const DEFAULT_TURN_INACTIVITY_MS = 15 * 60_000
+const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
 const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>

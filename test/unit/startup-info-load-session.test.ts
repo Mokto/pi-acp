@@ -67,8 +67,11 @@ test('PiAcpAgent: loadSession writes summary file and sets startup info when get
   // Write a minimal session JSONL with a couple of messages.
   const lines = [
     JSON.stringify({ type: 'session', version: 3, id: 's-timeout', timestamp: new Date().toISOString(), cwd: root }),
-    JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hello from history' }] } }),
-    JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'hi there' }] } }),
+    JSON.stringify({
+      type: 'message',
+      message: { role: 'user', content: [{ type: 'text', text: 'hello from history' }] }
+    }),
+    JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'hi there' }] } })
   ]
   writeFileSync(sessionFile, lines.join('\n') + '\n', 'utf-8')
 
@@ -79,7 +82,7 @@ test('PiAcpAgent: loadSession writes summary file and sets startup info when get
     getMessages: () => new Promise(() => {}),
     getAvailableModels: async () => ({ models: [] }),
     getState: async () => ({ thinkingLevel: 'medium' }),
-    getCommands: async () => ({ commands: [] }),
+    getCommands: async () => ({ commands: [] })
   })
 
   class FakeStore2 {
