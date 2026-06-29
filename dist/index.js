@@ -1702,6 +1702,7 @@ function optionIndex(optionId) {
   const index = Number(rawIndex);
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null;
 }
+var NETWORK_ERROR_PATTERN = /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i;
 function formatAutoRetryMessage(ev) {
   const attempt = Number(ev.attempt);
   const maxAttempts = Number(ev.maxAttempts);
@@ -1711,7 +1712,9 @@ function formatAutoRetryMessage(ev) {
   }
   let delaySeconds = Math.round(delayMs / 1e3);
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
-  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
+  const errorMessage = String(ev.errorMessage ?? "");
+  const prefix = NETWORK_ERROR_PATTERN.test(errorMessage) ? "Network error \u2014 r" : "R";
+  return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
 function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
