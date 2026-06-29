@@ -1435,6 +1435,9 @@ function optionIndex(optionId: string): number | null {
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null
 }
 
+const NETWORK_ERROR_PATTERN =
+  /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i
+
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const attempt = Number((ev as any).attempt)
   const maxAttempts = Number((ev as any).maxAttempts)
@@ -1447,7 +1450,9 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   let delaySeconds = Math.round(delayMs / 1000)
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
-  return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+  const errorMessage = String((ev as any).errorMessage ?? '')
+  const prefix = NETWORK_ERROR_PATTERN.test(errorMessage) ? 'Network error — r' : 'R'
+  return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 
 /** Truncate a string for display in tool titles. */

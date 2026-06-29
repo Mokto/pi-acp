@@ -369,6 +369,40 @@ test('PiAcpSession: omits raw errorMessage content from surfaced auto_retry_star
   assert.equal((conn.updates[0]!.update as any).content.text.includes('provider overloaded'), false)
 })
 
+test('PiAcpSession: prefixes auto_retry_start message with Network error for network failures', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  for (const errorMessage of ['fetch failed', 'Network error: ENOTFOUND api.example.com', 'ECONNREFUSED 127.0.0.1:443', 'socket hang up']) {
+    conn.updates.length = 0
+    proc.emit({
+      type: 'auto_retry_start',
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 2000,
+      errorMessage
+    } as any)
+
+    await new Promise(r => setTimeout(r, 0))
+
+    assert.equal(conn.updates.length, 1, `expected update for: ${errorMessage}`)
+    assert.equal(
+      (conn.updates[0]!.update as any).content.text,
+      'Network error \u2014 retrying (attempt 1/3, waiting 2s)...',
+      `wrong text for: ${errorMessage}`
+    )
+  }
+})
+
 test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
