@@ -214,17 +214,23 @@ var PiRpcProcess = class _PiRpcProcess {
     const lines = this.preludeLines.splice(0, this.preludeLines.length);
     return lines;
   }
-  async prompt(message, images = []) {
-    const res = await this.request({ type: "prompt", message, images });
+  async prompt(message, images = [], opts) {
+    const send = (streamingBehavior) => {
+      const behavior = streamingBehavior ?? opts?.streamingBehavior;
+      return this.request({
+        type: "prompt",
+        message,
+        images,
+        ...behavior ? { streamingBehavior: behavior } : {}
+      });
+    };
+    let res = await send();
     if (!res.success) {
       const errText = res.error ?? JSON.stringify(res.data);
-      if (typeof errText === "string" && errText.includes("already processing")) {
-        await new Promise((resolve4) => setTimeout(resolve4, 300));
-        const retry = await this.request({ type: "prompt", message, images });
-        if (!retry.success) throw new Error(`pi prompt failed: ${retry.error ?? JSON.stringify(retry.data)}`);
-        return;
+      if (typeof errText === "string" && errText.includes("already processing") && !opts?.streamingBehavior) {
+        res = await send("followUp");
       }
-      throw new Error(`pi prompt failed: ${errText}`);
+      if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`);
     }
   }
   async abort() {
@@ -938,6 +944,7 @@ var PiAcpSession = class {
         });
         return;
       }
+      this.pendingTurn = { resolve: resolve4, reject };
       this.startTurn(queued);
     });
     return turnPromise;
@@ -1092,7 +1099,7 @@ var PiAcpSession = class {
       await this.proc.setThinkingLevel(thinking);
     }
   }
-  startTurn(t) {
+  startTurn(t, opts) {
     this.cancelRequested = false;
     this.inAgentLoop = false;
     this.inferenceStartup = true;
@@ -1102,7 +1109,7 @@ var PiAcpSession = class {
       sessionUpdate: "session_info_update",
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
     });
-    this.proc.prompt(t.message, t.images).then(
+    this.proc.prompt(t.message, t.images, { streamingBehavior: opts?.streamingBehavior }).then(
       () => {
         if (!this.isExtensionCommandMessage(t.message)) return;
         void this.flushEmits().finally(() => {
@@ -1157,7 +1164,7 @@ var PiAcpSession = class {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: `Starting queued message. (${this.turnQueue.length} remaining)` }
       });
-      this.startTurn(next);
+      this.startTurn(next, { streamingBehavior: "followUp" });
       return;
     }
     this.emit({

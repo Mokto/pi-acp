@@ -382,7 +382,12 @@ test('PiAcpSession: prefixes auto_retry_start message with Network error for net
     fileCommands: []
   })
 
-  for (const errorMessage of ['fetch failed', 'Network error: ENOTFOUND api.example.com', 'ECONNREFUSED 127.0.0.1:443', 'socket hang up']) {
+  for (const errorMessage of [
+    'fetch failed',
+    'Network error: ENOTFOUND api.example.com',
+    'ECONNREFUSED 127.0.0.1:443',
+    'socket hang up'
+  ]) {
     conn.updates.length = 0
     proc.emit({
       type: 'auto_retry_start',
@@ -793,6 +798,34 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
 
   const r2 = await second
   assert.equal(r2, 'end_turn')
+})
+
+test('PiAcpSession: queued prompt uses streamingBehavior followUp', async () => {
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(new FakeAgentSideConnection()),
+    fileCommands: []
+  })
+
+  const first = session.prompt('one')
+  const second = session.prompt('two')
+
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.streamingBehavior, undefined)
+
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await first, 'end_turn')
+
+  assert.equal(proc.prompts.length, 2)
+  assert.equal(proc.prompts[1]!.message, 'two')
+  assert.equal(proc.prompts[1]!.streamingBehavior, 'followUp')
+
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await second, 'end_turn')
 })
 
 test('PiAcpSession: cancel clears queued prompts', async () => {

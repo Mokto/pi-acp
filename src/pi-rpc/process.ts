@@ -27,8 +27,12 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_ESCAPE_REGEX, '')
 }
 
+export type PiPromptOptions = {
+  streamingBehavior?: 'steer' | 'followUp'
+}
+
 type PiRpcCommand =
-  | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
+  | { type: 'prompt'; id?: string; message: string; images?: unknown[]; streamingBehavior?: 'steer' | 'followUp' }
   | { type: 'abort'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
@@ -239,19 +243,26 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
-    const res = await this.request({ type: 'prompt', message, images })
+  async prompt(message: string, images: unknown[] = [], opts?: PiPromptOptions): Promise<void> {
+    const send = (streamingBehavior?: 'steer' | 'followUp') => {
+      const behavior = streamingBehavior ?? opts?.streamingBehavior
+      return this.request({
+        type: 'prompt',
+        message,
+        images,
+        ...(behavior ? { streamingBehavior: behavior } : {})
+      })
+    }
+
+    let res = await send()
     if (!res.success) {
       const errText = res.error ?? JSON.stringify(res.data)
-      // Pi can momentarily report "already processing" right after emitting agent_end
-      // (before it fully resets its state). Retry once after a short delay.
-      if (typeof errText === 'string' && errText.includes('already processing')) {
-        await new Promise<void>(resolve => setTimeout(resolve, 300))
-        const retry = await this.request({ type: 'prompt', message, images })
-        if (!retry.success) throw new Error(`pi prompt failed: ${retry.error ?? JSON.stringify(retry.data)}`)
-        return
+      // Pi can report "already processing" while streaming or right after agent_end.
+      // Queue via followUp instead of racing a bare prompt retry.
+      if (typeof errText === 'string' && errText.includes('already processing') && !opts?.streamingBehavior) {
+        res = await send('followUp')
       }
-      throw new Error(`pi prompt failed: ${errText}`)
+      if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
     }
   }
 

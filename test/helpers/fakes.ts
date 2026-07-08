@@ -27,7 +27,11 @@ export class FakePiRpcProcess {
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
 
   // spies
-  readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
+  readonly prompts: Array<{
+    message: string
+    attachments: unknown[]
+    streamingBehavior?: 'steer' | 'followUp'
+  }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
 
@@ -53,8 +57,12 @@ export class FakePiRpcProcess {
     for (const h of this.handlers) h(ev)
   }
 
-  async prompt(message: string, attachments: unknown[] = []): Promise<void> {
-    this.prompts.push({ message, attachments })
+  async prompt(
+    message: string,
+    attachments: unknown[] = [],
+    opts?: { streamingBehavior?: 'steer' | 'followUp' }
+  ): Promise<void> {
+    this.prompts.push({ message, attachments, streamingBehavior: opts?.streamingBehavior })
   }
 
   async abort(): Promise<void> {

@@ -460,7 +460,8 @@ export class PiAcpSession {
         return
       }
 
-      // No turn is running; start immediately.
+      // Reserve synchronously so a concurrent prompt() can't slip past before startTurn runs.
+      this.pendingTurn = { resolve, reject }
       this.startTurn(queued)
     })
 
@@ -673,7 +674,7 @@ export class PiAcpSession {
     }
   }
 
-  private startTurn(t: QueuedTurn): void {
+  private startTurn(t: QueuedTurn, opts?: { streamingBehavior?: 'steer' | 'followUp' }): void {
     this.cancelRequested = false
     this.inAgentLoop = false
     this.inferenceStartup = true
@@ -689,7 +690,7 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
     // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(t.message, t.images).then(
+    this.proc.prompt(t.message, t.images, { streamingBehavior: opts?.streamingBehavior }).then(
       () => {
         // Recognised pi commands (e.g. extension slash commands) run synchronously and
         // emit no agent loop, so pi never sends `agent_end`. Complete the turn on the
@@ -761,7 +762,7 @@ export class PiAcpSession {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
       })
-      this.startTurn(next)
+      this.startTurn(next, { streamingBehavior: 'followUp' })
       return
     }
 
