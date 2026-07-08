@@ -48,8 +48,10 @@ function terminalAuthLaunchSpec() {
 
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
+import { execFile } from "child_process";
 import { readFileSync as readFileSync3 } from "fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "path";
+import { promisify } from "util";
 
 // src/pi-rpc/process.ts
 import { execFileSync, spawn } from "child_process";
@@ -817,7 +819,7 @@ var SessionManager = class {
     return session;
   }
 };
-var PiAcpSession = class {
+var PiAcpSession = class _PiAcpSession {
   sessionId;
   cwd;
   mcpServers;
@@ -861,6 +863,14 @@ var PiAcpSession = class {
   // accounting where intermediate tool-call turns report input=0, making the
   // last assistant message's totalTokens look tiny.
   peakContextTokens = 0;
+  // Cached `gh pr view` lookup for the footer PR link — avoids shelling out
+  // to gh on every turn. Refreshed after PR_LINK_CACHE_MS; null url means
+  // "no open PR" (also cached, so a branch with no PR doesn't retry every turn).
+  // Refreshed in the background (see refreshPrLinkInBackground) so it never adds
+  // latency to a turn — a stale/cold cache just means the footer omits the link
+  // until the fetch lands.
+  prLinkCache = null;
+  prLinkRefreshInFlight = null;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -886,6 +896,7 @@ var PiAcpSession = class {
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
     });
+    this.getPrLinkCached();
   }
   setStartupInfo(text) {
     this.startupInfo = text;
@@ -1172,6 +1183,36 @@ var PiAcpSession = class {
       _meta: { piAcp: { queueDepth: 0, running: false } }
     });
   }
+  static PR_LINK_CACHE_MS = 3e4;
+  static execFileAsync = promisify(execFile);
+  // Best-effort, cached GitHub PR URL for the current branch — appended to the
+  // token-usage footer so it's visible without running /pr-link manually. Never
+  // blocks the caller: returns whatever is cached (possibly null on a cold
+  // start) and kicks off a background refresh if the cache is stale.
+  getPrLinkCached() {
+    if (process.env.PI_ACP_SHOW_PR_LINK === "false") return null;
+    const now = Date.now();
+    const stale = !this.prLinkCache || now - this.prLinkCache.fetchedAt >= _PiAcpSession.PR_LINK_CACHE_MS;
+    if (stale && !this.prLinkRefreshInFlight) {
+      this.prLinkRefreshInFlight = this.refreshPrLink().finally(() => {
+        this.prLinkRefreshInFlight = null;
+      });
+    }
+    return this.prLinkCache?.url ?? null;
+  }
+  async refreshPrLink() {
+    let url = null;
+    try {
+      const { stdout } = await _PiAcpSession.execFileAsync("gh", ["pr", "view", "--json", "url", "-q", ".url"], {
+        cwd: this.cwd,
+        timeout: 3e3
+      });
+      url = stdout.trim() || null;
+    } catch {
+      url = null;
+    }
+    this.prLinkCache = { url, fetchedAt: Date.now() };
+  }
   // Best-effort refresh of the model/thinking selectors. A stale selector is
   // preferable to crashing the event loop, so failures are swallowed.
   async pushConfigOptionUpdate() {
@@ -1227,6 +1268,8 @@ var PiAcpSession = class {
         parts.push(`${Math.round(raw * 10) / 10}%`);
       }
     }
+    const prLink = this.getPrLinkCached();
+    if (prLink) parts.push(prLink);
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
 
