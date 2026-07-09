@@ -1296,7 +1296,10 @@ var PiAcpSession = class _PiAcpSession {
       }
     }
     const prLink = this.getPrLinkCached();
-    if (prLink) parts.push(prLink);
+    if (prLink) {
+      const prNumber = /\/pull\/(\d+)\/?$/.exec(prLink)?.[1];
+      parts.push(prNumber ? `[#${prNumber}](${prLink})` : `[PR](${prLink})`);
+    }
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
 
