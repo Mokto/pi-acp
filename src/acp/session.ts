@@ -1417,9 +1417,14 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
+      // Leading "\n\n", matching the token-footer convention (see the `\n\n\u21b3` emit
+      // above): each notify() call arrives as its own agent_message_chunk with no
+      // inherent separator, so back-to-back calls from something like /audit's
+      // multi-step pipeline ("Gathering diff…" → "Running 4 lenses…" → "lens done…")
+      // otherwise render as one run-on sentence instead of a readable progress list.
       this.emit({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
+        content: { type: 'text', text: `\n\n${stringProp(ev, 'message') ?? 'Pi notification'}` } satisfies ContentBlock
       })
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
