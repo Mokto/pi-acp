@@ -136,6 +136,28 @@ test('getPrLinkCached: drops the cached URL immediately on a further branch chan
   }
 })
 
+test('maybeEmitTokenStats: renders the PR link as a markdown link, not a raw URL', async () => {
+  let branch = 'main'
+  ;(PiAcpSession as any).execFileAsync = async () => ({ stdout: 'https://github.com/acme/repo/pull/42\n' })
+  const restore = stubBranch(() => branch)
+  try {
+    const session = makeSession()
+    branch = 'branch-a'
+    session.getPrLinkCached() // triggers the background fetch now that the branch differs
+    await flushMicrotasks()
+
+    const conn = (session as any).conn as FakeAgentSideConnection
+    await (session as any).maybeEmitTokenStats()
+    await (session as any).flushEmits()
+
+    const text = conn.updates.map((u: any) => u.update?.content?.text ?? '').join('')
+    assert.match(text, /\[#42\]\(https:\/\/github\.com\/acme\/repo\/pull\/42\)/)
+    assert.doesNotMatch(text, /·\s*https:\/\//, 'PR URL must not appear as a bare link')
+  } finally {
+    restore()
+  }
+})
+
 test('getPrLinkCached: disabled via PI_ACP_SHOW_PR_LINK=false', async () => {
   ;(PiAcpSession as any).execFileAsync = async () => {
     throw new Error('should not be called')
