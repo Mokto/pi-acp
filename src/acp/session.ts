@@ -344,14 +344,19 @@ export class PiAcpSession {
   // last assistant message's totalTokens look tiny.
   private peakContextTokens: number = 0
 
-  // Cached `gh pr view` lookup for the footer PR link — avoids shelling out
-  // to gh on every turn. Refreshed after PR_LINK_CACHE_MS; null url means
-  // "no open PR" (also cached, so a branch with no PR doesn't retry every turn).
-  // Refreshed in the background (see refreshPrLinkInBackground) so it never adds
-  // latency to a turn — a stale/cold cache just means the footer omits the link
-  // until the fetch lands.
-  private prLinkCache: { url: string | null; fetchedAt: number } | null = null
+  // Cached `gh pr view` lookup for the footer PR link. Gated on sessionStartBranch
+  // (see getPrLinkCached): a session that never changes branch never shells out to
+  // gh, so a branch with a pre-existing PR from earlier work doesn't get reported
+  // as "this session's" PR. Once the branch does change, refreshed in the
+  // background after PR_LINK_CACHE_MS so it never adds latency to a turn — a
+  // stale/cold cache just means the footer omits the link until the fetch lands.
+  // null url means "no open PR" (also cached, so a branch with no PR doesn't
+  // retry every turn).
+  private prLinkCache: { url: string | null; branch: string | null; fetchedAt: number } | null = null
   private prLinkRefreshInFlight: Promise<void> | null = null
+  // Branch this session started on; undefined until the first check. A link is
+  // only ever surfaced once the current branch diverges from this baseline.
+  private sessionStartBranch: string | null | undefined = undefined
 
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
@@ -389,8 +394,8 @@ export class PiAcpSession {
       void this.handleProcessExit(code, signal)
     })
 
-    // Warm the PR-link cache immediately so it's ready by the time the first
-    // turn ends, instead of waiting for a stale cache to be noticed mid-footer.
+    // Captures sessionStartBranch as a side effect; a real gh fetch only happens
+    // once the branch changes (see getPrLinkCached).
     this.getPrLinkCached()
   }
 
@@ -794,19 +799,46 @@ export class PiAcpSession {
   // token-usage footer so it's visible without running /pr-link manually. Never
   // blocks the caller: returns whatever is cached (possibly null on a cold
   // start) and kicks off a background refresh if the cache is stale.
+  //
+  // Suppressed until the branch actually changes from whatever it was when the
+  // session started: a fresh session on a branch that already has an open PR
+  // from earlier, unrelated work has no business reporting that PR as its own.
   private getPrLinkCached(): string | null {
     if (process.env.PI_ACP_SHOW_PR_LINK === 'false') return null
+    const currentBranch = this.getCurrentBranchSync()
+    if (this.sessionStartBranch === undefined) this.sessionStartBranch = currentBranch
+    if (currentBranch === this.sessionStartBranch) return null
+
+    // The branch changed again mid-session (e.g. hopped from one work branch to
+    // another) — a cached URL for the previous branch is wrong for this one.
+    if (this.prLinkCache && this.prLinkCache.branch !== currentBranch) {
+      this.prLinkCache = null
+    }
+
     const now = Date.now()
     const stale = !this.prLinkCache || now - this.prLinkCache.fetchedAt >= PiAcpSession.PR_LINK_CACHE_MS
     if (stale && !this.prLinkRefreshInFlight) {
-      this.prLinkRefreshInFlight = this.refreshPrLink().finally(() => {
+      this.prLinkRefreshInFlight = this.refreshPrLink(currentBranch).finally(() => {
         this.prLinkRefreshInFlight = null
       })
     }
     return this.prLinkCache?.url ?? null
   }
 
-  private async refreshPrLink(): Promise<void> {
+  // Fast, sync branch read via .git/HEAD — avoids spawning `git` just to decide
+  // whether the gh cache is still valid. Falls back to null (treated as "unknown
+  // branch", forcing a refresh) for detached HEAD or any read failure.
+  private getCurrentBranchSync(): string | null {
+    try {
+      const head = readFileSync(resolvePath(this.cwd, '.git', 'HEAD'), 'utf8').trim()
+      const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head)
+      return match ? match[1] : head || null
+    } catch {
+      return null
+    }
+  }
+
+  private async refreshPrLink(branch: string | null): Promise<void> {
     let url: string | null = null
     try {
       const { stdout } = await PiAcpSession.execFileAsync('gh', ['pr', 'view', '--json', 'url', '-q', '.url'], {
@@ -817,7 +849,7 @@ export class PiAcpSession {
     } catch {
       url = null
     }
-    this.prLinkCache = { url, fetchedAt: Date.now() }
+    this.prLinkCache = { url, branch, fetchedAt: Date.now() }
   }
 
   // Best-effort refresh of the model/thinking selectors. A stale selector is
