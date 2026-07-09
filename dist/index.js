@@ -863,14 +863,19 @@ var PiAcpSession = class _PiAcpSession {
   // accounting where intermediate tool-call turns report input=0, making the
   // last assistant message's totalTokens look tiny.
   peakContextTokens = 0;
-  // Cached `gh pr view` lookup for the footer PR link — avoids shelling out
-  // to gh on every turn. Refreshed after PR_LINK_CACHE_MS; null url means
-  // "no open PR" (also cached, so a branch with no PR doesn't retry every turn).
-  // Refreshed in the background (see refreshPrLinkInBackground) so it never adds
-  // latency to a turn — a stale/cold cache just means the footer omits the link
-  // until the fetch lands.
+  // Cached `gh pr view` lookup for the footer PR link. Gated on sessionStartBranch
+  // (see getPrLinkCached): a session that never changes branch never shells out to
+  // gh, so a branch with a pre-existing PR from earlier work doesn't get reported
+  // as "this session's" PR. Once the branch does change, refreshed in the
+  // background after PR_LINK_CACHE_MS so it never adds latency to a turn — a
+  // stale/cold cache just means the footer omits the link until the fetch lands.
+  // null url means "no open PR" (also cached, so a branch with no PR doesn't
+  // retry every turn).
   prLinkCache = null;
   prLinkRefreshInFlight = null;
+  // Branch this session started on; undefined until the first check. A link is
+  // only ever surfaced once the current branch diverges from this baseline.
+  sessionStartBranch = void 0;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -1189,18 +1194,40 @@ var PiAcpSession = class _PiAcpSession {
   // token-usage footer so it's visible without running /pr-link manually. Never
   // blocks the caller: returns whatever is cached (possibly null on a cold
   // start) and kicks off a background refresh if the cache is stale.
+  //
+  // Suppressed until the branch actually changes from whatever it was when the
+  // session started: a fresh session on a branch that already has an open PR
+  // from earlier, unrelated work has no business reporting that PR as its own.
   getPrLinkCached() {
     if (process.env.PI_ACP_SHOW_PR_LINK === "false") return null;
+    const currentBranch = this.getCurrentBranchSync();
+    if (this.sessionStartBranch === void 0) this.sessionStartBranch = currentBranch;
+    if (currentBranch === this.sessionStartBranch) return null;
+    if (this.prLinkCache && this.prLinkCache.branch !== currentBranch) {
+      this.prLinkCache = null;
+    }
     const now = Date.now();
     const stale = !this.prLinkCache || now - this.prLinkCache.fetchedAt >= _PiAcpSession.PR_LINK_CACHE_MS;
     if (stale && !this.prLinkRefreshInFlight) {
-      this.prLinkRefreshInFlight = this.refreshPrLink().finally(() => {
+      this.prLinkRefreshInFlight = this.refreshPrLink(currentBranch).finally(() => {
         this.prLinkRefreshInFlight = null;
       });
     }
     return this.prLinkCache?.url ?? null;
   }
-  async refreshPrLink() {
+  // Fast, sync branch read via .git/HEAD — avoids spawning `git` just to decide
+  // whether the gh cache is still valid. Falls back to null (treated as "unknown
+  // branch", forcing a refresh) for detached HEAD or any read failure.
+  getCurrentBranchSync() {
+    try {
+      const head = readFileSync3(resolvePath(this.cwd, ".git", "HEAD"), "utf8").trim();
+      const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+      return match ? match[1] : head || null;
+    } catch {
+      return null;
+    }
+  }
+  async refreshPrLink(branch) {
     let url = null;
     try {
       const { stdout } = await _PiAcpSession.execFileAsync("gh", ["pr", "view", "--json", "url", "-q", ".url"], {
@@ -1211,7 +1238,7 @@ var PiAcpSession = class _PiAcpSession {
     } catch {
       url = null;
     }
-    this.prLinkCache = { url, fetchedAt: Date.now() };
+    this.prLinkCache = { url, branch, fetchedAt: Date.now() };
   }
   // Best-effort refresh of the model/thinking selectors. A stale selector is
   // preferable to crashing the event loop, so failures are swallowed.
