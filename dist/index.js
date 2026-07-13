@@ -423,12 +423,28 @@ var SessionStore = class {
   }
   upsert(entry) {
     const db = loadFile(this.path);
+    const existing = db.sessions[entry.sessionId];
     db.sessions[entry.sessionId] = {
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      ...existing && "startBranch" in existing ? { startBranch: existing.startBranch } : {}
     };
+    saveFile(this.path, db);
+  }
+  /** True once `setStartBranch` has recorded a baseline for this session (even null). */
+  hasStartBranch(sessionId) {
+    const db = loadFile(this.path);
+    const existing = db.sessions[sessionId];
+    return existing ? "startBranch" in existing : false;
+  }
+  /** Record the branch a session started on. No-op if the session isn't registered yet. */
+  setStartBranch(sessionId, branch) {
+    const db = loadFile(this.path);
+    const existing = db.sessions[sessionId];
+    if (!existing) return;
+    existing.startBranch = branch;
     saveFile(this.path, db);
   }
   delete(sessionId) {
@@ -790,7 +806,8 @@ var SessionManager = class {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      store: this.store
     });
     this.sessions.set(sessionId, session);
     return session;
@@ -813,7 +830,8 @@ var SessionManager = class {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      store: this.store
     });
     this.sessions.set(sessionId, session);
     return session;
@@ -876,6 +894,10 @@ var PiAcpSession = class _PiAcpSession {
   // Branch this session started on; undefined until the first check. A link is
   // only ever surfaced once the current branch diverges from this baseline.
   sessionStartBranch = void 0;
+  // Persists sessionStartBranch across process restarts (see constructor and
+  // getPrLinkCached). Null when the session was constructed without a store
+  // (e.g. tests) — the footer link heuristic just won't survive a resume.
+  store = null;
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
   // events may need to be implemented in pi in the future.
@@ -897,10 +919,14 @@ var PiAcpSession = class _PiAcpSession {
     this.proc = opts.proc;
     this.conn = opts.conn;
     this.fileCommands = opts.fileCommands ?? [];
+    this.store = opts.store ?? null;
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
     });
+    if (this.store?.hasStartBranch(this.sessionId)) {
+      this.sessionStartBranch = this.store.get(this.sessionId)?.startBranch ?? null;
+    }
     this.getPrLinkCached();
   }
   setStartupInfo(text) {
@@ -1201,7 +1227,10 @@ var PiAcpSession = class _PiAcpSession {
   getPrLinkCached() {
     if (process.env.PI_ACP_SHOW_PR_LINK === "false") return null;
     const currentBranch = this.getCurrentBranchSync();
-    if (this.sessionStartBranch === void 0) this.sessionStartBranch = currentBranch;
+    if (this.sessionStartBranch === void 0) {
+      this.sessionStartBranch = currentBranch;
+      this.store?.setStartBranch(this.sessionId, currentBranch);
+    }
     if (currentBranch === this.sessionStartBranch) return null;
     if (this.prLinkCache && this.prLinkCache.branch !== currentBranch) {
       this.prLinkCache = null;
@@ -1700,7 +1729,9 @@ var PiAcpSession = class _PiAcpSession {
     if (method === "notify") {
       this.emit({
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: stringProp(ev, "message") ?? "Pi notification" }
+        content: { type: "text", text: `
+
+${stringProp(ev, "message") ?? "Pi notification"}` }
       });
       await this.proc.sendExtensionUiResponse({ id, cancelled: true });
       return;
