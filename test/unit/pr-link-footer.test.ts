@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { PiAcpSession } from '../../src/acp/session.js'
+import { SessionStore } from '../../src/acp/session-store.js'
 import { FakeAgentSideConnection, FakePiRpcProcess } from '../helpers/fakes.js'
 
 // getPrLinkCached() shells out to `gh pr view` in the background and caches the
@@ -19,13 +23,14 @@ async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve()
 }
 
-function makeSession(): any {
+function makeSession(opts?: { store?: SessionStore }): any {
   return new (PiAcpSession as any)({
     sessionId: 's1',
     cwd: '/tmp/whatever',
     mcpServers: [],
     proc: new FakePiRpcProcess(),
-    conn: new FakeAgentSideConnection()
+    conn: new FakeAgentSideConnection(),
+    store: opts?.store
   })
 }
 
@@ -153,6 +158,50 @@ test('maybeEmitTokenStats: renders the PR link as a markdown link, not a raw URL
     const text = conn.updates.map((u: any) => u.update?.content?.text ?? '').join('')
     assert.match(text, /\[#42\]\(https:\/\/github\.com\/acme\/repo\/pull\/42\)/)
     assert.doesNotMatch(text, /·\s*https:\/\//, 'PR URL must not appear as a bare link')
+  } finally {
+    restore()
+  }
+})
+
+// Reboot/reload (Zed restart, computer reboot) constructs a brand new
+// PiAcpSession for the same sessionId, resuming on whatever branch the repo is
+// currently on. Without persisting the baseline, that current branch becomes
+// the new sessionStartBranch and a PR link that was already showing before
+// the reboot vanishes for good, because "current === start" forever after.
+test('getPrLinkCached: sessionStartBranch survives a simulated reboot via the session store', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-store-'))
+  const store = new SessionStore(join(dir, 'session-map.json'))
+  store.upsert({ sessionId: 's1', cwd: '/tmp/whatever', sessionFile: '/tmp/s1.jsonl' })
+
+  let calls = 0
+  ;(PiAcpSession as any).execFileAsync = async () => {
+    calls++
+    return { stdout: 'https://github.com/acme/repo/pull/42\n' }
+  }
+  let branch = 'main'
+  const restore = stubBranch(() => branch)
+  try {
+    // First process lifetime: session starts on 'main', then the user checks
+    // out a work branch and the footer picks up the PR link.
+    const before = makeSession({ store })
+    branch = 'work-branch'
+    before.getPrLinkCached()
+    await flushMicrotasks()
+    assert.equal(before.getPrLinkCached(), 'https://github.com/acme/repo/pull/42')
+
+    // Reboot: a fresh PiAcpSession is constructed for the same sessionId while
+    // the repo is still on 'work-branch'. Simulates autoRestoreSession's
+    // re-upsert of cwd/sessionFile right after reconstructing the session.
+    const after = makeSession({ store })
+    store.upsert({ sessionId: 's1', cwd: '/tmp/whatever', sessionFile: '/tmp/s1.jsonl' })
+    after.getPrLinkCached() // fresh instance, cold cache: kicks off a background fetch
+    await flushMicrotasks()
+    assert.equal(
+      after.getPrLinkCached(),
+      'https://github.com/acme/repo/pull/42',
+      'link must still show: the baseline should be the pre-reboot start branch, not the current one'
+    )
+    assert.equal(calls, 2, 'a fresh instance has a cold in-memory cache, so it re-fetches once, but never suppresses the link')
   } finally {
     restore()
   }

@@ -7,6 +7,13 @@ export type StoredSession = {
   cwd: string
   sessionFile: string
   updatedAt: string
+  // Branch the session started on, for the footer PR-link heuristic (see
+  // getPrLinkCached in session.ts). Persisted so a resumed/reloaded session
+  // (new PiAcpSession instance, same sessionId) doesn't reset its baseline to
+  // the current branch and permanently suppress a link it was already showing.
+  // Absent = not yet captured; null = captured but branch was undetectable
+  // (e.g. detached HEAD).
+  startBranch?: string | null
 }
 
 type SessionMapFile = {
@@ -50,12 +57,30 @@ export class SessionStore {
 
   upsert(entry: { sessionId: string; cwd: string; sessionFile: string }): void {
     const db = loadFile(this.path)
+    const existing = db.sessions[entry.sessionId]
     db.sessions[entry.sessionId] = {
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      ...(existing && 'startBranch' in existing ? { startBranch: existing.startBranch } : {})
     }
+    saveFile(this.path, db)
+  }
+
+  /** True once `setStartBranch` has recorded a baseline for this session (even null). */
+  hasStartBranch(sessionId: string): boolean {
+    const db = loadFile(this.path)
+    const existing = db.sessions[sessionId]
+    return existing ? 'startBranch' in existing : false
+  }
+
+  /** Record the branch a session started on. No-op if the session isn't registered yet. */
+  setStartBranch(sessionId: string, branch: string | null): void {
+    const db = loadFile(this.path)
+    const existing = db.sessions[sessionId]
+    if (!existing) return
+    existing.startBranch = branch
     saveFile(this.path, db)
   }
 

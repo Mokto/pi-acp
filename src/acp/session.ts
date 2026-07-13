@@ -254,7 +254,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      store: this.store
     })
 
     this.sessions.set(sessionId, session)
@@ -281,7 +282,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      store: this.store
     })
 
     this.sessions.set(sessionId, session)
@@ -357,6 +359,10 @@ export class PiAcpSession {
   // Branch this session started on; undefined until the first check. A link is
   // only ever surfaced once the current branch diverges from this baseline.
   private sessionStartBranch: string | null | undefined = undefined
+  // Persists sessionStartBranch across process restarts (see constructor and
+  // getPrLinkCached). Null when the session was constructed without a store
+  // (e.g. tests) — the footer link heuristic just won't survive a resume.
+  private readonly store: SessionStore | null = null
 
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
@@ -381,6 +387,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    store?: SessionStore
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -388,11 +395,21 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.store = opts.store ?? null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal)
     })
+
+    // A reload/resume (computer reboot, Zed restart) constructs a brand new
+    // PiAcpSession for the same sessionId. Without this, sessionStartBranch
+    // below would reset to the *current* branch and the footer PR link would
+    // vanish forever, even though the branch diverged earlier in the same
+    // logical session. Recover the original baseline from disk first.
+    if (this.store?.hasStartBranch(this.sessionId)) {
+      this.sessionStartBranch = this.store.get(this.sessionId)?.startBranch ?? null
+    }
 
     // Captures sessionStartBranch as a side effect; a real gh fetch only happens
     // once the branch changes (see getPrLinkCached).
@@ -806,7 +823,10 @@ export class PiAcpSession {
   private getPrLinkCached(): string | null {
     if (process.env.PI_ACP_SHOW_PR_LINK === 'false') return null
     const currentBranch = this.getCurrentBranchSync()
-    if (this.sessionStartBranch === undefined) this.sessionStartBranch = currentBranch
+    if (this.sessionStartBranch === undefined) {
+      this.sessionStartBranch = currentBranch
+      this.store?.setStartBranch(this.sessionId, currentBranch)
+    }
     if (currentBranch === this.sessionStartBranch) return null
 
     // The branch changed again mid-session (e.g. hopped from one work branch to
