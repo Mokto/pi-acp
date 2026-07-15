@@ -1676,6 +1676,7 @@ var PiAcpSession = class _PiAcpSession {
         break;
       }
       case "agent_end": {
+        if (ev.willRetry) break;
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
