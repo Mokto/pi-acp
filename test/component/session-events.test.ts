@@ -696,6 +696,38 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: agent_end with willRetry does not resolve the prompt (pi is auto-retrying)', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 1000 })
+  // pi fires agent_end for the failed call it's about to retry — must not resolve the turn.
+  proc.emit({ type: 'agent_end', willRetry: true })
+
+  let settled = false
+  void p.then(() => {
+    settled = true
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(settled, false)
+
+  // The real agent_end after the retry succeeds resolves the turn as normal.
+  proc.emit({ type: 'agent_end' })
+  const reason = await p
+  assert.equal(reason, 'end_turn')
+})
+
 test('PiAcpSession: re-emits startup info as the first chunk of the first prompt', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

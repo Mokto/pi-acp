@@ -1377,6 +1377,13 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
+        // pi fires `agent_end` for a failed LLM call it's about to auto-retry
+        // (willRetry: true), then keeps running — a real `agent_end` follows once
+        // the retry loop finishes. Resolving the ACP prompt here would make Zed
+        // think the turn is done (drops the loading spinner, fires a "ready" toast)
+        // while pi is still working, so only complete the turn when willRetry is falsy.
+        if ((ev as any).willRetry) break
+
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void (async () => {
