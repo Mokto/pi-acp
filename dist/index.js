@@ -874,6 +874,15 @@ var PiAcpSession = class _PiAcpSession {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
+  // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
+  // Such commands can drive several *independent* nested turns internally (via
+  // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
+  // own real `agent_start`/`agent_end`. Those are not the command's own completion — the
+  // command's RPC `prompt` response only resolves once the whole handler returns (pi core
+  // awaits `_tryExecuteExtensionCommand` before acking) — so while this flag is set,
+  // `agent_end`/error events must not complete the ACP turn early; only the `.then()` in
+  // startTurn() does, once the command handler itself is done.
+  pendingTurnIsExtensionCommand = false;
   // Context window size reported by pi (updated from getSessionStats).
   contextWindow = null;
   // Peak context tokens seen this session. Context only grows, so we never
@@ -1146,6 +1155,7 @@ var PiAcpSession = class _PiAcpSession {
     this.inAgentLoop = false;
     this.inferenceStartup = true;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
+    this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message);
     this.resetTurnWatchdog();
     this.emit({
       sessionUpdate: "session_info_update",
@@ -1155,6 +1165,7 @@ var PiAcpSession = class _PiAcpSession {
       () => {
         if (!this.isExtensionCommandMessage(t.message)) return;
         void this.flushEmits().finally(() => {
+          this.pendingTurnIsExtensionCommand = false;
           this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
         });
       },
@@ -1173,6 +1184,7 @@ var PiAcpSession = class _PiAcpSession {
             this.pendingTurn?.resolve(reason);
           }
           this.pendingTurn = null;
+          this.pendingTurnIsExtensionCommand = false;
           this.inAgentLoop = false;
           this.clearTurnWatchdog();
           this.emit({
@@ -1196,6 +1208,7 @@ var PiAcpSession = class _PiAcpSession {
     this.clearTurnWatchdog();
     this.pendingTurn?.resolve(reason);
     this.pendingTurn = null;
+    this.pendingTurnIsExtensionCommand = false;
     this.inAgentLoop = false;
     void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn());
   }
@@ -1681,6 +1694,7 @@ var PiAcpSession = class _PiAcpSession {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
           await this.flushEmits();
+          if (this.pendingTurnIsExtensionCommand) return;
           this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
         })();
         break;
@@ -1694,6 +1708,7 @@ var PiAcpSession = class _PiAcpSession {
         });
         void (async () => {
           await this.flushEmits();
+          if (this.pendingTurnIsExtensionCommand) return;
           this.completeTurn(this.cancelRequested ? "cancelled" : "error");
         })();
         break;
