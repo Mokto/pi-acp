@@ -337,6 +337,16 @@ export class PiAcpSession {
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
 
+  // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
+  // Such commands can drive several *independent* nested turns internally (via
+  // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
+  // own real `agent_start`/`agent_end`. Those are not the command's own completion — the
+  // command's RPC `prompt` response only resolves once the whole handler returns (pi core
+  // awaits `_tryExecuteExtensionCommand` before acking) — so while this flag is set,
+  // `agent_end`/error events must not complete the ACP turn early; only the `.then()` in
+  // startTurn() does, once the command handler itself is done.
+  private pendingTurnIsExtensionCommand = false
+
   // Context window size reported by pi (updated from getSessionStats).
   private contextWindow: number | null = null
 
@@ -716,6 +726,7 @@ export class PiAcpSession {
     this.inAgentLoop = false
     this.inferenceStartup = true
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message)
     this.resetTurnWatchdog()
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -735,6 +746,7 @@ export class PiAcpSession {
         // `agent_start`), so this only fires for known command messages.
         if (!this.isExtensionCommandMessage(t.message)) return
         void this.flushEmits().finally(() => {
+          this.pendingTurnIsExtensionCommand = false
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
         })
       },
@@ -759,6 +771,7 @@ export class PiAcpSession {
           }
 
           this.pendingTurn = null
+          this.pendingTurnIsExtensionCommand = false
           this.inAgentLoop = false
           this.clearTurnWatchdog()
 
@@ -787,6 +800,7 @@ export class PiAcpSession {
     this.clearTurnWatchdog()
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
+    this.pendingTurnIsExtensionCommand = false
     this.inAgentLoop = false
 
     void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn())
@@ -1390,6 +1404,9 @@ export class PiAcpSession {
           await this.flushEmits()
           await this.maybeEmitTokenStats()
           await this.flushEmits()
+          // A nested turn inside a still-running extension command (see
+          // pendingTurnIsExtensionCommand above) — its own agent_end, not the command's.
+          if (this.pendingTurnIsExtensionCommand) return
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
         })()
         break
@@ -1404,6 +1421,10 @@ export class PiAcpSession {
         })
         void (async () => {
           await this.flushEmits()
+          // Let the extension command's own handler decide how to surface this (it may
+          // recover and continue, e.g. retry or a different round) rather than tearing
+          // down the whole ACP turn out from under it.
+          if (this.pendingTurnIsExtensionCommand) return
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'error')
         })()
         break
