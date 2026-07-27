@@ -871,6 +871,13 @@ var PiAcpSession = class _PiAcpSession {
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
   currentToolCalls = /* @__PURE__ */ new Map();
+  // Base title (no mid-run _label override) each tool call started with, so
+  // tool_execution_end can restore it. Without this, a tool that ever set a
+  // progress label via onUpdate({details:{_label}}) (plan, audit, scout, ...)
+  // is left showing that stale label forever after it finishes, since
+  // tool_execution_end never re-sends `title` on its own.
+  originalToolTitles = /* @__PURE__ */ new Map();
+  customTitledToolCallIds = /* @__PURE__ */ new Set();
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
@@ -1078,6 +1085,8 @@ var PiAcpSession = class _PiAcpSession {
   }
   cleanupToolCall(toolCallId) {
     this.currentToolCalls.delete(toolCallId);
+    this.originalToolTitles.delete(toolCallId);
+    this.customTitledToolCallIds.delete(toolCallId);
     this.fileSnapshots.delete(toolCallId);
     this.fileMutationToolCallIds.delete(toolCallId);
     this.fileMutationDiffsEmitted.delete(toolCallId);
@@ -1406,10 +1415,12 @@ var PiAcpSession = class _PiAcpSession {
               });
             } else if (!existingStatus) {
               this.currentToolCalls.set(toolCallId, "pending");
+              const title = toToolTitle(toolName, rawInput, this.cwd);
+              this.originalToolTitles.set(toolCallId, title);
               this.emit({
                 sessionUpdate: "tool_call",
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -1478,10 +1489,12 @@ var PiAcpSession = class _PiAcpSession {
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId);
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, "in_progress");
+          const title = toToolTitle(toolName, args, this.cwd);
+          this.originalToolTitles.set(toolCallId, title);
           this.emit({
             sessionUpdate: "tool_call",
             toolCallId,
-            title: toToolTitle(toolName, args, this.cwd),
+            title,
             kind: toToolKind(toolName),
             status: "in_progress",
             locations,
@@ -1544,6 +1557,7 @@ var PiAcpSession = class _PiAcpSession {
         }
         const customTitle = typeof partial?.details?._label === "string" ? partial.details._label : void 0;
         if (customTitle) {
+          this.customTitledToolCallIds.add(toolCallId);
           this.emit({
             sessionUpdate: "tool_call_update",
             toolCallId,
@@ -1605,10 +1619,12 @@ var PiAcpSession = class _PiAcpSession {
         if (!content && !hasStructuredDiff && text) {
           content = [{ type: "content", content: { type: "text", text } }];
         }
+        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? this.originalToolTitles.get(toolCallId) : void 0;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
+          ...restoredTitle ? { title: restoredTitle } : {},
           content,
           ...hasStructuredDiff ? {} : { rawOutput: result }
         });
@@ -1629,14 +1645,15 @@ var PiAcpSession = class _PiAcpSession {
       case "auto_retry_start": {
         this.emit({
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: formatAutoRetryMessage(ev) }
+          content: { type: "text", text: `
+${formatAutoRetryMessage(ev)}` }
         });
         break;
       }
       case "auto_retry_end": {
         this.emit({
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "Retry finished, resuming." }
+          content: { type: "text", text: "\nRetry finished, resuming." }
         });
         break;
       }
@@ -1839,8 +1856,10 @@ function formatAutoRetryMessage(ev) {
   }
   let delaySeconds = Math.round(delayMs / 1e3);
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
-  const errorMessage = String(ev.errorMessage ?? "");
-  const prefix = NETWORK_ERROR_PATTERN.test(errorMessage) ? "Network error \u2014 r" : "R";
+  const errorMessage = String(ev.errorMessage ?? "").trim();
+  const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage);
+  const reason = isNetworkError || !errorMessage || errorMessage === "Unknown error" ? isNetworkError ? "Network error" : null : truncateTitle(errorMessage, 150);
+  const prefix = reason ? `${reason} \u2014 r` : "R";
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
 function truncateTitle(s, max = 60) {
