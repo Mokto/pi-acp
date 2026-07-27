@@ -332,6 +332,13 @@ export class PiAcpSession {
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
+  // Base title (no mid-run _label override) each tool call started with, so
+  // tool_execution_end can restore it. Without this, a tool that ever set a
+  // progress label via onUpdate({details:{_label}}) (plan, audit, scout, ...)
+  // is left showing that stale label forever after it finishes, since
+  // tool_execution_end never re-sends `title` on its own.
+  private originalToolTitles = new Map<string, string>()
+  private customTitledToolCallIds = new Set<string>()
 
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
@@ -628,6 +635,8 @@ export class PiAcpSession {
 
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
+    this.originalToolTitles.delete(toolCallId)
+    this.customTitledToolCallIds.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
     this.fileMutationToolCallIds.delete(toolCallId)
     this.fileMutationDiffsEmitted.delete(toolCallId)
@@ -1040,10 +1049,12 @@ export class PiAcpSession {
               })
             } else if (!existingStatus) {
               this.currentToolCalls.set(toolCallId, 'pending')
+              const title = toToolTitle(toolName, rawInput, this.cwd)
+              this.originalToolTitles.set(toolCallId, title)
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -1130,10 +1141,12 @@ export class PiAcpSession {
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
+          const title = toToolTitle(toolName, args, this.cwd)
+          this.originalToolTitles.set(toolCallId, title)
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toToolTitle(toolName, args, this.cwd),
+            title,
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -1210,6 +1223,7 @@ export class PiAcpSession {
         // which would cause toolResultToText to JSON-stringify it and Zed to treat it as the
         // tool's final result (empty content → hidden tool card).
         if (customTitle) {
+          this.customTitledToolCallIds.add(toolCallId)
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
@@ -1287,10 +1301,18 @@ export class PiAcpSession {
           content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
         }
 
+        // Restore the base title (e.g. "Plan") if a mid-run _label ever overrode
+        // it — otherwise the row is left showing a stale progress message like
+        // "Reviewing with claude-opus-4.8 (round 2/3)…" forever after completion.
+        const restoredTitle = this.customTitledToolCallIds.has(toolCallId)
+          ? this.originalToolTitles.get(toolCallId)
+          : undefined
+
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: isError ? 'failed' : 'completed',
+          ...(restoredTitle ? { title: restoredTitle } : {}),
           content,
           ...(hasStructuredDiff ? {} : { rawOutput: result })
         })
@@ -1314,7 +1336,7 @@ export class PiAcpSession {
       case 'auto_retry_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: formatAutoRetryMessage(ev) } satisfies ContentBlock
+          content: { type: 'text', text: `\n${formatAutoRetryMessage(ev)}` } satisfies ContentBlock
         })
         break
       }
@@ -1322,7 +1344,7 @@ export class PiAcpSession {
       case 'auto_retry_end': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
+          content: { type: 'text', text: '\nRetry finished, resuming.' } satisfies ContentBlock
         })
         break
       }
@@ -1590,8 +1612,15 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   let delaySeconds = Math.round(delayMs / 1000)
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1
 
-  const errorMessage = String((ev as any).errorMessage ?? '')
-  const prefix = NETWORK_ERROR_PATTERN.test(errorMessage) ? 'Network error — r' : 'R'
+  const errorMessage = String((ev as any).errorMessage ?? '').trim()
+  const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage)
+  const reason =
+    isNetworkError || !errorMessage || errorMessage === 'Unknown error'
+      ? isNetworkError
+        ? 'Network error'
+        : null
+      : truncateTitle(errorMessage, 150)
+  const prefix = reason ? `${reason} — r` : 'R'
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 

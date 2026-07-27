@@ -288,7 +288,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'Retrying (attempt 2/5, waiting 2s)...' }
+    content: { type: 'text', text: '\nRetrying (attempt 2/5, waiting 2s)...' }
   })
 })
 
@@ -312,7 +312,7 @@ test('PiAcpSession: formats a positive sub-second auto_retry_start delay as wait
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'Retrying (attempt 1/3, waiting 1s)...' }
+    content: { type: 'text', text: '\nRetrying (attempt 1/3, waiting 1s)...' }
   })
 })
 
@@ -336,11 +336,11 @@ test('PiAcpSession: falls back to a generic retry message when auto_retry_start 
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'Retrying...' }
+    content: { type: 'text', text: '\nRetrying...' }
   })
 })
 
-test('PiAcpSession: omits raw errorMessage content from surfaced auto_retry_start status text', async () => {
+test('PiAcpSession: surfaces the errorMessage reason in auto_retry_start status text', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -365,8 +365,36 @@ test('PiAcpSession: omits raw errorMessage content from surfaced auto_retry_star
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
-  assert.equal((conn.updates[0]!.update as any).content.text, 'Retrying (attempt 1/4, waiting 2s)...')
-  assert.equal((conn.updates[0]!.update as any).content.text.includes('provider overloaded'), false)
+  assert.equal(
+    (conn.updates[0]!.update as any).content.text,
+    '\nprovider overloaded: 529 \u2014 retrying (attempt 1/4, waiting 2s)...'
+  )
+})
+
+test('PiAcpSession: falls back to a bare retry message when errorMessage is missing or "Unknown error"', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'auto_retry_start',
+    attempt: 1,
+    maxAttempts: 4,
+    delayMs: 1500,
+    errorMessage: 'Unknown error'
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal((conn.updates[0]!.update as any).content.text, '\nRetrying (attempt 1/4, waiting 2s)...')
 })
 
 test('PiAcpSession: prefixes auto_retry_start message with Network error for network failures', async () => {
@@ -402,7 +430,7 @@ test('PiAcpSession: prefixes auto_retry_start message with Network error for net
     assert.equal(conn.updates.length, 1, `expected update for: ${errorMessage}`)
     assert.equal(
       (conn.updates[0]!.update as any).content.text,
-      'Network error \u2014 retrying (attempt 1/3, waiting 2s)...',
+      '\nNetwork error \u2014 retrying (attempt 1/3, waiting 2s)...',
       `wrong text for: ${errorMessage}`
     )
   }
@@ -428,7 +456,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'Retry finished, resuming.' }
+    content: { type: 'text', text: '\nRetry finished, resuming.' }
   })
 })
 
@@ -508,7 +536,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } },
       {
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Retrying (attempt 1/2, waiting 2s)...' }
+        content: { type: 'text', text: '\nRetrying (attempt 1/2, waiting 2s)...' }
       },
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' } }
     ]

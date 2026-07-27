@@ -201,7 +201,11 @@ test('getPrLinkCached: sessionStartBranch survives a simulated reboot via the se
       'https://github.com/acme/repo/pull/42',
       'link must still show: the baseline should be the pre-reboot start branch, not the current one'
     )
-    assert.equal(calls, 2, 'a fresh instance has a cold in-memory cache, so it re-fetches once, but never suppresses the link')
+    assert.equal(
+      calls,
+      2,
+      'a fresh instance has a cold in-memory cache, so it re-fetches once, but never suppresses the link'
+    )
   } finally {
     restore()
   }
