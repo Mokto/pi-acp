@@ -878,6 +878,8 @@ var PiAcpSession = class _PiAcpSession {
   // tool_execution_end never re-sends `title` on its own.
   originalToolTitles = /* @__PURE__ */ new Map();
   customTitledToolCallIds = /* @__PURE__ */ new Set();
+  // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
+  turnTerminalFailureHandled = false;
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
@@ -1161,6 +1163,7 @@ var PiAcpSession = class _PiAcpSession {
   }
   startTurn(t, opts) {
     this.cancelRequested = false;
+    this.turnTerminalFailureHandled = false;
     this.inAgentLoop = false;
     this.inferenceStartup = true;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
@@ -1220,6 +1223,33 @@ var PiAcpSession = class _PiAcpSession {
     this.pendingTurnIsExtensionCommand = false;
     this.inAgentLoop = false;
     void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn());
+  }
+  async handleTerminalFailure(message, opts) {
+    if (this.turnTerminalFailureHandled) return;
+    this.turnTerminalFailureHandled = true;
+    this.emit({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: `
+
+${message}` }
+    });
+    if (opts?.abort) {
+      try {
+        await this.proc.abort();
+      } catch {
+      }
+    }
+    await this.flushEmits();
+    if (this.pendingTurnIsExtensionCommand) return;
+    this.clearTurnWatchdog();
+    this.pendingTurn?.reject(RequestError2.internalError({}, message));
+    this.pendingTurn = null;
+    this.pendingTurnIsExtensionCommand = false;
+    this.inAgentLoop = false;
+    this.emit({
+      sessionUpdate: "session_info_update",
+      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+    });
   }
   startNextQueuedTurn() {
     const next = this.turnQueue.shift();
@@ -1643,17 +1673,29 @@ var PiAcpSession = class _PiAcpSession {
         break;
       }
       case "auto_retry_start": {
+        const errorMessage = String(ev.errorMessage ?? "").trim();
+        if (isRateLimitError(errorMessage)) {
+          void this.handleTerminalFailure(extractRateLimitMessage(errorMessage), { abort: true });
+          break;
+        }
         this.emit({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `
+
 ${formatAutoRetryMessage(ev)}` }
         });
         break;
       }
       case "auto_retry_end": {
+        if (ev.success === false) {
+          const finalError = String(ev.finalError ?? "").trim();
+          const message = isRateLimitError(finalError) ? extractRateLimitMessage(finalError) : extractUserFacingError(finalError) || "Request failed after retries.";
+          void this.handleTerminalFailure(message);
+          break;
+        }
         this.emit({
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "\nRetry finished, resuming." }
+          content: { type: "text", text: "\n\nRetry finished, resuming." }
         });
         break;
       }
@@ -1707,6 +1749,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "agent_end": {
         if (ev.willRetry) break;
+        if (this.turnTerminalFailureHandled) break;
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
@@ -1847,6 +1890,37 @@ function optionIndex(optionId) {
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null;
 }
 var NETWORK_ERROR_PATTERN = /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i;
+var RATE_LIMIT_USER_MESSAGE = "This request would exceed your account's rate limit. Please try again later.";
+function isRateLimitError(errorMessage) {
+  const s = errorMessage.trim();
+  if (!s) return false;
+  if (/\b429\b/.test(s)) return true;
+  if (/rate_limit_error/i.test(s)) return true;
+  if (/exceed your account's rate limit/i.test(s)) return true;
+  return false;
+}
+function extractUserFacingError(errorMessage) {
+  const trimmed = errorMessage.trim();
+  if (!trimmed || trimmed === "Unknown error" || trimmed === "Retry cancelled") {
+    return "";
+  }
+  const jsonStart = trimmed.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(jsonStart));
+      const nested = parsed.error?.message ?? parsed.message;
+      if (typeof nested === "string" && nested.trim()) return nested.trim();
+    } catch {
+    }
+  }
+  return trimmed;
+}
+function extractRateLimitMessage(errorMessage) {
+  const extracted = extractUserFacingError(errorMessage);
+  if (extracted && /rate.?limit|429/i.test(extracted)) return extracted;
+  if (/exceed your account's rate limit/i.test(errorMessage)) return RATE_LIMIT_USER_MESSAGE;
+  return RATE_LIMIT_USER_MESSAGE;
+}
 function formatAutoRetryMessage(ev) {
   const attempt = Number(ev.attempt);
   const maxAttempts = Number(ev.maxAttempts);

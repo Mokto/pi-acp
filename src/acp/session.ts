@@ -339,6 +339,8 @@ export class PiAcpSession {
   // tool_execution_end never re-sends `title` on its own.
   private originalToolTitles = new Map<string, string>()
   private customTitledToolCallIds = new Set<string>()
+  // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
+  private turnTerminalFailureHandled = false
 
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
@@ -732,6 +734,7 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn, opts?: { streamingBehavior?: 'steer' | 'followUp' }): void {
     this.cancelRequested = false
+    this.turnTerminalFailureHandled = false
     this.inAgentLoop = false
     this.inferenceStartup = true
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
@@ -813,6 +816,37 @@ export class PiAcpSession {
     this.inAgentLoop = false
 
     void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn())
+  }
+
+  private async handleTerminalFailure(message: string, opts?: { abort?: boolean }): Promise<void> {
+    if (this.turnTerminalFailureHandled) return
+    this.turnTerminalFailureHandled = true
+
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `\n\n${message}` } satisfies ContentBlock
+    })
+
+    if (opts?.abort) {
+      try {
+        await this.proc.abort()
+      } catch {
+        // ignore
+      }
+    }
+
+    await this.flushEmits()
+    if (this.pendingTurnIsExtensionCommand) return
+
+    this.clearTurnWatchdog()
+    this.pendingTurn?.reject(RequestError.internalError({}, message))
+    this.pendingTurn = null
+    this.pendingTurnIsExtensionCommand = false
+    this.inAgentLoop = false
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+    })
   }
 
   private startNextQueuedTurn(): void {
@@ -1334,17 +1368,30 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_start': {
+        const errorMessage = String((ev as any).errorMessage ?? '').trim()
+        if (isRateLimitError(errorMessage)) {
+          void this.handleTerminalFailure(extractRateLimitMessage(errorMessage), { abort: true })
+          break
+        }
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: `\n${formatAutoRetryMessage(ev)}` } satisfies ContentBlock
+          content: { type: 'text', text: `\n\n${formatAutoRetryMessage(ev)}` } satisfies ContentBlock
         })
         break
       }
 
       case 'auto_retry_end': {
+        if ((ev as any).success === false) {
+          const finalError = String((ev as any).finalError ?? '').trim()
+          const message = isRateLimitError(finalError)
+            ? extractRateLimitMessage(finalError)
+            : extractUserFacingError(finalError) || 'Request failed after retries.'
+          void this.handleTerminalFailure(message)
+          break
+        }
         this.emit({
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: '\nRetry finished, resuming.' } satisfies ContentBlock
+          content: { type: 'text', text: '\n\nRetry finished, resuming.' } satisfies ContentBlock
         })
         break
       }
@@ -1419,6 +1466,7 @@ export class PiAcpSession {
         // think the turn is done (drops the loading spinner, fires a "ready" toast)
         // while pi is still working, so only complete the turn when willRetry is falsy.
         if ((ev as any).willRetry) break
+        if (this.turnTerminalFailureHandled) break
 
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
@@ -1599,6 +1647,47 @@ function optionIndex(optionId: string): number | null {
 
 const NETWORK_ERROR_PATTERN =
   /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i
+
+const RATE_LIMIT_USER_MESSAGE = "This request would exceed your account's rate limit. Please try again later."
+
+function isRateLimitError(errorMessage: string): boolean {
+  const s = errorMessage.trim()
+  if (!s) return false
+  if (/\b429\b/.test(s)) return true
+  if (/rate_limit_error/i.test(s)) return true
+  if (/exceed your account's rate limit/i.test(s)) return true
+  return false
+}
+
+function extractUserFacingError(errorMessage: string): string {
+  const trimmed = errorMessage.trim()
+  if (!trimmed || trimmed === 'Unknown error' || trimmed === 'Retry cancelled') {
+    return ''
+  }
+
+  const jsonStart = trimmed.indexOf('{')
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(jsonStart)) as {
+        error?: { message?: unknown }
+        message?: unknown
+      }
+      const nested = parsed.error?.message ?? parsed.message
+      if (typeof nested === 'string' && nested.trim()) return nested.trim()
+    } catch {
+      // fall through
+    }
+  }
+
+  return trimmed
+}
+
+function extractRateLimitMessage(errorMessage: string): string {
+  const extracted = extractUserFacingError(errorMessage)
+  if (extracted && /rate.?limit|429/i.test(extracted)) return extracted
+  if (/exceed your account's rate limit/i.test(errorMessage)) return RATE_LIMIT_USER_MESSAGE
+  return RATE_LIMIT_USER_MESSAGE
+}
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const attempt = Number((ev as any).attempt)
