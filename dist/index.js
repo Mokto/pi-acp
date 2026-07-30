@@ -1750,12 +1750,19 @@ ${formatAutoRetryMessage(ev)}` }
       case "agent_end": {
         if (ev.willRetry) break;
         if (this.turnTerminalFailureHandled) break;
+        const turnError = this.cancelRequested ? "" : extractAgentEndTurnError(ev);
+        if (turnError) {
+          this.emit({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `Error: ${turnError}` }
+          });
+        }
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
           await this.flushEmits();
           if (this.pendingTurnIsExtensionCommand) return;
-          this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
+          this.completeTurn(this.cancelRequested ? "cancelled" : turnError ? "error" : "end_turn");
         })();
         break;
       }
@@ -1914,6 +1921,24 @@ function extractUserFacingError(errorMessage) {
     }
   }
   return trimmed;
+}
+function extractAgentEndTurnError(ev) {
+  const direct = String(ev.errorMessage ?? "").trim();
+  if (direct) {
+    return extractUserFacingError(direct) || direct;
+  }
+  const messages = ev.messages;
+  if (!Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== "object") continue;
+    if (msg.role !== "assistant") continue;
+    if (msg.stopReason !== "error") return "";
+    const raw = String(msg.errorMessage ?? "").trim();
+    if (!raw) return "Unknown error";
+    return extractUserFacingError(raw) || raw;
+  }
+  return "";
 }
 function extractRateLimitMessage(errorMessage) {
   const extracted = extractUserFacingError(errorMessage);
@@ -2714,6 +2739,7 @@ var PiAcpAgent = class {
   }
   toAcpStopReason(result, cancelRequested) {
     if (result === "cancelled" || cancelRequested) return "cancelled";
+    if (result === "error") return "refusal";
     return "end_turn";
   }
   cleanupFailedNewSession(sessionId, state) {
