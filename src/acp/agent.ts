@@ -276,10 +276,9 @@ export class PiAcpAgent implements ACPAgent {
 
   private toAcpStopReason(result: PiStopReason, cancelRequested: boolean): StopReason {
     if (result === 'cancelled' || cancelRequested) return 'cancelled'
-    // Internal errors (inactivity timeout, process crash) have no dedicated ACP
-    // stop reason. Reporting `refusal` makes clients show a misleading
-    // content-policy banner, so end the turn normally; the explanatory text
-    // chunk already emitted carries the real reason.
+    // ACP has no dedicated error stop reason. `refusal` is the only non-success
+    // value clients treat as a failed turn (Zed); pair with the Error: text chunk.
+    if (result === 'error') return 'refusal'
     return 'end_turn'
   }
 

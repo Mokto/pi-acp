@@ -812,6 +812,90 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: agent_end with assistant stopReason error surfaces text and resolves error', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'agent_end',
+    messages: [
+      {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage:
+          '401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."},"request_id":null}'
+      }
+    ]
+  })
+
+  assert.equal(await p, 'error')
+  const errMsg = conn.updates.find(
+    u =>
+      u.update.sessionUpdate === 'agent_message_chunk' &&
+      (u.update as { content?: { text?: string } }).content?.text?.includes('OAuth access token has been revoked')
+  )
+  assert.ok(errMsg, 'expected visible error text')
+  assert.equal((errMsg!.update as any).content.text, 'Error: OAuth access token has been revoked.')
+})
+
+test('PiAcpSession: agent_end willRetry with assistant error does not surface a terminal error yet', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({
+    type: 'agent_end',
+    willRetry: true,
+    messages: [
+      {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: '529 overloaded'
+      }
+    ]
+  })
+
+  let settled = false
+  void p.then(() => {
+    settled = true
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(settled, false)
+  assert.equal(
+    conn.updates.some(
+      u =>
+        u.update.sessionUpdate === 'agent_message_chunk' &&
+        String((u.update as any).content?.text ?? '').includes('Error:')
+    ),
+    false
+  )
+
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await p, 'end_turn')
+})
+
 test('PiAcpSession: agent_end with willRetry does not resolve the prompt (pi is auto-retrying)', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

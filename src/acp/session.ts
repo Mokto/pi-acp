@@ -1468,6 +1468,17 @@ export class PiAcpSession {
         if ((ev as any).willRetry) break
         if (this.turnTerminalFailureHandled) break
 
+        // Non-retryable LLM failures (e.g. revoked OAuth) land here with an empty
+        // assistant content[] and stopReason/errorMessage on the last message. Without
+        // this, Zed sees a successful empty end_turn.
+        const turnError = this.cancelRequested ? '' : extractAgentEndTurnError(ev)
+        if (turnError) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Error: ${turnError}` } satisfies ContentBlock
+          })
+        }
+
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void (async () => {
@@ -1477,7 +1488,7 @@ export class PiAcpSession {
           // A nested turn inside a still-running extension command (see
           // pendingTurnIsExtensionCommand above) — its own agent_end, not the command's.
           if (this.pendingTurnIsExtensionCommand) return
-          this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
+          this.completeTurn(this.cancelRequested ? 'cancelled' : turnError ? 'error' : 'end_turn')
         })()
         break
       }
@@ -1680,6 +1691,29 @@ function extractUserFacingError(errorMessage: string): string {
   }
 
   return trimmed
+}
+
+/** Best-effort user-facing error from a terminal (non-retrying) `agent_end`. */
+function extractAgentEndTurnError(ev: PiRpcEvent): string {
+  const direct = String((ev as any).errorMessage ?? '').trim()
+  if (direct) {
+    return extractUserFacingError(direct) || direct
+  }
+
+  const messages = (ev as any).messages
+  if (!Array.isArray(messages)) return ''
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | null
+    if (!msg || typeof msg !== 'object') continue
+    if (msg.role !== 'assistant') continue
+    if (msg.stopReason !== 'error') return ''
+    const raw = String(msg.errorMessage ?? '').trim()
+    if (!raw) return 'Unknown error'
+    return extractUserFacingError(raw) || raw
+  }
+
+  return ''
 }
 
 function extractRateLimitMessage(errorMessage: string): string {
