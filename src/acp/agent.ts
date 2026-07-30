@@ -52,6 +52,7 @@ import {
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { resolveEnabledModelIds, type ScopeModel } from './model-scope.js'
 import { maybeAuthRequiredError } from './auth-required.js'
+import { stayAwake } from './stay-awake.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
@@ -949,9 +950,14 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images)
+    const release = stayAwake()
+    try {
+      const result = await session.prompt(message, images)
 
-    return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) }
+      return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) }
+    } finally {
+      release()
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
