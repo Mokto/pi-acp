@@ -176,9 +176,9 @@ var PiRpcProcess = class _PiRpcProcess {
     }
     child.stderr.on("data", () => {
     });
-    const proc = new _PiRpcProcess(child);
+    const proc2 = new _PiRpcProcess(child);
     try {
-      const state = await proc.getState();
+      const state = await proc2.getState();
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
         const { mkdirSync: mkdirSync2 } = await import("fs");
@@ -187,7 +187,7 @@ var PiRpcProcess = class _PiRpcProcess {
       }
     } catch {
     }
-    return proc;
+    return proc2;
   }
   onEvent(handler) {
     this.eventHandlers.push(handler);
@@ -777,9 +777,9 @@ var SessionManager = class {
     this.sessions.delete(sessionId);
   }
   async create(params) {
-    let proc;
+    let proc2;
     try {
-      proc = await PiRpcProcess.spawn({
+      proc2 = await PiRpcProcess.spawn({
         cwd: params.cwd,
         piCommand: params.piCommand
       });
@@ -791,7 +791,7 @@ var SessionManager = class {
     }
     let state = null;
     try {
-      state = await proc.getState();
+      state = await proc2.getState();
     } catch {
       state = null;
     }
@@ -804,7 +804,7 @@ var SessionManager = class {
       sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers,
-      proc,
+      proc: proc2,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store
@@ -2558,6 +2558,37 @@ function resolveEnabledModelIds(models, patterns) {
   return allowed;
 }
 
+// src/acp/stay-awake.ts
+import { spawn as spawn2 } from "child_process";
+var proc = null;
+var holds = 0;
+function stayAwake() {
+  holds++;
+  if (!proc && process.platform === "darwin") {
+    try {
+      const child = spawn2("caffeinate", ["-dims", "-w", String(process.pid)], { stdio: "ignore" });
+      const forget = () => {
+        if (proc === child) proc = null;
+      };
+      child.on("error", forget);
+      child.on("exit", forget);
+      child.unref();
+      proc = child;
+    } catch {
+      proc = null;
+    }
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--holds === 0) {
+      proc?.kill();
+      proc = null;
+    }
+  };
+}
+
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute3 } from "path";
 import { existsSync as existsSync4, readFileSync as readFileSync6, realpathSync, readdirSync as readdirSync3, statSync as statSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
@@ -2706,9 +2737,9 @@ var PiAcpAgent = class {
     if (!stored?.sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${sessionId}`);
     }
-    let proc;
+    let proc2;
     try {
-      proc = await PiRpcProcess.spawn({
+      proc2 = await PiRpcProcess.spawn({
         cwd: stored.cwd,
         sessionPath: stored.sessionFile,
         piCommand: process.env.PI_ACP_PI_COMMAND
@@ -2723,7 +2754,7 @@ var PiAcpAgent = class {
       cwd: stored.cwd,
       mcpServers: mcpServers ?? [],
       conn: this.conn,
-      proc,
+      proc: proc2,
       fileCommands
     });
     this.store.upsert({
@@ -3193,8 +3224,8 @@ ${JSON.stringify(stats, null, 2)}`;
         const outputPath = join5(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
-          const result2 = await session.proc.exportHtml(outputPath);
-          resultPath = result2.path;
+          const result = await session.proc.exportHtml(outputPath);
+          resultPath = result.path;
         } catch (e) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -3271,8 +3302,13 @@ ${JSON.stringify(stats, null, 2)}`;
         return { stopReason: "end_turn" };
       }
     }
-    const result = await session.prompt(message, images);
-    return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) };
+    const release = stayAwake();
+    try {
+      const result = await session.prompt(message, images);
+      return { stopReason: this.toAcpStopReason(result, session.wasCancelRequested()) };
+    } finally {
+      release();
+    }
   }
   async cancel(params) {
     const session = await this.autoRestoreSession(params.sessionId);
@@ -3314,9 +3350,9 @@ ${JSON.stringify(stats, null, 2)}`;
     if (existing) {
       return this.finishLoadSession(existing, existing.proc, params, { replayHistory: false, sessionFile });
     }
-    let proc;
+    let proc2;
     try {
-      proc = await PiRpcProcess.spawn({
+      proc2 = await PiRpcProcess.spawn({
         cwd: params.cwd,
         sessionPath: sessionFile,
         piCommand: process.env.PI_ACP_PI_COMMAND
@@ -3332,12 +3368,12 @@ ${JSON.stringify(stats, null, 2)}`;
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       conn: this.conn,
-      proc,
+      proc: proc2,
       fileCommands
     });
-    return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile });
+    return this.finishLoadSession(session, proc2, params, { replayHistory: true, sessionFile });
   }
-  async finishLoadSession(session, proc, params, opts) {
+  async finishLoadSession(session, proc2, params, opts) {
     const fileCommands = loadSlashCommands(params.cwd);
     const enableSkillCommands = getEnableSkillCommands(params.cwd);
     const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
@@ -3345,7 +3381,7 @@ ${JSON.stringify(stats, null, 2)}`;
       let data;
       let replayTimedOut = false;
       try {
-        data = await withTimeout(proc.getMessages(), getMessagesTimeoutMs());
+        data = await withTimeout(proc2.getMessages(), getMessagesTimeoutMs());
       } catch (e) {
         if (e instanceof TimeoutError) {
           replayTimedOut = true;
@@ -3455,8 +3491,8 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         }
       }
     }
-    const models = await getModelState(proc, { cwd: params.cwd });
-    const thinking = await getThinkingState(proc);
+    const models = await getModelState(proc2, { cwd: params.cwd });
+    const thinking = await getThinkingState(proc2);
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
@@ -3476,7 +3512,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     setTimeout(() => {
       void (async () => {
         try {
-          const pi = await proc.getCommands();
+          const pi = await proc2.getCommands();
           const { commands, extensionCommandNames } = toAvailableCommandsFromPiGetCommands(pi, {
             enableSkillCommands,
             includeExtensionCommands: enableExtensionCommands
@@ -3590,11 +3626,11 @@ function findPiModelById(data, id) {
   }
   return void 0;
 }
-async function getThinkingState(proc, pre) {
+async function getThinkingState(proc2, pre) {
   let current = "medium";
   const state = pre?.state ?? await (async () => {
     try {
-      return await proc.getState();
+      return await proc2.getState();
     } catch {
       return null;
     }
@@ -3611,11 +3647,11 @@ async function getThinkingState(proc, pre) {
     }))
   };
 }
-async function getModelState(proc, pre) {
+async function getModelState(proc2, pre) {
   let availableModels = [];
   const data = pre?.availableModels ?? await (async () => {
     try {
-      return await proc.getAvailableModels();
+      return await proc2.getAvailableModels();
     } catch {
       return null;
     }
@@ -3635,7 +3671,7 @@ async function getModelState(proc, pre) {
   let currentModelId = null;
   const state = pre?.state ?? await (async () => {
     try {
-      return await proc.getState();
+      return await proc2.getState();
     } catch {
       return null;
     }
