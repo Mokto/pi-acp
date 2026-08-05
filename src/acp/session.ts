@@ -29,6 +29,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
+import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 
 type SessionCreateParams = {
@@ -345,6 +346,13 @@ export class PiAcpSession {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   private inAgentLoop = false
+
+  // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
+  // dump and tip /compact instead — see translate/narrated-tool-calls.ts.
+  private assistantTextAccum = ''
+  private assistantTextEmitted = 0
+  private narratedToolCallsSuppressed = false
+  private sawStructuredToolCall = false
 
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
@@ -806,6 +814,49 @@ export class PiAcpSession {
     return name.length > 0 && this.piExtensionCommandNames.has(name)
   }
 
+  private resetNarratedToolCallGate(): void {
+    this.assistantTextAccum = ''
+    this.assistantTextEmitted = 0
+    this.narratedToolCallsSuppressed = false
+    this.sawStructuredToolCall = false
+  }
+
+  private markStructuredToolCall(): void {
+    this.sawStructuredToolCall = true
+    if (!this.narratedToolCallsSuppressed) return
+    // False positive: dump was real tooling context — flush held text.
+    const rest = this.assistantTextAccum.slice(this.assistantTextEmitted)
+    if (rest) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: rest } satisfies ContentBlock
+      })
+      this.assistantTextEmitted = this.assistantTextAccum.length
+    }
+    this.narratedToolCallsSuppressed = false
+  }
+
+  private flushNarratedToolCallGate(): void {
+    if (this.narratedToolCallsSuppressed && !this.sawStructuredToolCall) {
+      const prefix = this.assistantTextEmitted > 0 ? '\n\n' : ''
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `${prefix}${NARRATED_TOOL_CALL_COMPACT_TIP}` } satisfies ContentBlock
+      })
+      this.resetNarratedToolCallGate()
+      return
+    }
+
+    const rest = this.assistantTextAccum.slice(this.assistantTextEmitted)
+    if (rest) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: rest } satisfies ContentBlock
+      })
+    }
+    this.resetNarratedToolCallGate()
+  }
+
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
   private completeTurn(reason: StopReason): void {
@@ -1016,13 +1067,21 @@ export class PiAcpSession {
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 
-        // Stream assistant text.
+        // Stream assistant text. Suppress narrated `Tool call(...)` dumps (no real tools).
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
           this.inferenceStartup = false
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
-          })
+          if (this.narratedToolCallsSuppressed) break
+
+          this.assistantTextAccum += ame.delta
+          const plan = planNarratedToolCallEmit(this.assistantTextAccum, this.assistantTextEmitted)
+          if (plan.emit) {
+            this.assistantTextEmitted += plan.emit.length
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: plan.emit } satisfies ContentBlock
+            })
+          }
+          if (plan.suppressFrom !== null) this.narratedToolCallsSuppressed = true
           break
         }
 
@@ -1037,6 +1096,7 @@ export class PiAcpSession {
 
         if (ame?.type === 'toolcall_start') {
           this.inferenceStartup = false
+          this.markStructuredToolCall()
         }
 
         // Surface tool calls ASAP so clients (e.g. Zed) can show a tool-in-use/loading UI
@@ -1116,6 +1176,7 @@ export class PiAcpSession {
       }
 
       case 'tool_execution_start': {
+        this.markStructuredToolCall()
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
@@ -1434,6 +1495,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
+        this.resetNarratedToolCallGate()
         break
       }
 
@@ -1456,6 +1518,8 @@ export class PiAcpSession {
         // Re-arm inference-startup mode: the model is about to receive tool results and
         // may take a while before it starts streaming the next response.
         this.inferenceStartup = true
+        // End of this model segment: tip /compact if it narrated tools, then reset for the next.
+        this.flushNarratedToolCallGate()
         break
       }
 
@@ -1478,6 +1542,8 @@ export class PiAcpSession {
             content: { type: 'text', text: `Error: ${turnError}` } satisfies ContentBlock
           })
         }
+
+        this.flushNarratedToolCallGate()
 
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.

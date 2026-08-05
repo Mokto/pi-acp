@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
+import { NARRATED_TOOL_CALL_COMPACT_TIP } from '../../src/acp/translate/narrated-tool-calls.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
@@ -60,6 +61,39 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
     sessionUpdate: 'agent_thought_chunk',
     content: { type: 'text', text: 'thinking...' }
   })
+})
+
+test('PiAcpSession: replaces narrated Tool call(...) text with /compact tip', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'message_update',
+    assistantMessageEvent: {
+      type: 'text_delta',
+      delta: 'Implementing the fix.\nTool call(Read, path=/tmp/a)\nTool call(Grep, pattern=x)'
+    }
+  })
+  proc.emit({ type: 'turn_end' })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const texts = conn.updates
+    .filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+    .map(u => (u.update as { content?: { text?: string } }).content?.text ?? '')
+
+  assert.deepEqual(texts, ['Implementing the fix.\n', `\n\n${NARRATED_TOOL_CALL_COMPACT_TIP}`])
+  assert.ok(!texts.some(t => t.includes('Tool call(')))
 })
 
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
