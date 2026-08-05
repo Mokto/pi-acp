@@ -532,6 +532,42 @@ function bashTerminalExitMeta(toolCallId, exitCode) {
   return { terminal_exit: { terminal_id: toolCallId, exit_code: exitCode, signal: null } };
 }
 
+// src/acp/translate/narrated-tool-calls.ts
+var NARRATED_TOOL_CALL_RE = /(?:^|\n)Tool call\s*\(/;
+var NARRATED_TOOL_CALL_COMPACT_TIP = "The model wrote tool calls as text instead of running them (often from a large context). Run /compact and retry.";
+function findNarratedToolCallIndex(text) {
+  const match = NARRATED_TOOL_CALL_RE.exec(text);
+  if (!match || match.index === void 0) return -1;
+  return match[0].startsWith("\n") ? match.index + 1 : match.index;
+}
+var MARKER_CANDIDATES = ["\nTool call (", "\nTool call(", "Tool call (", "Tool call("];
+function narratedToolCallHoldbackLength(text) {
+  let hold = 0;
+  for (const candidate of MARKER_CANDIDATES) {
+    for (let len = 1; len < candidate.length; len += 1) {
+      const prefix = candidate.slice(0, len);
+      if (!text.endsWith(prefix)) continue;
+      if (!candidate.startsWith("\n")) {
+        const before = text.slice(0, text.length - len);
+        if (before.length > 0 && !before.endsWith("\n")) continue;
+      }
+      hold = Math.max(hold, len);
+    }
+  }
+  return hold;
+}
+function planNarratedToolCallEmit(accumulated, alreadyEmitted) {
+  const idx = findNarratedToolCallIndex(accumulated);
+  if (idx >= 0) {
+    const emit2 = idx > alreadyEmitted ? accumulated.slice(alreadyEmitted, idx) : "";
+    return { emit: emit2, suppressFrom: idx };
+  }
+  const hold = narratedToolCallHoldbackLength(accumulated);
+  const emitEnd = accumulated.length - hold;
+  const emit = emitEnd > alreadyEmitted ? accumulated.slice(alreadyEmitted, emitEnd) : "";
+  return { emit, suppressFrom: null };
+}
+
 // src/acp/slash-commands.ts
 import { existsSync, readdirSync, readFileSync as readFileSync2 } from "fs";
 import { homedir as homedir2 } from "os";
@@ -883,6 +919,12 @@ var PiAcpSession = class _PiAcpSession {
   // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
   // The overall agent loop completes when `agent_end` is emitted.
   inAgentLoop = false;
+  // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
+  // dump and tip /compact instead — see translate/narrated-tool-calls.ts.
+  assistantTextAccum = "";
+  assistantTextEmitted = 0;
+  narratedToolCallsSuppressed = false;
+  sawStructuredToolCall = false;
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
@@ -1214,6 +1256,44 @@ var PiAcpSession = class _PiAcpSession {
     const name = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).trim();
     return name.length > 0 && this.piExtensionCommandNames.has(name);
   }
+  resetNarratedToolCallGate() {
+    this.assistantTextAccum = "";
+    this.assistantTextEmitted = 0;
+    this.narratedToolCallsSuppressed = false;
+    this.sawStructuredToolCall = false;
+  }
+  markStructuredToolCall() {
+    this.sawStructuredToolCall = true;
+    if (!this.narratedToolCallsSuppressed) return;
+    const rest = this.assistantTextAccum.slice(this.assistantTextEmitted);
+    if (rest) {
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: rest }
+      });
+      this.assistantTextEmitted = this.assistantTextAccum.length;
+    }
+    this.narratedToolCallsSuppressed = false;
+  }
+  flushNarratedToolCallGate() {
+    if (this.narratedToolCallsSuppressed && !this.sawStructuredToolCall) {
+      const prefix = this.assistantTextEmitted > 0 ? "\n\n" : "";
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `${prefix}${NARRATED_TOOL_CALL_COMPACT_TIP}` }
+      });
+      this.resetNarratedToolCallGate();
+      return;
+    }
+    const rest = this.assistantTextAccum.slice(this.assistantTextEmitted);
+    if (rest) {
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: rest }
+      });
+    }
+    this.resetNarratedToolCallGate();
+  }
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
   completeTurn(reason) {
@@ -1394,10 +1474,17 @@ ${message}` }
         const ame = ev.assistantMessageEvent;
         if (ame?.type === "text_delta" && typeof ame.delta === "string") {
           this.inferenceStartup = false;
-          this.emit({
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: ame.delta }
-          });
+          if (this.narratedToolCallsSuppressed) break;
+          this.assistantTextAccum += ame.delta;
+          const plan = planNarratedToolCallEmit(this.assistantTextAccum, this.assistantTextEmitted);
+          if (plan.emit) {
+            this.assistantTextEmitted += plan.emit.length;
+            this.emit({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: plan.emit }
+            });
+          }
+          if (plan.suppressFrom !== null) this.narratedToolCallsSuppressed = true;
           break;
         }
         if (ame?.type === "thinking_delta" && typeof ame.delta === "string") {
@@ -1410,6 +1497,7 @@ ${message}` }
         }
         if (ame?.type === "toolcall_start") {
           this.inferenceStartup = false;
+          this.markStructuredToolCall();
         }
         if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
           const toolCall = (
@@ -1472,6 +1560,7 @@ ${message}` }
         break;
       }
       case "tool_execution_start": {
+        this.markStructuredToolCall();
         const toolCallId = String(ev.toolCallId ?? crypto.randomUUID());
         const toolName = String(ev.toolName ?? "tool");
         const args = ev.args;
@@ -1733,6 +1822,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "agent_start": {
         this.inAgentLoop = true;
+        this.resetNarratedToolCallGate();
         break;
       }
       case "thinking_level_changed": {
@@ -1745,6 +1835,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "turn_end": {
         this.inferenceStartup = true;
+        this.flushNarratedToolCallGate();
         break;
       }
       case "agent_end": {
@@ -1757,6 +1848,7 @@ ${formatAutoRetryMessage(ev)}` }
             content: { type: "text", text: `Error: ${turnError}` }
           });
         }
+        this.flushNarratedToolCallGate();
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
