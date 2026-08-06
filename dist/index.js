@@ -97,6 +97,11 @@ var PiRpcProcess = class _PiRpcProcess {
   eventHandlers = [];
   exitHandlers = [];
   preludeLines = [];
+  hasExited = false;
+  /** True once the underlying pi process has exited (crash, kill, or normal exit). */
+  get exited() {
+    return this.hasExited;
+  }
   constructor(child) {
     this.child = child;
     const rl = readline.createInterface({ input: child.stdout });
@@ -124,6 +129,7 @@ var PiRpcProcess = class _PiRpcProcess {
       for (const h of this.eventHandlers) h(msg);
     });
     child.on("exit", (code, signal) => {
+      this.hasExited = true;
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`);
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
@@ -843,7 +849,8 @@ var SessionManager = class {
       proc: proc2,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      store: this.store
+      store: this.store,
+      onDead: () => this.sessions.delete(sessionId)
     });
     this.sessions.set(sessionId, session);
     return session;
@@ -867,7 +874,8 @@ var SessionManager = class {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      store: this.store
+      store: this.store,
+      onDead: () => this.sessions.delete(sessionId)
     });
     this.sessions.set(sessionId, session);
     return session;
@@ -883,6 +891,7 @@ var PiAcpSession = class _PiAcpSession {
   proc;
   conn;
   fileCommands;
+  onDead;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   cancelRequested = false;
@@ -980,6 +989,7 @@ var PiAcpSession = class _PiAcpSession {
     this.conn = opts.conn;
     this.fileCommands = opts.fileCommands ?? [];
     this.store = opts.store ?? null;
+    this.onDead = opts.onDead ?? null;
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
@@ -1184,14 +1194,27 @@ var PiAcpSession = class _PiAcpSession {
     this.completeTurn("error");
   }
   async handleProcessExit(code, signal) {
-    if (!this.pendingTurn) return;
+    this.clearTurnWatchdog();
     const detail = signal ? `signal ${signal}` : `code ${code}`;
+    if (!this.pendingTurn) {
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: `Error: pi process exited unexpectedly (${detail}); it will restart on your next message.`
+        }
+      });
+      await this.flushEmits();
+      this.onDead?.();
+      return;
+    }
     this.emit({
       sessionUpdate: "agent_message_chunk",
       content: { type: "text", text: `Error: pi process exited (${detail})` }
     });
     await this.flushEmits();
     this.completeTurn(this.cancelRequested ? "cancelled" : "error");
+    this.onDead?.();
   }
   async flushDeferredConfig() {
     const model = this.deferredModel;
@@ -2818,13 +2841,19 @@ var PiAcpAgent = class {
   lastSessionCwd = null;
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
-   * if pi-acp was restarted and the in-memory map no longer holds the session.
+   * if pi-acp was restarted and the in-memory map no longer holds the session, or
+   * if the tracked session's pi subprocess has died (crash/OOM/killed) since it
+   * was created. Without the liveness check, a session whose process exited while
+   * idle would otherwise be handed back as-is, and the next call against it (e.g.
+   * a model change) would fail with a raw "write after stream destroyed" error
+   * instead of transparently respawning.
    *
    * Fixes: https://github.com/svkozak/pi-acp/issues/28
    */
   async autoRestoreSession(sessionId, mcpServers) {
     const existing = this.sessions.maybeGet(sessionId);
-    if (existing) return existing;
+    if (existing && !existing.proc.exited) return existing;
+    if (existing) this.sessions.close(sessionId);
     const stored = this.store.get(sessionId);
     if (!stored?.sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${sessionId}`);
