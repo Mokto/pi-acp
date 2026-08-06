@@ -86,6 +86,12 @@ export class PiRpcProcess {
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   private readonly preludeLines: string[] = []
+  private hasExited = false
+
+  /** True once the underlying pi process has exited (crash, kill, or normal exit). */
+  get exited(): boolean {
+    return this.hasExited
+  }
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -120,6 +126,7 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
+      this.hasExited = true
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()

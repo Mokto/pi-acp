@@ -18,6 +18,7 @@ test('PiAcpAgent: maps session error stopReason to ACP refusal', async () => {
   const agent = new PiAcpAgent(asAgentConn(conn))
   ;(agent as any).sessions = new FakeSessions({
     sessionId: 's1',
+    proc: { exited: false },
     wasCancelRequested: () => false,
     prompt: async () => 'error'
   }) as any
@@ -35,6 +36,7 @@ test('PiAcpAgent: maps session end_turn to ACP end_turn', async () => {
   const agent = new PiAcpAgent(asAgentConn(conn))
   ;(agent as any).sessions = new FakeSessions({
     sessionId: 's1',
+    proc: { exited: false },
     wasCancelRequested: () => false,
     prompt: async () => 'end_turn'
   }) as any

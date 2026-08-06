@@ -34,6 +34,7 @@ export class FakePiRpcProcess {
   }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  exited = false
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -50,6 +51,7 @@ export class FakePiRpcProcess {
   }
 
   emitExit(code: number | null, signal: NodeJS.Signals | null = null) {
+    this.exited = true
     for (const h of this.exitHandlers) h(code, signal)
   }
 

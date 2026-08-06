@@ -226,13 +226,19 @@ export class PiAcpAgent implements ACPAgent {
 
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
-   * if pi-acp was restarted and the in-memory map no longer holds the session.
+   * if pi-acp was restarted and the in-memory map no longer holds the session, or
+   * if the tracked session's pi subprocess has died (crash/OOM/killed) since it
+   * was created. Without the liveness check, a session whose process exited while
+   * idle would otherwise be handed back as-is, and the next call against it (e.g.
+   * a model change) would fail with a raw "write after stream destroyed" error
+   * instead of transparently respawning.
    *
    * Fixes: https://github.com/svkozak/pi-acp/issues/28
    */
   private async autoRestoreSession(sessionId: string, mcpServers?: McpServer[]) {
     const existing = this.sessions.maybeGet(sessionId)
-    if (existing) return existing
+    if (existing && !existing.proc.exited) return existing
+    if (existing) this.sessions.close(sessionId)
 
     const stored = this.store.get(sessionId)
     if (!stored?.sessionFile) {

@@ -57,3 +57,34 @@ test('PiAcpSession: unexpected subprocess exit completes the pending turn', asyn
   )
   assert.ok(exitMsg, 'expected exit message in updates')
 })
+
+test('PiAcpSession: idle subprocess exit (no pending turn) still notifies and evicts the session', async () => {
+  const conn = new FakeAgentSideConnection()
+  let evicted = false
+  const proc = new FakePiRpcProcess()
+  const _session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    onDead: () => {
+      evicted = true
+    }
+  })
+
+  // No prompt in flight — pi crashes/exits between turns.
+  proc.emitExit(1, null)
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(evicted, true, 'onDead should fire even without a pending turn')
+  assert.equal(proc.exited, true)
+
+  const exitMsg = conn.updates.find(
+    u =>
+      u.update.sessionUpdate === 'agent_message_chunk' &&
+      (u.update as { content?: { text?: string } }).content?.text?.includes('pi process exited unexpectedly')
+  )
+  assert.ok(exitMsg, 'expected an idle-exit notice instead of silence')
+})

@@ -256,7 +256,8 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      store: this.store
+      store: this.store,
+      onDead: () => this.sessions.delete(sessionId)
     })
 
     this.sessions.set(sessionId, session)
@@ -284,7 +285,8 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      store: this.store
+      store: this.store,
+      onDead: () => this.sessions.delete(sessionId)
     })
 
     this.sessions.set(sessionId, session)
@@ -304,6 +306,7 @@ export class PiAcpSession {
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
+  private readonly onDead: (() => void) | null
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -415,6 +418,8 @@ export class PiAcpSession {
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
     store?: SessionStore
+    /** Called once when the underlying pi process exits, so the owning SessionManager can evict this session. */
+    onDead?: () => void
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -423,6 +428,7 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.store = opts.store ?? null
+    this.onDead = opts.onDead ?? null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.proc.onExit?.((code, signal) => {
@@ -716,9 +722,28 @@ export class PiAcpSession {
   }
 
   private async handleProcessExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
-    if (!this.pendingTurn) return
-
+    this.clearTurnWatchdog()
     const detail = signal ? `signal ${signal}` : `code ${code}`
+
+    if (!this.pendingTurn) {
+      // Pi died while idle (crash, OOM, killed externally). There's no pending
+      // ACP request to fail, but the session must not linger as a zombie: the
+      // next request against it (a prompt, or a model/thinking change) would
+      // otherwise hit a raw "write after stream destroyed" error instead of
+      // transparently respawning. Evict it so autoRestoreSession respawns pi
+      // on the next request.
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `Error: pi process exited unexpectedly (${detail}); it will restart on your next message.`
+        }
+      })
+      await this.flushEmits()
+      this.onDead?.()
+      return
+    }
+
     this.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: `Error: pi process exited (${detail})` }
@@ -726,6 +751,7 @@ export class PiAcpSession {
 
     await this.flushEmits()
     this.completeTurn(this.cancelRequested ? 'cancelled' : 'error')
+    this.onDead?.()
   }
 
   private async flushDeferredConfig(): Promise<void> {
