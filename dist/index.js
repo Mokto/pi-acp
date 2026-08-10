@@ -2026,16 +2026,65 @@ function extractUserFacingError(errorMessage) {
   if (!trimmed || trimmed === "Unknown error" || trimmed === "Retry cancelled") {
     return "";
   }
-  const jsonStart = trimmed.indexOf("{");
-  if (jsonStart >= 0) {
+  const fromJson = extractEmbeddedJsonError(trimmed);
+  const provider = /OAuth refresh failed for ([A-Za-z0-9_-]+)/i.exec(trimmed)?.[1];
+  if (/OAuth refresh failed/i.test(trimmed) || /invalid_grant/i.test(trimmed) || /Refresh token expired/i.test(trimmed) || /Refresh token expired/i.test(fromJson ?? "")) {
+    return provider ? `OAuth login expired for ${provider}. Log in again and retry.` : "OAuth login expired. Log in again and retry.";
+  }
+  if (fromJson) return fromJson;
+  const withoutStack = trimmed.split(/\n\s*at\s+/)[0]?.replace(/\s*;\s*stack=Error:[\s\S]*$/i, "").trim();
+  return withoutStack || trimmed;
+}
+function extractEmbeddedJsonError(s) {
+  const jsonStart = s.indexOf("{");
+  if (jsonStart < 0) return null;
+  const candidates = [];
+  const balanced = extractFirstJsonObject(s.slice(jsonStart));
+  if (balanced) candidates.push(balanced);
+  candidates.push(s.slice(jsonStart));
+  for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(trimmed.slice(jsonStart));
-      const nested = parsed.error?.message ?? parsed.message;
-      if (typeof nested === "string" && nested.trim()) return nested.trim();
+      const parsed = JSON.parse(candidate);
+      if (typeof parsed.error_description === "string" && parsed.error_description.trim()) {
+        return parsed.error_description.trim();
+      }
+      const nested = typeof parsed.error === "object" && parsed.error !== null ? parsed.error.message : void 0;
+      const msg = nested ?? parsed.message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+      if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error.trim();
     } catch {
     }
   }
-  return trimmed;
+  return null;
+}
+function extractFirstJsonObject(s) {
+  if (!s.startsWith("{")) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return s.slice(0, i + 1);
+    }
+  }
+  return null;
 }
 function extractAgentEndTurnError(ev) {
   const direct = String(ev.errorMessage ?? "").trim();
@@ -2072,7 +2121,8 @@ function formatAutoRetryMessage(ev) {
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   const errorMessage = String(ev.errorMessage ?? "").trim();
   const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage);
-  const reason = isNetworkError || !errorMessage || errorMessage === "Unknown error" ? isNetworkError ? "Network error" : null : truncateTitle(errorMessage, 150);
+  const facing = extractUserFacingError(errorMessage);
+  const reason = isNetworkError || !facing ? isNetworkError ? "Network error" : null : truncateTitle(facing, 150);
   const prefix = reason ? `${reason} \u2014 r` : "R";
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
