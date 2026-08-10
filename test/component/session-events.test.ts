@@ -884,6 +884,48 @@ test('PiAcpSession: agent_end with assistant stopReason error surfaces text and 
   assert.equal((errMsg!.update as any).content.text, 'Error: OAuth access token has been revoked.')
 })
 
+test('PiAcpSession: agent_end with expired OAuth refresh surfaces a short re-login message', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'agent_end',
+    messages: [
+      {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage:
+          'OAuth refresh failed for anthropic: Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=Error: HTTP request failed. status=400; url=https://platform.claude.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}; stack=Error: HTTP request failed. status=400; url=https://platform.claude.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}\n    at postJson (file:///opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/auth/oauth/anthropic.js:155:15)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)'
+      }
+    ]
+  })
+
+  assert.equal(await p, 'error')
+  const errMsg = conn.updates.find(
+    u =>
+      u.update.sessionUpdate === 'agent_message_chunk' &&
+      typeof (u.update as { content?: { text?: string } }).content?.text === 'string' &&
+      (u.update as { content: { text: string } }).content.text.startsWith('Error:')
+  )
+  assert.ok(errMsg, 'expected visible error text')
+  assert.equal(
+    (errMsg!.update as any).content.text,
+    'Error: OAuth login expired for anthropic. Log in again and retry.'
+  )
+})
+
 test('PiAcpSession: agent_end willRetry with assistant error does not surface a terminal error yet', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

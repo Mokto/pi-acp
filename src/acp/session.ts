@@ -1768,21 +1768,90 @@ function extractUserFacingError(errorMessage: string): string {
     return ''
   }
 
-  const jsonStart = trimmed.indexOf('{')
-  if (jsonStart >= 0) {
-    try {
-      const parsed = JSON.parse(trimmed.slice(jsonStart)) as {
-        error?: { message?: unknown }
-        message?: unknown
-      }
-      const nested = parsed.error?.message ?? parsed.message
-      if (typeof nested === 'string' && nested.trim()) return nested.trim()
-    } catch {
-      // fall through
-    }
+  const fromJson = extractEmbeddedJsonError(trimmed)
+  const provider = /OAuth refresh failed for ([A-Za-z0-9_-]+)/i.exec(trimmed)?.[1]
+  // Anthropic (and similar) OAuth dumps are multi-KB stack traces with
+  // `invalid_grant` / `Refresh token expired` buried in a token-endpoint body.
+  if (
+    /OAuth refresh failed/i.test(trimmed) ||
+    /invalid_grant/i.test(trimmed) ||
+    /Refresh token expired/i.test(trimmed) ||
+    /Refresh token expired/i.test(fromJson ?? '')
+  ) {
+    return provider
+      ? `OAuth login expired for ${provider}. Log in again and retry.`
+      : 'OAuth login expired. Log in again and retry.'
   }
 
-  return trimmed
+  if (fromJson) return fromJson
+
+  // Drop Node stacks / trailing `stack=Error:` tails from provider dumps.
+  const withoutStack = trimmed
+    .split(/\n\s*at\s+/)[0]
+    ?.replace(/\s*;\s*stack=Error:[\s\S]*$/i, '')
+    .trim()
+  return withoutStack || trimmed
+}
+
+/** Pull a nested provider/API error string out of a message that embeds JSON. */
+function extractEmbeddedJsonError(s: string): string | null {
+  const jsonStart = s.indexOf('{')
+  if (jsonStart < 0) return null
+
+  const candidates: string[] = []
+  const balanced = extractFirstJsonObject(s.slice(jsonStart))
+  if (balanced) candidates.push(balanced)
+  candidates.push(s.slice(jsonStart))
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as {
+        error?: { message?: unknown } | string
+        error_description?: unknown
+        message?: unknown
+      }
+      if (typeof parsed.error_description === 'string' && parsed.error_description.trim()) {
+        return parsed.error_description.trim()
+      }
+      const nested = typeof parsed.error === 'object' && parsed.error !== null ? parsed.error.message : undefined
+      const msg = nested ?? parsed.message
+      if (typeof msg === 'string' && msg.trim()) return msg.trim()
+      if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim()
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
+}
+
+function extractFirstJsonObject(s: string): string | null {
+  if (!s.startsWith('{')) return null
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return s.slice(0, i + 1)
+    }
+  }
+  return null
 }
 
 /** Best-effort user-facing error from a terminal (non-retrying) `agent_end`. */
@@ -1829,12 +1898,8 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
 
   const errorMessage = String((ev as any).errorMessage ?? '').trim()
   const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage)
-  const reason =
-    isNetworkError || !errorMessage || errorMessage === 'Unknown error'
-      ? isNetworkError
-        ? 'Network error'
-        : null
-      : truncateTitle(errorMessage, 150)
+  const facing = extractUserFacingError(errorMessage)
+  const reason = isNetworkError || !facing ? (isNetworkError ? 'Network error' : null) : truncateTitle(facing, 150)
   const prefix = reason ? `${reason} — r` : 'R'
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
