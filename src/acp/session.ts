@@ -798,20 +798,20 @@ export class PiAcpSession {
       },
       err => {
         // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
-        // Also ensure we flush any already-enqueued updates first.
-        void this.flushEmits().finally(() => {
+        void (async () => {
+          await this.flushEmits()
           // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
           const authErr = maybeAuthRequiredError(err)
           if (authErr) {
             this.pendingTurn?.reject(authErr)
           } else {
-            // Surface error message to client before completing the turn.
             const errorMessage = err instanceof Error ? err.message : String(err ?? 'Unknown error')
             this.emit({
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: `Error: ${errorMessage}` }
             })
-
+            // Clients close the turn on the prompt response; deliver the chunk first.
+            await this.flushEmits()
             const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
             this.pendingTurn?.resolve(reason)
           }
@@ -827,7 +827,7 @@ export class PiAcpSession {
             sessionUpdate: 'session_info_update',
             _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
           })
-        })
+        })()
       }
     )
   }
