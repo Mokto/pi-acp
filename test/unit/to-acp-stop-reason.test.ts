@@ -13,7 +13,7 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: maps session error stopReason to ACP refusal', async () => {
+test('PiAcpAgent: maps session error stopReason to ACP end_turn', async () => {
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
   ;(agent as any).sessions = new FakeSessions({
@@ -28,7 +28,8 @@ test('PiAcpAgent: maps session error stopReason to ACP refusal', async () => {
     prompt: [{ type: 'text', text: 'hello' }]
   } as any)
 
-  assert.equal(res.stopReason, 'refusal')
+  // ACP has no error stop reason; refusal triggers Cursor's content-policy UI.
+  assert.equal(res.stopReason, 'end_turn')
 })
 
 test('PiAcpAgent: maps session end_turn to ACP end_turn', async () => {

@@ -88,3 +88,44 @@ test('PiAcpSession: idle subprocess exit (no pending turn) still notifies and ev
   )
   assert.ok(exitMsg, 'expected an idle-exit notice instead of silence')
 })
+
+class SlowFakeAgentSideConnection extends FakeAgentSideConnection {
+  override async sessionUpdate(msg: Parameters<FakeAgentSideConnection['sessionUpdate']>[0]): Promise<void> {
+    await new Promise(r => setTimeout(r, 30))
+    await super.sessionUpdate(msg)
+  }
+}
+
+class RejectingFakePiRpcProcess extends FakePiRpcProcess {
+  override async prompt(
+    message: string,
+    attachments: unknown[] = [],
+    opts?: { streamingBehavior?: 'steer' | 'followUp' }
+  ): Promise<void> {
+    this.prompts.push({ message, attachments, streamingBehavior: opts?.streamingBehavior })
+    throw new Error('write after stream destroyed')
+  }
+}
+
+test('PiAcpSession: prompt RPC rejection flushes Error text before the turn resolves', async () => {
+  const conn = new SlowFakeAgentSideConnection()
+  const proc = new RejectingFakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const reason = await session.prompt('hello')
+  assert.equal(reason, 'error')
+
+  const errMsg = conn.updates.find(
+    u =>
+      u.update.sessionUpdate === 'agent_message_chunk' &&
+      (u.update as { content?: { text?: string } }).content?.text === 'Error: write after stream destroyed'
+  )
+  assert.ok(errMsg, 'expected Error chunk to be delivered before session/prompt resolves')
+})

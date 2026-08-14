@@ -158,8 +158,8 @@ test('PiAcpAgent: multisession', { concurrency: 1 }, async t => {
     }
   })
 
-  // ── 3. prompt maps internal 'error' stop reason to ACP 'refusal' ────────────
-  await t.test('prompt maps internal error stop reason to refusal', async () => {
+  // ── 3. prompt maps internal 'error' stop reason to ACP 'end_turn' ───────────
+  await t.test('prompt maps internal error stop reason to end_turn', async () => {
     const conn = new FakeAgentSideConnection()
     const agent = new PiAcpAgent(asAgentConn(conn))
 
@@ -184,6 +184,6 @@ test('PiAcpAgent: multisession', { concurrency: 1 }, async t => {
       prompt: [{ type: 'text', text: 'hi' }]
     } as any)
 
-    assert.equal(res.stopReason, 'refusal')
+    assert.equal(res.stopReason, 'end_turn')
   })
 })
