@@ -1247,7 +1247,8 @@ var PiAcpSession = class _PiAcpSession {
         });
       },
       (err) => {
-        void this.flushEmits().finally(() => {
+        void (async () => {
+          await this.flushEmits();
           const authErr = maybeAuthRequiredError(err);
           if (authErr) {
             this.pendingTurn?.reject(authErr);
@@ -1257,6 +1258,7 @@ var PiAcpSession = class _PiAcpSession {
               sessionUpdate: "agent_message_chunk",
               content: { type: "text", text: `Error: ${errorMessage}` }
             });
+            await this.flushEmits();
             const reason = this.cancelRequested ? "cancelled" : "error";
             this.pendingTurn?.resolve(reason);
           }
@@ -1268,7 +1270,7 @@ var PiAcpSession = class _PiAcpSession {
             sessionUpdate: "session_info_update",
             _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
           });
-        });
+        })();
       }
     );
   }
@@ -2941,7 +2943,6 @@ var PiAcpAgent = class {
   }
   toAcpStopReason(result, cancelRequested) {
     if (result === "cancelled" || cancelRequested) return "cancelled";
-    if (result === "error") return "refusal";
     return "end_turn";
   }
   cleanupFailedNewSession(sessionId, state) {
