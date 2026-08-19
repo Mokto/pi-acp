@@ -52,6 +52,7 @@ import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { resolveEnabledModelIds, type ScopeModel } from './model-scope.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { stayAwake } from './stay-awake.js'
+import { isLiveEnabled, LiveServer } from './live.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
@@ -213,11 +214,13 @@ const pkg = readNearestPackageJson(import.meta.url)
 
 export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection
-  private readonly sessions = new SessionManager()
+  private readonly sessions: SessionManager
   private readonly store = new SessionStore()
+  private readonly live: LiveServer | null
 
   dispose(): void {
     this.sessions.disposeAll()
+    this.live?.dispose()
   }
 
   // Remember recent session cwd and use it as the default filter.
@@ -278,6 +281,14 @@ export class PiAcpAgent implements ACPAgent {
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
+    this.live = isLiveEnabled() ? new LiveServer() : null
+    this.sessions = new SessionManager({ live: this.live })
+    if (this.live) {
+      void this.live.start().catch(err => {
+        const message = err instanceof Error ? err.message : String(err)
+        process.stderr.write(`pi-acp: live socket failed to start (${message}); continuing without it\n`)
+      })
+    }
   }
 
   private toAcpStopReason(result: PiStopReason, cancelRequested: boolean): StopReason {

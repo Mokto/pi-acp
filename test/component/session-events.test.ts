@@ -35,6 +35,73 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   })
 })
 
+test('PiAcpSession: addObserver receives the same update as the ACP client', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const seen: unknown[] = []
+  const unsub = session.addObserver(u => seen.push(u))
+
+  proc.emit({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: 'hi' }
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(seen.length, 1)
+  assert.deepEqual(seen[0], conn.updates[0]!.update)
+
+  unsub()
+  proc.emit({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: 'there' }
+  })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(seen.length, 1)
+  assert.equal(conn.updates.length, 2)
+})
+
+test('PiAcpSession: a throwing observer is dropped and does not break ACP emit', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let calls = 0
+  session.addObserver(() => {
+    calls += 1
+    throw new Error('sidecar died')
+  })
+
+  proc.emit({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: 'a' }
+  })
+  proc.emit({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: 'b' }
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(calls, 1)
+  assert.equal(conn.updates.length, 2)
+})
+
 test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

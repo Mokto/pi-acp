@@ -187,9 +187,9 @@ var PiRpcProcess = class _PiRpcProcess {
       const state = await proc2.getState();
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
-        const { mkdirSync: mkdirSync2 } = await import("fs");
+        const { mkdirSync: mkdirSync3 } = await import("fs");
         const { dirname: dirname3 } = await import("path");
-        mkdirSync2(dirname3(sessionFile), { recursive: true });
+        mkdirSync3(dirname3(sessionFile), { recursive: true });
       }
     } catch {
     }
@@ -396,6 +396,15 @@ function getPiAcpDir() {
 }
 function getPiAcpSessionMapPath() {
   return join(getPiAcpDir(), "session-map.json");
+}
+function getPiAcpLiveDir() {
+  return join(getPiAcpDir(), "live");
+}
+function getPiAcpLiveSocketPath(pid) {
+  return join(getPiAcpLiveDir(), `${pid}.sock`);
+}
+function getPiAcpLivePidRegistryPath(pid) {
+  return join(getPiAcpLiveDir(), `${pid}.json`);
 }
 
 // src/acp/session-store.ts
@@ -797,6 +806,10 @@ function toToolCallLocations(args, cwd, line) {
 var SessionManager = class {
   sessions = /* @__PURE__ */ new Map();
   store = new SessionStore();
+  live;
+  constructor(opts) {
+    this.live = opts?.live ?? null;
+  }
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll() {
     for (const [id] of this.sessions) this.close(id);
@@ -817,6 +830,7 @@ var SessionManager = class {
     } catch {
     }
     this.sessions.delete(sessionId);
+    this.live?.remove(sessionId);
   }
   async create(params) {
     let proc2;
@@ -850,9 +864,10 @@ var SessionManager = class {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.sessions.delete(sessionId)
+      onDead: () => this.forget(sessionId)
     });
     this.sessions.set(sessionId, session);
+    this.live?.upsert(session, sessionFile ?? "");
     return session;
   }
   get(sessionId) {
@@ -875,10 +890,15 @@ var SessionManager = class {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.sessions.delete(sessionId)
+      onDead: () => this.forget(sessionId)
     });
     this.sessions.set(sessionId, session);
+    this.live?.upsert(session, this.store.get(sessionId)?.sessionFile ?? "");
     return session;
+  }
+  forget(sessionId) {
+    this.sessions.delete(sessionId);
+    this.live?.remove(sessionId);
   }
 };
 var PiAcpSession = class _PiAcpSession {
@@ -981,6 +1001,9 @@ var PiAcpSession = class _PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   lastEmit = Promise.resolve();
+  // Live-socket observers (Slack). Empty unless something attached; throws are
+  // dropped so a dead sidecar cannot break the Zed ACP connection.
+  observers = /* @__PURE__ */ new Set();
   constructor(opts) {
     this.sessionId = opts.sessionId;
     this.cwd = opts.cwd;
@@ -1083,6 +1106,12 @@ var PiAcpSession = class _PiAcpSession {
   hasActiveTurn() {
     return this.pendingTurn !== null;
   }
+  addObserver(fn) {
+    this.observers.add(fn);
+    return () => {
+      this.observers.delete(fn);
+    };
+  }
   async setModelWhenIdle(provider, modelId) {
     if (this.pendingTurn) {
       this.deferredModel = { provider, modelId };
@@ -1098,6 +1127,15 @@ var PiAcpSession = class _PiAcpSession {
     await this.proc.setThinkingLevel(level);
   }
   emit(update) {
+    if (this.observers.size > 0) {
+      for (const fn of [...this.observers]) {
+        try {
+          fn(update);
+        } catch {
+          this.observers.delete(fn);
+        }
+      }
+    }
     this.lastEmit = this.lastEmit.then(
       () => this.conn.sessionUpdate({
         sessionId: this.sessionId,
@@ -2756,10 +2794,318 @@ function stayAwake() {
   };
 }
 
+// src/acp/live.ts
+import { createServer } from "net";
+import {
+  chmodSync,
+  existsSync as existsSync4,
+  mkdirSync as mkdirSync2,
+  readdirSync as readdirSync3,
+  readFileSync as readFileSync6,
+  renameSync,
+  unlinkSync,
+  writeFileSync as writeFileSync2
+} from "fs";
+import { join as join5 } from "path";
+function isLiveEnabled(env = process.env) {
+  const v = env.PI_ACP_LIVE;
+  if (v == null || v === "") return false;
+  const n = v.trim().toLowerCase();
+  return n === "1" || n === "true" || n === "yes";
+}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+function isObject2(x) {
+  return Boolean(x) && typeof x === "object" && !Array.isArray(x);
+}
+function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
+  if (!existsSync4(liveDir)) return;
+  let names = [];
+  try {
+    names = readdirSync3(liveDir);
+  } catch {
+    return;
+  }
+  const pids = /* @__PURE__ */ new Set();
+  for (const name of names) {
+    const m = name.match(/^(\d+)\.(json|sock)$/);
+    if (!m) continue;
+    pids.add(Number(m[1]));
+  }
+  for (const pid of pids) {
+    if (pid === process.pid) continue;
+    if (isPidAlive(pid)) continue;
+    for (const ext of ["json", "sock"]) {
+      const path = join5(liveDir, `${pid}.${ext}`);
+      try {
+        if (existsSync4(path)) unlinkSync(path);
+      } catch {
+      }
+    }
+  }
+}
+var LiveServer = class {
+  liveDir;
+  pid;
+  sockPath;
+  registryPath;
+  entries = /* @__PURE__ */ new Map();
+  connections = /* @__PURE__ */ new Set();
+  server = null;
+  started = false;
+  disposed = false;
+  constructor(opts = {}) {
+    this.pid = opts.pid ?? process.pid;
+    this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
+    this.sockPath = opts.liveDir ? join5(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join5(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+  }
+  get socketPath() {
+    return this.sockPath;
+  }
+  upsert(session, sessionFile) {
+    this.entries.set(session.sessionId, { session, sessionFile });
+    if (this.started) this.writeRegistry();
+  }
+  remove(sessionId) {
+    this.entries.delete(sessionId);
+    for (const conn of this.connections) {
+      const unsub = conn.attached.get(sessionId);
+      if (unsub) {
+        unsub();
+        conn.attached.delete(sessionId);
+      }
+    }
+    if (this.started) this.writeRegistry();
+  }
+  async start() {
+    if (this.disposed || this.started) return;
+    mkdirSync2(this.liveDir, { recursive: true, mode: 448 });
+    try {
+      chmodSync(this.liveDir, 448);
+    } catch {
+    }
+    sweepStaleLiveFiles(this.liveDir);
+    this.unlinkIfExists(this.sockPath);
+    const server = createServer((socket) => this.onConnection(socket));
+    this.server = server;
+    try {
+      await this.listen(server);
+    } catch (err) {
+      const code = err.code;
+      if (code === "EADDRINUSE") {
+        this.unlinkIfExists(this.sockPath);
+        await this.listen(server);
+      } else {
+        this.server = null;
+        throw err;
+      }
+    }
+    try {
+      chmodSync(this.sockPath, 384);
+    } catch {
+    }
+    this.started = true;
+    this.writeRegistry();
+  }
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.started = false;
+    for (const conn of this.connections) {
+      for (const unsub of conn.attached.values()) unsub();
+      conn.attached.clear();
+      try {
+        conn.socket.destroy();
+      } catch {
+      }
+    }
+    this.connections.clear();
+    this.entries.clear();
+    const server = this.server;
+    this.server = null;
+    if (server) {
+      try {
+        server.close();
+      } catch {
+      }
+    }
+    this.unlinkIfExists(this.sockPath);
+    this.unlinkIfExists(this.registryPath);
+  }
+  listen(server) {
+    return new Promise((resolve4, reject) => {
+      const onError = (err) => {
+        server.off("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve4();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(this.sockPath);
+    });
+  }
+  writeRegistry() {
+    const sessions = {};
+    for (const [sessionId, entry] of this.entries) {
+      sessions[sessionId] = { cwd: entry.session.cwd, sessionFile: entry.sessionFile };
+    }
+    const data = { pid: this.pid, sock: this.sockPath, sessions };
+    const tmp = `${this.registryPath}.tmp`;
+    try {
+      writeFileSync2(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
+      renameSync(tmp, this.registryPath);
+      chmodSync(this.registryPath, 384);
+    } catch {
+      try {
+        if (existsSync4(tmp)) unlinkSync(tmp);
+      } catch {
+      }
+    }
+  }
+  onConnection(socket) {
+    const conn = { socket, attached: /* @__PURE__ */ new Map() };
+    this.connections.add(conn);
+    let buf = "";
+    socket.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) void this.handleLine(conn, line);
+        nl = buf.indexOf("\n");
+      }
+    });
+    const cleanup = () => {
+      for (const unsub of conn.attached.values()) unsub();
+      conn.attached.clear();
+      this.connections.delete(conn);
+    };
+    socket.on("close", cleanup);
+    socket.on("error", cleanup);
+  }
+  async handleLine(conn, line) {
+    let raw;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      this.writeJson(conn.socket, { id: -1, ok: false, error: "invalid json" });
+      return;
+    }
+    const req = this.asRequest(raw);
+    if (!req) {
+      const id = isObject2(raw) && typeof raw.id === "number" ? raw.id : -1;
+      this.writeJson(conn.socket, { id, ok: false, error: "invalid request" });
+      return;
+    }
+    try {
+      await this.dispatch(conn, req);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.writeJson(conn.socket, { id: req.id, ok: false, error: message });
+    }
+  }
+  asRequest(raw) {
+    if (!isObject2(raw)) return null;
+    if (typeof raw.id !== "number") return null;
+    const type = raw.type;
+    if (type !== "list" && type !== "attach" && type !== "detach" && type !== "prompt" && type !== "cancel") {
+      return null;
+    }
+    const req = { id: raw.id, type };
+    if (typeof raw.sessionId === "string") req.sessionId = raw.sessionId;
+    if (typeof raw.message === "string") req.message = raw.message;
+    if (Array.isArray(raw.images)) req.images = raw.images;
+    return req;
+  }
+  async dispatch(conn, req) {
+    switch (req.type) {
+      case "list":
+        this.writeJson(conn.socket, { id: req.id, ok: true, sessions: this.list() });
+        return;
+      case "attach":
+        this.attach(conn, this.requireSessionId(req));
+        this.writeJson(conn.socket, { id: req.id, ok: true });
+        return;
+      case "detach":
+        this.detach(conn, this.requireSessionId(req));
+        this.writeJson(conn.socket, { id: req.id, ok: true });
+        return;
+      case "prompt": {
+        const sessionId = this.requireSessionId(req);
+        if (typeof req.message !== "string") throw new Error("message required");
+        this.attach(conn, sessionId);
+        const stopReason = await this.entries.get(sessionId).session.prompt(req.message, req.images ?? []);
+        this.writeJson(conn.socket, { id: req.id, ok: true, stopReason });
+        return;
+      }
+      case "cancel":
+        await this.requireEntry(this.requireSessionId(req)).session.cancel();
+        this.writeJson(conn.socket, { id: req.id, ok: true });
+        return;
+    }
+  }
+  list() {
+    return [...this.entries.values()].map((e) => ({
+      sessionId: e.session.sessionId,
+      cwd: e.session.cwd,
+      sessionFile: e.sessionFile,
+      running: e.session.hasActiveTurn()
+    }));
+  }
+  requireSessionId(req) {
+    if (!req.sessionId) throw new Error("sessionId required");
+    return req.sessionId;
+  }
+  requireEntry(sessionId) {
+    const entry = this.entries.get(sessionId);
+    if (!entry) throw new Error(`unknown sessionId: ${sessionId}`);
+    return entry;
+  }
+  attach(conn, sessionId) {
+    if (conn.attached.has(sessionId)) return;
+    const entry = this.requireEntry(sessionId);
+    const unsub = entry.session.addObserver((update) => {
+      this.writeJson(conn.socket, { type: "update", sessionId, update });
+    });
+    conn.attached.set(sessionId, unsub);
+  }
+  detach(conn, sessionId) {
+    const unsub = conn.attached.get(sessionId);
+    if (!unsub) return;
+    unsub();
+    conn.attached.delete(sessionId);
+  }
+  writeJson(socket, msg) {
+    if (socket.destroyed || !socket.writable) return;
+    try {
+      socket.write(JSON.stringify(msg) + "\n");
+    } catch {
+    }
+  }
+  unlinkIfExists(path) {
+    try {
+      if (existsSync4(path)) unlinkSync(path);
+    } catch {
+    }
+  }
+};
+
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute3 } from "path";
-import { existsSync as existsSync4, readFileSync as readFileSync6, realpathSync, readdirSync as readdirSync3, statSync as statSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
-import { join as join5, dirname as dirname2, basename as basename2 } from "path";
+import { existsSync as existsSync5, readFileSync as readFileSync7, realpathSync, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "fs";
+import { join as join6, dirname as dirname2, basename as basename2 } from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 function getMessagesTimeoutMs() {
@@ -2790,7 +3136,7 @@ var TimeoutError = class extends Error {
 function buildSessionSummaryFromFile(sessionFile) {
   let raw;
   try {
-    raw = readFileSync6(sessionFile, "utf-8");
+    raw = readFileSync7(sessionFile, "utf-8");
   } catch {
     return "";
   }
@@ -2884,10 +3230,12 @@ function mergeCommands(a, b) {
 var pkg = readNearestPackageJson(import.meta.url);
 var PiAcpAgent = class {
   conn;
-  sessions = new SessionManager();
+  sessions;
   store = new SessionStore();
+  live;
   dispose() {
     this.sessions.disposeAll();
+    this.live?.dispose();
   }
   // Remember recent session cwd and use it as the default filter.
   lastSessionCwd = null;
@@ -2940,6 +3288,15 @@ var PiAcpAgent = class {
   constructor(conn, _config) {
     this.conn = conn;
     void _config;
+    this.live = isLiveEnabled() ? new LiveServer() : null;
+    this.sessions = new SessionManager({ live: this.live });
+    if (this.live) {
+      void this.live.start().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`pi-acp: live socket failed to start (${message}); continuing without it
+`);
+      });
+    }
   }
   toAcpStopReason(result, cancelRequested) {
     if (result === "cancelled" || cancelRequested) return "cancelled";
@@ -2950,7 +3307,7 @@ var PiAcpAgent = class {
     const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile : this.store.get(sessionId)?.sessionFile;
     if (typeof sessionFile === "string" && sessionFile.trim()) {
       try {
-        if (existsSync4(sessionFile)) unlinkSync(sessionFile);
+        if (existsSync5(sessionFile)) unlinkSync2(sessionFile);
       } catch {
       }
     }
@@ -3295,8 +3652,8 @@ ${JSON.stringify(stats, null, 2)}`;
             if (piPath) {
               const resolved = realpathSync(piPath);
               const pkgRoot = dirname2(dirname2(resolved));
-              const p = join5(pkgRoot, "CHANGELOG.md");
-              if (existsSync4(p)) return p;
+              const p = join6(pkgRoot, "CHANGELOG.md");
+              if (existsSync5(p)) return p;
             }
           } catch {
           }
@@ -3304,8 +3661,8 @@ ${JSON.stringify(stats, null, 2)}`;
             const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join5(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
-              if (existsSync4(p)) return p;
+              const p = join6(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              if (existsSync5(p)) return p;
             }
           } catch {
           }
@@ -3324,7 +3681,7 @@ ${JSON.stringify(stats, null, 2)}`;
         }
         let text = "";
         try {
-          text = readFileSync6(changelogPath, "utf-8");
+          text = readFileSync7(changelogPath, "utf-8");
         } catch (e) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -3350,7 +3707,7 @@ ${JSON.stringify(stats, null, 2)}`;
         const state = await session.proc.getState();
         const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
         const messageCount = typeof state?.messageCount === "number" ? state.messageCount : 0;
-        if (!sessionFile || messageCount === 0 || !existsSync4(sessionFile)) {
+        if (!sessionFile || messageCount === 0 || !existsSync5(sessionFile)) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -3364,7 +3721,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         try {
-          const raw = readFileSync6(sessionFile, "utf-8");
+          const raw = readFileSync7(sessionFile, "utf-8");
           if (raw.trim().length === 0) {
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
@@ -3392,7 +3749,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join5(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join6(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -3563,9 +3920,9 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join5(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join6(params.cwd, ".pi-history-summary.md");
           try {
-            writeFileSync2(summaryPath, summary, "utf-8");
+            writeFileSync3(summaryPath, summary, "utf-8");
           } catch {
           }
           session.setStartupInfo(
@@ -3930,14 +4287,14 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join5(opts.cwd, "AGENTS.md");
-  if (existsSync4(contextPath)) contextItems.push(contextPath);
+  const contextPath = join6(opts.cwd, "AGENTS.md");
+  if (existsSync5(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
-      for (const e of readdirSync3(root)) {
-        const p = join5(root, e);
+      for (const e of readdirSync4(root)) {
+        const p = join6(root, e);
         try {
           const st = statSync2(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
@@ -3951,13 +4308,13 @@ function buildStartupInfo(opts) {
         const dir = stack.pop();
         let entries = [];
         try {
-          entries = readdirSync3(dir);
+          entries = readdirSync4(dir);
         } catch {
           continue;
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join5(dir, name);
+          const p = join6(dir, name);
           let st;
           try {
             st = statSync2(p);
@@ -3974,31 +4331,31 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join5(getAgentDir(), "skills");
+  const globalSkillsDir = join6(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join5(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join6(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join5(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join6(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join5(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join6(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
-    const prompts = readdirSync3(promptsDir).filter((f) => f.endsWith(".md"));
+    const prompts = readdirSync4(promptsDir).filter((f) => f.endsWith(".md"));
     for (const f of prompts) promptsItems.push(`/${basename2(f, ".md")}`);
   } catch {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join5(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join6(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
-    const exts = readdirSync3(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join5(extDir, f));
+    const exts = readdirSync4(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
+    for (const f of exts) extItems.push(join6(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join5(process.env.HOME ?? "", ".pi", "agent", "settings.json");
-    const settings = JSON.parse(readFileSync6(settingsPath, "utf-8"));
+    const settingsPath = join6(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settings = JSON.parse(readFileSync7(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
       const s = String(pkg2);
@@ -4023,9 +4380,9 @@ function readNearestPackageJson(metaUrl) {
   try {
     let dir = dirname2(fileURLToPath(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join5(dir, "package.json");
-      if (existsSync4(p)) {
-        const json = JSON.parse(readFileSync6(p, "utf-8"));
+      const p = join6(dir, "package.json");
+      if (existsSync5(p)) {
+        const json = JSON.parse(readFileSync7(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
       dir = dirname2(dir);

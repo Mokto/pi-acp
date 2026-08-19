@@ -40,6 +40,12 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
+/** Optional live-attach sidecar. Null unless PI_ACP_LIVE is on. */
+export type LiveSessionBridge = {
+  upsert(session: PiAcpSession, sessionFile: string): void
+  remove(sessionId: string): void
+}
+
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
 
 type PendingTurn = {
@@ -193,6 +199,11 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
+  private readonly live: LiveSessionBridge | null
+
+  constructor(opts?: { live?: LiveSessionBridge | null }) {
+    this.live = opts?.live ?? null
+  }
 
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll(): void {
@@ -217,6 +228,7 @@ export class SessionManager {
       // ignore
     }
     this.sessions.delete(sessionId)
+    this.live?.remove(sessionId)
   }
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
@@ -257,10 +269,11 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.sessions.delete(sessionId)
+      onDead: () => this.forget(sessionId)
     })
 
     this.sessions.set(sessionId, session)
+    this.live?.upsert(session, sessionFile ?? '')
     return session
   }
 
@@ -286,11 +299,17 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.sessions.delete(sessionId)
+      onDead: () => this.forget(sessionId)
     })
 
     this.sessions.set(sessionId, session)
+    this.live?.upsert(session, this.store.get(sessionId)?.sessionFile ?? '')
     return session
+  }
+
+  private forget(sessionId: string): void {
+    this.sessions.delete(sessionId)
+    this.live?.remove(sessionId)
   }
 }
 
@@ -409,6 +428,10 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+
+  // Live-socket observers (Slack). Empty unless something attached; throws are
+  // dropped so a dead sidecar cannot break the Zed ACP connection.
+  private readonly observers = new Set<(update: SessionUpdate) => void>()
 
   constructor(opts: {
     sessionId: string
@@ -568,6 +591,13 @@ export class PiAcpSession {
     return this.pendingTurn !== null
   }
 
+  addObserver(fn: (update: SessionUpdate) => void): () => void {
+    this.observers.add(fn)
+    return () => {
+      this.observers.delete(fn)
+    }
+  }
+
   async setModelWhenIdle(provider: string, modelId: string): Promise<void> {
     if (this.pendingTurn) {
       this.deferredModel = { provider, modelId }
@@ -585,6 +615,16 @@ export class PiAcpSession {
   }
 
   private emit(update: SessionUpdate): void {
+    if (this.observers.size > 0) {
+      for (const fn of [...this.observers]) {
+        try {
+          fn(update)
+        } catch {
+          this.observers.delete(fn)
+        }
+      }
+    }
+
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>

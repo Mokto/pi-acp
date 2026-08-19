@@ -13,3 +13,16 @@ export function getPiAcpDir(): string {
 export function getPiAcpSessionMapPath(): string {
   return join(getPiAcpDir(), 'session-map.json')
 }
+
+/** Directory for opt-in live-attach sockets + per-pid registries (`PI_ACP_LIVE=1`). */
+export function getPiAcpLiveDir(): string {
+  return join(getPiAcpDir(), 'live')
+}
+
+export function getPiAcpLiveSocketPath(pid: number): string {
+  return join(getPiAcpLiveDir(), `${pid}.sock`)
+}
+
+export function getPiAcpLivePidRegistryPath(pid: number): string {
+  return join(getPiAcpLiveDir(), `${pid}.json`)
+}
