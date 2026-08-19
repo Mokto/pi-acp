@@ -2980,7 +2980,6 @@ var PiAcpAgent = class {
           embeddedContext: process.env.PI_ACP_ENABLE_EMBEDDED_CONTEXT === "true"
         },
         sessionCapabilities: {
-          // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {}
         }
@@ -3486,7 +3485,7 @@ ${JSON.stringify(stats, null, 2)}`;
     const session = await this.autoRestoreSession(params.sessionId);
     await session.cancel();
   }
-  async unstable_listSessions(params) {
+  async listSessions(params) {
     const all = listPiSessions();
     const effectiveCwd = params.cwd ?? this.lastSessionCwd;
     const filtered = effectiveCwd ? all.filter((s) => s.cwd === effectiveCwd) : all;
@@ -3711,10 +3710,6 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     }, 0);
     return response;
   }
-  async unstable_setSessionModel(params) {
-    const session = await this.autoRestoreSession(params.sessionId);
-    await this.applyModelSelection(session, params.modelId);
-  }
   // Resolve a model identifier and apply it to the session's pi process.
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
@@ -3744,7 +3739,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
   // reasoning pickers through config options rather than the `models`/`modes`
   // fields. Apply the change, then return the full refreshed option set (which
   // also reflects any thinking-level reclamping pi performs on a model switch).
-  async unstable_setSessionConfigOption(params) {
+  async setSessionConfigOption(params) {
     const session = await this.autoRestoreSession(params.sessionId);
     switch (params.configId) {
       case MODEL_CONFIG_ID:

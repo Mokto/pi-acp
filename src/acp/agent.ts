@@ -11,7 +11,6 @@ import {
   type LoadSessionRequest,
   type LoadSessionResponse,
   type McpServer,
-  type ModelInfo,
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
@@ -335,7 +334,6 @@ export class PiAcpAgent implements ACPAgent {
           embeddedContext: process.env.PI_ACP_ENABLE_EMBEDDED_CONTEXT === 'true'
         },
         sessionCapabilities: {
-          // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {}
         }
@@ -972,7 +970,7 @@ export class PiAcpAgent implements ACPAgent {
     await session.cancel()
   }
 
-  async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
     // ACP: filter by cwd if provided.
     // Zed currently sends `{}` (no cwd), so we default to the last session cwd to
     // emulate pi's `/resume` picker (project-scoped).
@@ -1248,11 +1246,6 @@ export class PiAcpAgent implements ACPAgent {
     return response
   }
 
-  async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
-    const session = await this.autoRestoreSession(params.sessionId)
-    await this.applyModelSelection(session, params.modelId)
-  }
-
   // Resolve a model identifier and apply it to the session's pi process.
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
@@ -1287,9 +1280,7 @@ export class PiAcpAgent implements ACPAgent {
   // reasoning pickers through config options rather than the `models`/`modes`
   // fields. Apply the change, then return the full refreshed option set (which
   // also reflects any thinking-level reclamping pi performs on a model switch).
-  async unstable_setSessionConfigOption(
-    params: SetSessionConfigOptionRequest
-  ): Promise<SetSessionConfigOptionResponse> {
+  async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
     const session = await this.autoRestoreSession(params.sessionId)
 
     switch (params.configId) {
@@ -1396,6 +1387,11 @@ async function getThinkingState(
     }))
   }
 }
+
+// The v1 SDK dropped the `ModelInfo`/`SessionModelState` types (model selection
+// moved to config options); we keep the shape locally for legacy clients that
+// still read the `models` field.
+type ModelInfo = { modelId: string; name: string; description: string | null }
 
 async function getModelState(
   proc: PiRpcProcess,

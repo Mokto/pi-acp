@@ -20,7 +20,7 @@ class FakeSessions {
 // a zombie session (e.g. a model change) would try to write to a destroyed stdin
 // stream and blow up with a raw "write after stream destroyed" error instead of
 // transparently respawning.
-test('PiAcpAgent: unstable_setSessionModel evicts a session whose pi process already exited', async () => {
+test('PiAcpAgent: setSessionConfigOption evicts a session whose pi process already exited', async () => {
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
   const sessions = new FakeSessions({
@@ -33,7 +33,7 @@ test('PiAcpAgent: unstable_setSessionModel evicts a session whose pi process alr
   // can't actually respawn here -- but that's fine: the point of this test is
   // that we *attempt* eviction + restore rather than silently reusing the corpse.
   await assert.rejects(
-    () => agent.unstable_setSessionModel({ sessionId: 's1', modelId: 'anthropic/claude' }),
+    () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'anthropic/claude' }),
     (e: any) => e?.code === -32602 && String(e?.data ?? '').includes('Unknown sessionId')
   )
 

@@ -75,54 +75,54 @@ const baseModels: PiModel[] = [
   { provider: 'test', id: 'model-b', name: 'Model B' }
 ]
 
-test('unstable_setSessionConfigOption: model option applies provider/model and refreshes options', async () => {
+test('setSessionConfigOption: model option applies provider/model and refreshes options', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)
 
-  const res = await agent.unstable_setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/model-b' })
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/model-b' })
 
   assert.deepEqual(proc.setModelCalls, [{ provider: 'test', modelId: 'model-b' }])
   const model = res.configOptions.find(o => o.id === 'model')
   assert.equal(model?.currentValue, 'test/model-b')
 })
 
-test('unstable_setSessionConfigOption: resolves a bare model id via available models', async () => {
+test('setSessionConfigOption: resolves a bare model id via available models', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)
 
-  await agent.unstable_setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'model-b' })
+  await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'model-b' })
 
   assert.deepEqual(proc.setModelCalls, [{ provider: 'test', modelId: 'model-b' }])
 })
 
-test('unstable_setSessionConfigOption: thinking option maps to setThinkingLevel and refreshes options', async () => {
+test('setSessionConfigOption: thinking option maps to setThinkingLevel and refreshes options', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)
 
-  const res = await agent.unstable_setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'high' })
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'high' })
 
   assert.deepEqual(proc.setThinkingCalls, ['high'])
   const think = res.configOptions.find(o => o.id === 'thinking')
   assert.equal(think?.currentValue, 'high')
 })
 
-test('unstable_setSessionConfigOption: rejects an invalid thinking level', async () => {
+test('setSessionConfigOption: rejects an invalid thinking level', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)
 
   await assert.rejects(
-    () => agent.unstable_setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'turbo' }),
+    () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'turbo' }),
     /invalid params/i
   )
   assert.deepEqual(proc.setThinkingCalls, [])
 })
 
-test('unstable_setSessionConfigOption: rejects an unknown configId', async () => {
+test('setSessionConfigOption: rejects an unknown configId', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)
 
   await assert.rejects(
-    () => agent.unstable_setSessionConfigOption({ sessionId: 's1', configId: 'bogus', value: 'x' }),
+    () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'bogus', value: 'x' }),
     (err: unknown) =>
       err instanceof Error && String((err as { data?: unknown }).data ?? '').includes('Unknown configId')
   )

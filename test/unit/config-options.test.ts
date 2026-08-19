@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import {
   buildSessionConfigOptions,
   MODEL_CONFIG_ID,
@@ -7,6 +8,13 @@ import {
   type ConfigModelState,
   type ConfigThinkingState
 } from '../../src/acp/translate/config-options.js'
+
+function findSelect(options: SessionConfigOption[], id: string): Extract<SessionConfigOption, { type: 'select' }> {
+  const o = options.find(x => x.id === id)
+  assert.ok(o)
+  assert.equal(o.type, 'select')
+  return o as Extract<SessionConfigOption, { type: 'select' }>
+}
 
 const models: ConfigModelState = {
   currentModelId: 'anthropic/claude',
@@ -29,9 +37,7 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
   const options = buildSessionConfigOptions(models, thinking)
   assert.equal(options.length, 2)
 
-  const model = options.find(o => o.id === MODEL_CONFIG_ID)
-  assert.ok(model)
-  assert.equal(model.type, 'select')
+  const model = findSelect(options, MODEL_CONFIG_ID)
   assert.equal(model.category, 'model')
   assert.equal(model.currentValue, 'anthropic/claude')
   assert.deepEqual(model.options, [
@@ -39,8 +45,7 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
     { value: 'openai/gpt', name: 'openai/GPT', description: 'fast' }
   ])
 
-  const think = options.find(o => o.id === THINKING_CONFIG_ID)
-  assert.ok(think)
+  const think = findSelect(options, THINKING_CONFIG_ID)
   assert.equal(think.category, 'thought_level')
   assert.equal(think.currentValue, 'medium')
   assert.deepEqual(think.options, [
@@ -51,8 +56,7 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
 })
 
 test('buildSessionConfigOptions: currentValue is always one of the advertised model values', () => {
-  const model = buildSessionConfigOptions(models, thinking).find(o => o.id === MODEL_CONFIG_ID)
-  assert.ok(model)
+  const model = findSelect(buildSessionConfigOptions(models, thinking), MODEL_CONFIG_ID)
   assert.ok(model.options.some(o => 'value' in o && o.value === model.currentValue))
 })
 
