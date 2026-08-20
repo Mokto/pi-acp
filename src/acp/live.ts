@@ -382,7 +382,9 @@ export class LiveServer implements LiveSessionBridge {
         const sessionId = this.requireSessionId(req)
         if (typeof req.message !== 'string') throw new Error('message required')
         this.attach(conn, sessionId)
-        const stopReason: StopReason = await this.entries.get(sessionId)!.session.prompt(req.message, req.images ?? [])
+        const stopReason: StopReason = await this.entries
+          .get(sessionId)!
+          .session.prompt(req.message, req.images ?? [], { showInClient: true })
         this.writeJson(conn.socket, { id: req.id, ok: true, stopReason })
         return
       }

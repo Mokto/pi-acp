@@ -1059,8 +1059,14 @@ var PiAcpSession = class _PiAcpSession {
       content: { type: "text", text: this.startupInfo }
     });
   }
-  async prompt(message, images = []) {
+  async prompt(message, images = [], opts) {
     this.sendStartupInfoOnFirstPromptIfPending();
+    if (opts?.showInClient && message.trim()) {
+      this.emit({
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text: message }
+      });
+    }
     const expandedMessage = expandSlashCommand(message, this.fileCommands);
     const turnPromise = new Promise((resolve4, reject) => {
       const queued = { message: expandedMessage, images, resolve: resolve4, reject };
@@ -3046,7 +3052,7 @@ var LiveServer = class {
         const sessionId = this.requireSessionId(req);
         if (typeof req.message !== "string") throw new Error("message required");
         this.attach(conn, sessionId);
-        const stopReason = await this.entries.get(sessionId).session.prompt(req.message, req.images ?? []);
+        const stopReason = await this.entries.get(sessionId).session.prompt(req.message, req.images ?? [], { showInClient: true });
         this.writeJson(conn.socket, { id: req.id, ok: true, stopReason });
         return;
       }

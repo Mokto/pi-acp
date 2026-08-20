@@ -109,6 +109,36 @@ test('LiveServer: attach fans out session/update to socket and Zed', async () =>
   }
 })
 
+test('LiveServer: socket prompt emits user_message_chunk to Zed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-live-'))
+  const live = new LiveServer({ liveDir: dir, pid: process.pid })
+  const { session, conn, proc } = makeSession()
+  live.upsert(session, '/tmp/s.jsonl')
+  await live.start()
+  const client = await connect(live.socketPath)
+
+  try {
+    client.send({ id: 1, type: 'prompt', sessionId: 's1', message: 'from-slack' })
+    await client.waitFor(m => {
+      const u = m as any
+      return u.type === 'update' && u.update?.sessionUpdate === 'user_message_chunk'
+    })
+    assert.ok(
+      conn.updates.some(
+        u =>
+          (u as any).update?.sessionUpdate === 'user_message_chunk' && (u as any).update?.content?.text === 'from-slack'
+      )
+    )
+
+    finishTurn(proc)
+    const done = await client.waitFor(m => (m as any).id === 1 && (m as any).ok === true)
+    assert.equal((done as any).stopReason, 'end_turn')
+  } finally {
+    client.socket.destroy()
+    live.dispose()
+  }
+})
+
 test('LiveServer: socket prompt uses the same queue as Zed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-live-'))
   const live = new LiveServer({ liveDir: dir, pid: process.pid })

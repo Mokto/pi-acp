@@ -7,6 +7,40 @@ import { PiAcpSession } from '../../src/acp/session.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP } from '../../src/acp/translate/narrated-tool-calls.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
+test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const zed = session.prompt('from-zed')
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(conn.updates.filter(u => (u as any).update?.sessionUpdate === 'user_message_chunk').length, 0)
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await zed, 'end_turn')
+
+  const slack = session.prompt('from-slack', [], { showInClient: true })
+  await new Promise(r => setTimeout(r, 0))
+  const userChunks = conn.updates.filter(u => (u as any).update?.sessionUpdate === 'user_message_chunk')
+  assert.equal(userChunks.length, 1)
+  assert.deepEqual(userChunks[0]!.update, {
+    sessionUpdate: 'user_message_chunk',
+    content: { type: 'text', text: 'from-slack' }
+  })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await slack, 'end_turn')
+})
+
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

@@ -516,10 +516,20 @@ export class PiAcpSession {
     })
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+  async prompt(message: string, images: unknown[] = [], opts?: { showInClient?: boolean }): Promise<StopReason> {
     // Keep a prompt-path fallback because some clients may ignore the best-effort
     // pre-prompt notification sent right after session/new.
     this.sendStartupInfoOnFirstPromptIfPending()
+
+    // Live-socket prompts (Slack) never went through Zed's composer, so the
+    // panel has no user bubble unless we emit one. session/prompt from Zed
+    // already drew it — do not double.
+    if (opts?.showInClient && message.trim()) {
+      this.emit({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: message } satisfies ContentBlock
+      })
+    }
 
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
