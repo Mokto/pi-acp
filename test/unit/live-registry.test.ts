@@ -64,6 +64,24 @@ test('sweepStaleLiveFiles: unlinks dead pid artifacts, keeps this process', () =
   assert.equal(existsSync(live), true)
 })
 
+test('LiveServer: remove drops one session and keeps the rest', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-live-'))
+  const live = new LiveServer({ liveDir: dir, pid: process.pid })
+  const a = makeSession('a')
+  const b = makeSession('b')
+  live.upsert(a.session, '/tmp/a.jsonl')
+  live.upsert(b.session, '/tmp/b.jsonl')
+  await live.start()
+  try {
+    live.remove('a')
+    const listed = readLiveSessions(dir)
+    assert.equal(listed.a, undefined)
+    assert.equal(listed.b?.sessionFile, '/tmp/b.jsonl')
+  } finally {
+    live.dispose()
+  }
+})
+
 test('LiveServer: writes per-pid registry on start + upsert, removes on dispose', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-live-'))
   const live = new LiveServer({ liveDir: dir, pid: process.pid })

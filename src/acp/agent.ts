@@ -4,6 +4,8 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type CloseSessionRequest,
+  type CloseSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -346,7 +348,10 @@ export class PiAcpAgent implements ACPAgent {
         },
         sessionCapabilities: {
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          // Zed sends session/close when a thread tab is closed. Without this
+          // the session stays in ~/.pi/pi-acp/live and Slack never prunes it.
+          close: {}
         }
       }
     }
@@ -979,6 +984,26 @@ export class PiAcpAgent implements ACPAgent {
   async cancel(params: CancelNotification): Promise<void> {
     const session = await this.autoRestoreSession(params.sessionId)
     await session.cancel()
+  }
+
+  /**
+   * Zed (and other ACP clients) send this when a thread tab is closed.
+   * Do not auto-restore: a missing session is already gone. Cancel any in-flight
+   * turn, then drop the pi subprocess and the live-registry row so Slack prune
+   * can delete the thread.
+   */
+  async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    const session = this.sessions.maybeGet(params.sessionId)
+    if (!session) return {}
+    if (!session.proc.exited) {
+      try {
+        await session.cancel()
+      } catch {
+        // still close even if abort fails
+      }
+    }
+    this.sessions.close(params.sessionId)
+    return {}
   }
 
   async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {

@@ -3338,7 +3338,10 @@ var PiAcpAgent = class {
         },
         sessionCapabilities: {
           // Enables a native session picker in clients that support it.
-          list: {}
+          list: {},
+          // Zed sends session/close when a thread tab is closed. Without this
+          // the session stays in ~/.pi/pi-acp/live and Slack never prunes it.
+          close: {}
         }
       }
     };
@@ -3841,6 +3844,24 @@ ${JSON.stringify(stats, null, 2)}`;
   async cancel(params) {
     const session = await this.autoRestoreSession(params.sessionId);
     await session.cancel();
+  }
+  /**
+   * Zed (and other ACP clients) send this when a thread tab is closed.
+   * Do not auto-restore: a missing session is already gone. Cancel any in-flight
+   * turn, then drop the pi subprocess and the live-registry row so Slack prune
+   * can delete the thread.
+   */
+  async closeSession(params) {
+    const session = this.sessions.maybeGet(params.sessionId);
+    if (!session) return {};
+    if (!session.proc.exited) {
+      try {
+        await session.cancel();
+      } catch {
+      }
+    }
+    this.sessions.close(params.sessionId);
+    return {};
   }
   async listSessions(params) {
     const all = listPiSessions();
