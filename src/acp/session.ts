@@ -56,6 +56,7 @@ type PendingTurn = {
 type QueuedTurn = {
   message: string
   images: unknown[]
+  showInClient?: boolean
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
@@ -376,6 +377,10 @@ export class PiAcpSession {
   private narratedToolCallsSuppressed = false
   private sawStructuredToolCall = false
 
+  // Live-socket (Slack) turns are not a Zed `session/prompt`, so the composer
+  // stays Idle. A think tool call is the status Zed will actually render.
+  private slackTurnToolId: string | null = null
+
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
@@ -535,7 +540,13 @@ export class PiAcpSession {
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const queued: QueuedTurn = {
+        message: expandedMessage,
+        images,
+        showInClient: opts?.showInClient,
+        resolve,
+        reject
+      }
 
       // If a turn is running OR there are already-queued turns waiting to start (prevent
       // a new prompt from racing past the queue during the brief window between
@@ -554,7 +565,7 @@ export class PiAcpSession {
         })
 
         // Also publish queue depth via session info metadata.
-        // This also not visible in the client
+        // Zed only applies `title` from this update; `_meta` is dropped.
         this.emit({
           sessionUpdate: 'session_info_update',
           _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -825,7 +836,10 @@ export class PiAcpSession {
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message)
     this.resetTurnWatchdog()
 
+    if (t.showInClient) this.startSlackTurnIndicator()
+
     // Publish queue depth (0 because we're starting the turn now).
+    // Zed ignores `_meta` here; only `title` is applied.
     this.emit({
       sessionUpdate: 'session_info_update',
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -935,7 +949,31 @@ export class PiAcpSession {
 
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
+  private startSlackTurnIndicator(): void {
+    const id = `slack-${crypto.randomUUID()}`
+    this.slackTurnToolId = id
+    this.emit({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title: 'Slack',
+      kind: 'think',
+      status: 'in_progress'
+    })
+  }
+
+  private finishSlackTurnIndicator(status: 'completed' | 'failed'): void {
+    const id = this.slackTurnToolId
+    if (!id) return
+    this.slackTurnToolId = null
+    this.emit({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: id,
+      status
+    })
+  }
+
   private completeTurn(reason: StopReason): void {
+    this.finishSlackTurnIndicator(reason === 'end_turn' ? 'completed' : 'failed')
     this.clearTurnWatchdog()
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
@@ -965,6 +1003,7 @@ export class PiAcpSession {
     await this.flushEmits()
     if (this.pendingTurnIsExtensionCommand) return
 
+    this.finishSlackTurnIndicator('failed')
     this.clearTurnWatchdog()
     this.pendingTurn?.reject(RequestError.internalError({}, message))
     this.pendingTurn = null

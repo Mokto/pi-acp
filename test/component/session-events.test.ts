@@ -35,10 +35,24 @@ test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not',
     sessionUpdate: 'user_message_chunk',
     content: { type: 'text', text: 'from-slack' }
   })
+  const slackTool = conn.updates.find(
+    u =>
+      (u as any).update?.sessionUpdate === 'tool_call' &&
+      (u as any).update?.title === 'Slack' &&
+      (u as any).update?.kind === 'think'
+  )
+  assert.ok(slackTool)
+  assert.equal((slackTool!.update as any).status, 'in_progress')
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
   assert.equal(await slack, 'end_turn')
+  const done = conn.updates.find(
+    u =>
+      (u as any).update?.sessionUpdate === 'tool_call_update' &&
+      (u as any).update?.toolCallId === (slackTool!.update as any).toolCallId
+  )
+  assert.equal((done?.update as any).status, 'completed')
 })
 
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
