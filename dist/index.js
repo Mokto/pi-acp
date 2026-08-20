@@ -954,6 +954,9 @@ var PiAcpSession = class _PiAcpSession {
   assistantTextEmitted = 0;
   narratedToolCallsSuppressed = false;
   sawStructuredToolCall = false;
+  // Live-socket (Slack) turns are not a Zed `session/prompt`, so the composer
+  // stays Idle. A think tool call is the status Zed will actually render.
+  slackTurnToolId = null;
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
@@ -1069,7 +1072,13 @@ var PiAcpSession = class _PiAcpSession {
     }
     const expandedMessage = expandSlashCommand(message, this.fileCommands);
     const turnPromise = new Promise((resolve4, reject) => {
-      const queued = { message: expandedMessage, images, resolve: resolve4, reject };
+      const queued = {
+        message: expandedMessage,
+        images,
+        showInClient: opts?.showInClient,
+        resolve: resolve4,
+        reject
+      };
       if (this.pendingTurn || this.turnQueue.length > 0) {
         this.turnQueue.push(queued);
         this.emit({
@@ -1278,6 +1287,7 @@ var PiAcpSession = class _PiAcpSession {
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message);
     this.resetTurnWatchdog();
+    if (t.showInClient) this.startSlackTurnIndicator();
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -1365,7 +1375,29 @@ var PiAcpSession = class _PiAcpSession {
   }
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
+  startSlackTurnIndicator() {
+    const id = `slack-${crypto.randomUUID()}`;
+    this.slackTurnToolId = id;
+    this.emit({
+      sessionUpdate: "tool_call",
+      toolCallId: id,
+      title: "Slack",
+      kind: "think",
+      status: "in_progress"
+    });
+  }
+  finishSlackTurnIndicator(status) {
+    const id = this.slackTurnToolId;
+    if (!id) return;
+    this.slackTurnToolId = null;
+    this.emit({
+      sessionUpdate: "tool_call_update",
+      toolCallId: id,
+      status
+    });
+  }
   completeTurn(reason) {
+    this.finishSlackTurnIndicator(reason === "end_turn" ? "completed" : "failed");
     this.clearTurnWatchdog();
     this.pendingTurn?.resolve(reason);
     this.pendingTurn = null;
@@ -1390,6 +1422,7 @@ ${message}` }
     }
     await this.flushEmits();
     if (this.pendingTurnIsExtensionCommand) return;
+    this.finishSlackTurnIndicator("failed");
     this.clearTurnWatchdog();
     this.pendingTurn?.reject(RequestError2.internalError({}, message));
     this.pendingTurn = null;
