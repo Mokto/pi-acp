@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import { basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
-import { maybeAuthRequiredError } from './auth-required.js'
+import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import {
@@ -65,6 +65,7 @@ type DeferredModel = { provider: string; modelId: string }
 
 const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
 const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
+const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
@@ -334,6 +335,8 @@ export class PiAcpSession {
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+  private inFlightTurn: QueuedTurn | null = null
+  private cursorSdkAuthRetries = 0
   private readonly turnQueue: QueuedTurn[] = []
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null
   private inferenceStartup = false
@@ -377,9 +380,10 @@ export class PiAcpSession {
   private narratedToolCallsSuppressed = false
   private sawStructuredToolCall = false
 
-  // Live-socket (Slack) turns are not a Zed `session/prompt`, so the composer
-  // stays Idle. A think tool call is the status Zed will actually render.
-  private slackTurnToolId: string | null = null
+  // Live-socket turns never go through Zed `session/prompt`, so the composer
+  // stays Idle. An in-progress Plan is the spinner Zed still draws in that state
+  // (activity bar). Ceiling: overwrites a real agent plan; merge if we emit one.
+  private liveTurnPlanActive = false
 
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
@@ -827,16 +831,20 @@ export class PiAcpSession {
     }
   }
 
-  private startTurn(t: QueuedTurn, opts?: { streamingBehavior?: 'steer' | 'followUp' }): void {
-    this.cancelRequested = false
+  private startTurn(t: QueuedTurn, opts?: { streamingBehavior?: 'steer' | 'followUp'; retrying?: boolean }): void {
+    if (!opts?.retrying) {
+      this.cancelRequested = false
+      this.cursorSdkAuthRetries = 0
+    }
     this.turnTerminalFailureHandled = false
     this.inAgentLoop = false
     this.inferenceStartup = true
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.inFlightTurn = t
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message)
     this.resetTurnWatchdog()
 
-    if (t.showInClient) this.startSlackTurnIndicator()
+    if (t.showInClient && !opts?.retrying) this.startLiveTurnIndicator()
 
     // Publish queue depth (0 because we're starting the turn now).
     // Zed ignores `_meta` here; only `title` is applied.
@@ -881,6 +889,8 @@ export class PiAcpSession {
           }
 
           this.pendingTurn = null
+          this.inFlightTurn = null
+          this.cursorSdkAuthRetries = 0
           this.pendingTurnIsExtensionCommand = false
           this.inAgentLoop = false
           this.clearTurnWatchdog()
@@ -902,6 +912,25 @@ export class PiAcpSession {
     const space = trimmed.indexOf(' ')
     const name = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).trim()
     return name.length > 0 && this.piExtensionCommandNames.has(name)
+  }
+
+  private tryRetryCursorSdkAuthFlake(errorMessage: string): boolean {
+    if (this.cancelRequested || this.pendingTurnIsExtensionCommand) return false
+    if (!isTransientCursorSdkAuthError(errorMessage)) return false
+    const turn = this.inFlightTurn
+    if (!turn || this.cursorSdkAuthRetries >= MAX_CURSOR_SDK_AUTH_RETRIES) return false
+
+    this.cursorSdkAuthRetries += 1
+    this.resetNarratedToolCallGate()
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: `\n\nCursor SDK API key rejected — retrying (${this.cursorSdkAuthRetries}/${MAX_CURSOR_SDK_AUTH_RETRIES})...`
+      } satisfies ContentBlock
+    })
+    this.startTurn(turn, { retrying: true })
+    return true
   }
 
   private resetNarratedToolCallGate(): void {
@@ -947,36 +976,29 @@ export class PiAcpSession {
     this.resetNarratedToolCallGate()
   }
 
+  private startLiveTurnIndicator(): void {
+    this.liveTurnPlanActive = true
+    this.emit({
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Working…', priority: 'medium', status: 'in_progress' }]
+    })
+  }
+
+  private finishLiveTurnIndicator(): void {
+    if (!this.liveTurnPlanActive) return
+    this.liveTurnPlanActive = false
+    this.emit({ sessionUpdate: 'plan', entries: [] })
+  }
+
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
-  private startSlackTurnIndicator(): void {
-    const id = `slack-${crypto.randomUUID()}`
-    this.slackTurnToolId = id
-    this.emit({
-      sessionUpdate: 'tool_call',
-      toolCallId: id,
-      title: 'Slack',
-      kind: 'think',
-      status: 'in_progress'
-    })
-  }
-
-  private finishSlackTurnIndicator(status: 'completed' | 'failed'): void {
-    const id = this.slackTurnToolId
-    if (!id) return
-    this.slackTurnToolId = null
-    this.emit({
-      sessionUpdate: 'tool_call_update',
-      toolCallId: id,
-      status
-    })
-  }
-
   private completeTurn(reason: StopReason): void {
-    this.finishSlackTurnIndicator(reason === 'end_turn' ? 'completed' : 'failed')
+    this.finishLiveTurnIndicator()
     this.clearTurnWatchdog()
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
+    this.inFlightTurn = null
+    this.cursorSdkAuthRetries = 0
     this.pendingTurnIsExtensionCommand = false
     this.inAgentLoop = false
 
@@ -1003,10 +1025,12 @@ export class PiAcpSession {
     await this.flushEmits()
     if (this.pendingTurnIsExtensionCommand) return
 
-    this.finishSlackTurnIndicator('failed')
+    this.finishLiveTurnIndicator()
     this.clearTurnWatchdog()
     this.pendingTurn?.reject(RequestError.internalError({}, message))
     this.pendingTurn = null
+    this.inFlightTurn = null
+    this.cursorSdkAuthRetries = 0
     this.pendingTurnIsExtensionCommand = false
     this.inAgentLoop = false
     this.emit({
@@ -1651,6 +1675,7 @@ export class PiAcpSession {
         // assistant content[] and stopReason/errorMessage on the last message. Without
         // this, Zed sees a successful empty end_turn.
         const turnError = this.cancelRequested ? '' : extractAgentEndTurnError(ev)
+        if (this.tryRetryCursorSdkAuthFlake(turnError)) break
         if (turnError) {
           this.emit({
             sessionUpdate: 'agent_message_chunk',
@@ -1677,6 +1702,7 @@ export class PiAcpSession {
       case 'agent_error':
       case 'error': {
         const message = String((ev as any).message ?? (ev as any).error ?? 'Unknown error')
+        if (this.tryRetryCursorSdkAuthFlake(message)) break
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: `Error: ${message}` } satisfies ContentBlock
