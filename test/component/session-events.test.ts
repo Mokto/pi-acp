@@ -35,24 +35,19 @@ test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not',
     sessionUpdate: 'user_message_chunk',
     content: { type: 'text', text: 'from-slack' }
   })
-  const slackTool = conn.updates.find(
-    u =>
-      (u as any).update?.sessionUpdate === 'tool_call' &&
-      (u as any).update?.title === 'Slack' &&
-      (u as any).update?.kind === 'think'
+  const livePlan = conn.updates.find(
+    u => (u as any).update?.sessionUpdate === 'plan' && (u as any).update?.entries?.[0]?.status === 'in_progress'
   )
-  assert.ok(slackTool)
-  assert.equal((slackTool!.update as any).status, 'in_progress')
+  assert.ok(livePlan)
+  assert.equal((livePlan!.update as any).entries[0].content, 'Working…')
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
   assert.equal(await slack, 'end_turn')
-  const done = conn.updates.find(
-    u =>
-      (u as any).update?.sessionUpdate === 'tool_call_update' &&
-      (u as any).update?.toolCallId === (slackTool!.update as any).toolCallId
+  const cleared = conn.updates.find(
+    u => (u as any).update?.sessionUpdate === 'plan' && (u as any).update?.entries?.length === 0
   )
-  assert.equal((done?.update as any).status, 'completed')
+  assert.ok(cleared)
 })
 
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
@@ -1311,4 +1306,131 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
 
   const reason = await p
   assert.equal(reason, 'end_turn')
+})
+
+const CURSOR_SDK_AUTH_FLAKE =
+  'Cursor SDK request failed because the Cursor SDK API key may be invalid or unauthorized. Cursor Agent CLI/Desktop login is not reused. Run /login -> Use an API key -> Cursor, verify CURSOR_API_KEY, or pass --api-key, then retry.'
+
+function emitCursorSdkAuthAgentEnd(proc: FakePiRpcProcess): void {
+  proc.emit({
+    type: 'agent_end',
+    messages: [
+      {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: CURSOR_SDK_AUTH_FLAKE
+      }
+    ]
+  })
+}
+
+test('PiAcpSession: retries transient Cursor SDK auth errors and completes on success', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  assert.equal(proc.prompts.length, 1)
+
+  emitCursorSdkAuthAgentEnd(proc)
+  assert.equal(proc.prompts.length, 2)
+  assert.equal(proc.prompts[1]!.message, 'hello')
+
+  let settled = false
+  void p.then(() => {
+    settled = true
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(settled, false)
+  assert.equal(
+    conn.updates.some(
+      u =>
+        u.update.sessionUpdate === 'agent_message_chunk' &&
+        String((u.update as any).content?.text ?? '').includes('Error:')
+    ),
+    false
+  )
+  assert.equal(
+    conn.updates.some(
+      u =>
+        u.update.sessionUpdate === 'agent_message_chunk' &&
+        String((u.update as any).content?.text ?? '').includes('retrying (1/2)')
+    ),
+    true
+  )
+
+  proc.emit({ type: 'agent_end' })
+  assert.equal(await p, 'end_turn')
+})
+
+test('PiAcpSession: Cursor SDK auth flake is terminal after two retries', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  emitCursorSdkAuthAgentEnd(proc)
+  emitCursorSdkAuthAgentEnd(proc)
+  assert.equal(proc.prompts.length, 3)
+
+  emitCursorSdkAuthAgentEnd(proc)
+  assert.equal(proc.prompts.length, 3)
+  assert.equal(await p, 'error')
+
+  const errMsg = conn.updates.find(
+    u =>
+      u.update.sessionUpdate === 'agent_message_chunk' &&
+      typeof (u.update as { content?: { text?: string } }).content?.text === 'string' &&
+      (u.update as { content: { text: string } }).content.text.startsWith('Error:')
+  )
+  assert.ok(errMsg, 'expected visible error text after retries are exhausted')
+  assert.equal((errMsg!.update as any).content.text, `Error: ${CURSOR_SDK_AUTH_FLAKE}`)
+})
+
+test('PiAcpSession: missing Cursor SDK API key is not retried', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({
+    type: 'agent_end',
+    messages: [
+      {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage:
+          'Cursor SDK runs require a Cursor SDK API key. Cursor Agent CLI/Desktop login is not reused. Run /login -> Use an API key -> Cursor, set CURSOR_API_KEY before starting pi, or restart pi with --api-key.'
+      }
+    ]
+  })
+
+  assert.equal(await p, 'error')
+  assert.equal(proc.prompts.length, 1)
 })

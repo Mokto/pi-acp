@@ -358,8 +358,12 @@ var PiRpcProcess = class _PiRpcProcess {
 
 // src/acp/auth-required.ts
 import { RequestError } from "@agentclientprotocol/sdk";
+function isTransientCursorSdkAuthError(message) {
+  return /cursor sdk request failed because the cursor sdk api key may be invalid or unauthorized/i.test(message);
+}
 function maybeAuthRequiredError(err) {
   const msg = String(err?.message ?? err ?? "");
+  if (isTransientCursorSdkAuthError(msg)) return null;
   const s = msg.toLowerCase();
   const patterns = [
     "api key",
@@ -710,6 +714,7 @@ function expandSlashCommand(text, fileCommands) {
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
+var MAX_CURSOR_SDK_AUTH_RETRIES = 2;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
   { optionId: "no", name: "No", kind: "reject_once" }
@@ -917,6 +922,8 @@ var PiAcpSession = class _PiAcpSession {
   cancelRequested = false;
   // Current in-flight turn (if any). Additional prompts are queued.
   pendingTurn = null;
+  inFlightTurn = null;
+  cursorSdkAuthRetries = 0;
   turnQueue = [];
   turnWatchdog = null;
   inferenceStartup = false;
@@ -954,9 +961,10 @@ var PiAcpSession = class _PiAcpSession {
   assistantTextEmitted = 0;
   narratedToolCallsSuppressed = false;
   sawStructuredToolCall = false;
-  // Live-socket (Slack) turns are not a Zed `session/prompt`, so the composer
-  // stays Idle. A think tool call is the status Zed will actually render.
-  slackTurnToolId = null;
+  // Live-socket turns never go through Zed `session/prompt`, so the composer
+  // stays Idle. An in-progress Plan is the spinner Zed still draws in that state
+  // (activity bar). Ceiling: overwrites a real agent plan; merge if we emit one.
+  liveTurnPlanActive = false;
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
@@ -1280,14 +1288,18 @@ var PiAcpSession = class _PiAcpSession {
     }
   }
   startTurn(t, opts) {
-    this.cancelRequested = false;
+    if (!opts?.retrying) {
+      this.cancelRequested = false;
+      this.cursorSdkAuthRetries = 0;
+    }
     this.turnTerminalFailureHandled = false;
     this.inAgentLoop = false;
     this.inferenceStartup = true;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
+    this.inFlightTurn = t;
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message);
     this.resetTurnWatchdog();
-    if (t.showInClient) this.startSlackTurnIndicator();
+    if (t.showInClient && !opts?.retrying) this.startLiveTurnIndicator();
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
@@ -1317,6 +1329,8 @@ var PiAcpSession = class _PiAcpSession {
             this.pendingTurn?.resolve(reason);
           }
           this.pendingTurn = null;
+          this.inFlightTurn = null;
+          this.cursorSdkAuthRetries = 0;
           this.pendingTurnIsExtensionCommand = false;
           this.inAgentLoop = false;
           this.clearTurnWatchdog();
@@ -1334,6 +1348,25 @@ var PiAcpSession = class _PiAcpSession {
     const space = trimmed.indexOf(" ");
     const name = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).trim();
     return name.length > 0 && this.piExtensionCommandNames.has(name);
+  }
+  tryRetryCursorSdkAuthFlake(errorMessage) {
+    if (this.cancelRequested || this.pendingTurnIsExtensionCommand) return false;
+    if (!isTransientCursorSdkAuthError(errorMessage)) return false;
+    const turn = this.inFlightTurn;
+    if (!turn || this.cursorSdkAuthRetries >= MAX_CURSOR_SDK_AUTH_RETRIES) return false;
+    this.cursorSdkAuthRetries += 1;
+    this.resetNarratedToolCallGate();
+    this.emit({
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: `
+
+Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_CURSOR_SDK_AUTH_RETRIES})...`
+      }
+    });
+    this.startTurn(turn, { retrying: true });
+    return true;
   }
   resetNarratedToolCallGate() {
     this.assistantTextAccum = "";
@@ -1373,34 +1406,27 @@ var PiAcpSession = class _PiAcpSession {
     }
     this.resetNarratedToolCallGate();
   }
+  startLiveTurnIndicator() {
+    this.liveTurnPlanActive = true;
+    this.emit({
+      sessionUpdate: "plan",
+      entries: [{ content: "Working\u2026", priority: "medium", status: "in_progress" }]
+    });
+  }
+  finishLiveTurnIndicator() {
+    if (!this.liveTurnPlanActive) return;
+    this.liveTurnPlanActive = false;
+    this.emit({ sessionUpdate: "plan", entries: [] });
+  }
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_end` event and synchronous command turns that produce no agent loop.
-  startSlackTurnIndicator() {
-    const id = `slack-${crypto.randomUUID()}`;
-    this.slackTurnToolId = id;
-    this.emit({
-      sessionUpdate: "tool_call",
-      toolCallId: id,
-      title: "Slack",
-      kind: "think",
-      status: "in_progress"
-    });
-  }
-  finishSlackTurnIndicator(status) {
-    const id = this.slackTurnToolId;
-    if (!id) return;
-    this.slackTurnToolId = null;
-    this.emit({
-      sessionUpdate: "tool_call_update",
-      toolCallId: id,
-      status
-    });
-  }
   completeTurn(reason) {
-    this.finishSlackTurnIndicator(reason === "end_turn" ? "completed" : "failed");
+    this.finishLiveTurnIndicator();
     this.clearTurnWatchdog();
     this.pendingTurn?.resolve(reason);
     this.pendingTurn = null;
+    this.inFlightTurn = null;
+    this.cursorSdkAuthRetries = 0;
     this.pendingTurnIsExtensionCommand = false;
     this.inAgentLoop = false;
     void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn());
@@ -1422,10 +1448,12 @@ ${message}` }
     }
     await this.flushEmits();
     if (this.pendingTurnIsExtensionCommand) return;
-    this.finishSlackTurnIndicator("failed");
+    this.finishLiveTurnIndicator();
     this.clearTurnWatchdog();
     this.pendingTurn?.reject(RequestError2.internalError({}, message));
     this.pendingTurn = null;
+    this.inFlightTurn = null;
+    this.cursorSdkAuthRetries = 0;
     this.pendingTurnIsExtensionCommand = false;
     this.inAgentLoop = false;
     this.emit({
@@ -1944,6 +1972,7 @@ ${formatAutoRetryMessage(ev)}` }
         if (ev.willRetry) break;
         if (this.turnTerminalFailureHandled) break;
         const turnError = this.cancelRequested ? "" : extractAgentEndTurnError(ev);
+        if (this.tryRetryCursorSdkAuthFlake(turnError)) break;
         if (turnError) {
           this.emit({
             sessionUpdate: "agent_message_chunk",
@@ -1963,6 +1992,7 @@ ${formatAutoRetryMessage(ev)}` }
       case "agent_error":
       case "error": {
         const message = String(ev.message ?? ev.error ?? "Unknown error");
+        if (this.tryRetryCursorSdkAuthFlake(message)) break;
         this.emit({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `Error: ${message}` }
