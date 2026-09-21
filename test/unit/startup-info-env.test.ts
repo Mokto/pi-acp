@@ -65,17 +65,10 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
     const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
 
-    // When quietStartup=true the full prelude is suppressed. However, an update notice
-    // (if one exists) is still surfaced because it's high-signal and actionable.
-    // The test must tolerate both cases since the live npm check may or may not find an update.
-    if (startupInfo) {
-      assert.match(startupInfo, /New version available/)
-      assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 2)
-    } else {
-      assert.equal(setStartupInfoCalled, false)
-      assert.equal(timeouts.length, 1)
-    }
+    // quietStartup suppresses the full prelude and the outdated-pi notice.
+    assert.equal(startupInfo, null)
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR

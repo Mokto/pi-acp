@@ -448,14 +448,13 @@ export class PiAcpAgent implements ACPAgent {
     )
 
     const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+    // quietStartup also hides the outdated-pi nag (it used to leak through as the
+    // only remaining prelude). PI_SKIP_VERSION_CHECK / PI_ACP_SKIP_UPDATE_NOTICE
+    // skip the nag while keeping the rest of startup info.
+    const updateNotice = quietStartup ? null : buildUpdateNotice()
 
-    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-    // the "New version available" notice (if any) since it's high-signal and actionable.
     const preludeText = quietStartup
-      ? updateNotice
-        ? updateNotice + '\n'
-        : ''
+      ? ''
       : buildStartupInfo({
           cwd: params.cwd,
           fileCommands,
@@ -1540,9 +1539,20 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
+function envFlag(name: string): boolean {
+  const v = process.env[name]
+  if (!v) return false
+  return /^(1|true|yes)$/i.test(v.trim())
+}
+
+function shouldSkipUpdateNotice(): boolean {
+  return envFlag('PI_SKIP_VERSION_CHECK') || envFlag('PI_ACP_SKIP_UPDATE_NOTICE')
+}
+
 function buildUpdateNotice(): string | null {
   // Best-effort update check against npm registry.
   // Important: keep it fast to not slow down session/new.
+  if (shouldSkipUpdateNotice()) return null
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
     const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(

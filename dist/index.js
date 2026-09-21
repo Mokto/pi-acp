@@ -3481,8 +3481,8 @@ var PiAcpAgent = class {
       )
     );
     const quietStartup = getQuietStartup(params.cwd);
-    const updateNotice = buildUpdateNotice();
-    const preludeText = quietStartup ? updateNotice ? updateNotice + "\n" : "" : buildStartupInfo({
+    const updateNotice = quietStartup ? null : buildUpdateNotice();
+    const preludeText = quietStartup ? "" : buildStartupInfo({
       cwd: params.cwd,
       fileCommands,
       updateNotice
@@ -4333,7 +4333,16 @@ function compareSemver(a, b) {
   }
   return 0;
 }
+function envFlag(name) {
+  const v = process.env[name];
+  if (!v) return false;
+  return /^(1|true|yes)$/i.test(v.trim());
+}
+function shouldSkipUpdateNotice() {
+  return envFlag("PI_SKIP_VERSION_CHECK") || envFlag("PI_ACP_SKIP_UPDATE_NOTICE");
+}
 function buildUpdateNotice() {
+  if (shouldSkipUpdateNotice()) return null;
   try {
     const piVersion = spawnSync("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
