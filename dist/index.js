@@ -1963,6 +1963,14 @@ ${formatAutoRetryMessage(ev)}` }
         void this.pushConfigOptionUpdate();
         break;
       }
+      case "session_info_changed": {
+        this.emit({
+          sessionUpdate: "session_info_update",
+          title: stringProp(ev, "name"),
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        break;
+      }
       case "turn_end": {
         this.inferenceStartup = true;
         this.flushNarratedToolCallGate();

@@ -1651,6 +1651,15 @@ export class PiAcpSession {
         break
       }
 
+      case 'session_info_changed': {
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          title: stringProp(ev, 'name'),
+          updatedAt: new Date().toISOString()
+        })
+        break
+      }
+
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
         // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.

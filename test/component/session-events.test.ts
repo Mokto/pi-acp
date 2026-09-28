@@ -1434,3 +1434,25 @@ test('PiAcpSession: missing Cursor SDK API key is not retried', async () => {
   assert.equal(await p, 'error')
   assert.equal(proc.prompts.length, 1)
 })
+
+test('PiAcpSession: session_info_changed forwards the pi session name as the ACP title', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'session_info_changed', name: 'Fix payment retry' })
+  proc.emit({ type: 'session_info_changed' })
+  await new Promise(r => setTimeout(r, 0))
+
+  const titles = conn.updates
+    .filter(u => (u as any).update?.sessionUpdate === 'session_info_update')
+    .map(u => (u as any).update.title)
+  assert.deepEqual(titles, ['Fix payment retry', null])
+})
