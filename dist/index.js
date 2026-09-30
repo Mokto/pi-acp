@@ -711,6 +711,55 @@ function expandSlashCommand(text, fileCommands) {
   return substituteArgs(cmd.content, args);
 }
 
+// src/acp/stay-awake.ts
+import { spawn as spawn2 } from "child_process";
+var proc = null;
+var holds = 0;
+var paused = 0;
+function sync() {
+  if (holds - paused <= 0) {
+    proc?.kill();
+    proc = null;
+    return;
+  }
+  if (!proc && process.platform === "darwin") {
+    try {
+      const child = spawn2("caffeinate", ["-dims", "-w", String(process.pid)], { stdio: "ignore" });
+      const forget = () => {
+        if (proc === child) proc = null;
+      };
+      child.on("error", forget);
+      child.on("exit", forget);
+      child.unref();
+      proc = child;
+    } catch {
+      proc = null;
+    }
+  }
+}
+function stayAwake() {
+  holds++;
+  sync();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    holds--;
+    sync();
+  };
+}
+function pauseStayAwake() {
+  paused++;
+  sync();
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    paused--;
+    sync();
+  };
+}
+
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
@@ -927,6 +976,7 @@ var PiAcpSession = class _PiAcpSession {
   turnQueue = [];
   turnWatchdog = null;
   inferenceStartup = false;
+  awaitingUserInput = 0;
   // Model/thinking changes from the client are deferred while a turn is active so
   // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
   deferredModel = null;
@@ -1230,6 +1280,7 @@ var PiAcpSession = class _PiAcpSession {
   resetTurnWatchdog() {
     if (!this.pendingTurn) return;
     this.clearTurnWatchdog();
+    if (this.awaitingUserInput > 0) return;
     const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs();
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog();
@@ -2086,6 +2137,9 @@ ${stringProp(ev, "message") ?? "Pi notification"}` }
     await this.proc.sendExtensionUiResponse({ id, confirmed: selected.outcome.optionId === "yes" });
   }
   async requestExtensionPermission(id, ev, options) {
+    this.awaitingUserInput++;
+    this.clearTurnWatchdog();
+    const resumeAwake = pauseStayAwake();
     try {
       return await this.conn.requestPermission({
         sessionId: this.sessionId,
@@ -2095,6 +2149,10 @@ ${stringProp(ev, "message") ?? "Pi notification"}` }
     } catch {
       await this.proc.sendExtensionUiResponse({ id, cancelled: true });
       return null;
+    } finally {
+      resumeAwake();
+      this.awaitingUserInput--;
+      this.resetTurnWatchdog();
     }
   }
 };
@@ -2838,37 +2896,6 @@ function resolveEnabledModelIds(models, patterns) {
     if (model) allowed.add(`${model.provider}/${model.id}`);
   }
   return allowed;
-}
-
-// src/acp/stay-awake.ts
-import { spawn as spawn2 } from "child_process";
-var proc = null;
-var holds = 0;
-function stayAwake() {
-  holds++;
-  if (!proc && process.platform === "darwin") {
-    try {
-      const child = spawn2("caffeinate", ["-dims", "-w", String(process.pid)], { stdio: "ignore" });
-      const forget = () => {
-        if (proc === child) proc = null;
-      };
-      child.on("error", forget);
-      child.on("exit", forget);
-      child.unref();
-      proc = child;
-    } catch {
-      proc = null;
-    }
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    if (--holds === 0) {
-      proc?.kill();
-      proc = null;
-    }
-  };
 }
 
 // src/acp/live.ts
