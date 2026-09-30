@@ -117,3 +117,40 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
     else process.env.PI_ACP_INFERENCE_STARTUP_MS = previousStartup
   }
 })
+
+test('PiAcpSession: watchdog does not fire while waiting for the user to answer a UI prompt', async () => {
+  const previousTimeout = process.env.PI_ACP_TURN_INACTIVITY_MS
+  process.env.PI_ACP_TURN_INACTIVITY_MS = '30'
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    let answer!: () => void
+    conn.requestPermission = () =>
+      new Promise(resolve => {
+        answer = () => resolve({ outcome: { outcome: 'selected', optionId: 'yes' } })
+      })
+    const proc = new FakePiRpcProcess()
+    const session = new PiAcpSession({
+      sessionId: 's1',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as unknown as PiRpcProcess,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    const pending = session.prompt('hello')
+    proc.emit({ type: 'extension_ui_request', id: 'u1', method: 'confirm', title: 'QA?' })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(proc.abortCount, 0)
+
+    answer()
+    await flushMicrotasks()
+    proc.emit({ type: 'agent_end' })
+    assert.equal(await pending, 'end_turn')
+    assert.equal(proc.abortCount, 0)
+  } finally {
+    if (previousTimeout === undefined) delete process.env.PI_ACP_TURN_INACTIVITY_MS
+    else process.env.PI_ACP_TURN_INACTIVITY_MS = previousTimeout
+  }
+})

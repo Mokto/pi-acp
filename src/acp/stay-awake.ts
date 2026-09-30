@@ -7,8 +7,14 @@ import { spawn, type ChildProcess } from 'node:child_process'
 let proc: ChildProcess | null = null
 let holds = 0
 
-export function stayAwake(): () => void {
-  holds++
+let paused = 0
+
+function sync(): void {
+  if (holds - paused <= 0) {
+    proc?.kill()
+    proc = null
+    return
+  }
   // Spawn whenever we have no live assertion, not only on the 0->1 hold: a failed spawn or a
   // caffeinate that died on its own then self-heals on the next turn instead of staying lost.
   if (!proc && process.platform === 'darwin') {
@@ -25,15 +31,33 @@ export function stayAwake(): () => void {
       proc = null
     }
   }
+}
+
+export function stayAwake(): () => void {
+  holds++
+  sync()
 
   let released = false
   return () => {
     if (released) return
     released = true
-    if (--holds === 0) {
-      proc?.kill()
-      proc = null
-    }
+    holds--
+    sync()
+  }
+}
+
+// Drops one hold's assertion while a turn waits on the user (nothing is working then).
+// Call from inside a turn that owns a hold; the returned resume must be called once.
+export function pauseStayAwake(): () => void {
+  paused++
+  sync()
+
+  let resumed = false
+  return () => {
+    if (resumed) return
+    resumed = true
+    paused--
+    sync()
   }
 }
 

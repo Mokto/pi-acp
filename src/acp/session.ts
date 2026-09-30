@@ -31,6 +31,7 @@ import {
 } from './translate/bash.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import { pauseStayAwake } from './stay-awake.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -340,6 +341,7 @@ export class PiAcpSession {
   private readonly turnQueue: QueuedTurn[] = []
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null
   private inferenceStartup = false
+  private awaitingUserInput = 0
 
   // Model/thinking changes from the client are deferred while a turn is active so
   // periodic sync heartbeats cannot race with pi's agent loop (see stuck-session bug).
@@ -750,6 +752,7 @@ export class PiAcpSession {
   private resetTurnWatchdog(): void {
     if (!this.pendingTurn) return
     this.clearTurnWatchdog()
+    if (this.awaitingUserInput > 0) return
     // Use the longer inference-startup timeout when waiting for the LLM to begin
     // streaming after a turn_end (tool results sent, no tokens yet). Switch back
     // to the normal inactivity timeout once the model starts producing output.
@@ -1822,6 +1825,10 @@ export class PiAcpSession {
     ev: PiRpcEvent,
     options: PermissionOption[]
   ): Promise<PermissionResponse | null> {
+    // The user may take arbitrarily long to answer; that is not pi inactivity.
+    this.awaitingUserInput++
+    this.clearTurnWatchdog()
+    const resumeAwake = pauseStayAwake()
     try {
       return await this.conn.requestPermission({
         sessionId: this.sessionId,
@@ -1831,6 +1838,10 @@ export class PiAcpSession {
     } catch {
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return null
+    } finally {
+      resumeAwake()
+      this.awaitingUserInput--
+      this.resetTurnWatchdog()
     }
   }
 }
