@@ -24,6 +24,17 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
+import {
+  findProvider,
+  looksLikeAuthCode,
+  loadModelRuntime,
+  oauthProviders,
+  openBrowser,
+  providerFromAuthMethodId,
+  providerLabel,
+  runOAuthLogin,
+  type ModelRuntimeLike
+} from './login.js'
 import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
@@ -60,6 +71,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSy
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 
 /** How long to wait for pi's get_messages RPC before giving up and falling back to the summary path. */
 function getMessagesTimeoutMs(): number {
@@ -193,6 +205,16 @@ function builtinAvailableCommands(): AvailableCommand[] {
     {
       name: 'changelog',
       description: 'Show pi changelog'
+    },
+    {
+      name: 'login',
+      description: 'Log in to a subscription provider (OAuth, opens your browser)',
+      input: { hint: '[provider]' }
+    },
+    {
+      name: 'logout',
+      description: 'Remove stored credentials for a provider',
+      input: { hint: '[provider]' }
     }
   ]
 }
@@ -270,6 +292,12 @@ export class PiAcpAgent implements ACPAgent {
       proc,
       fileCommands
     })
+    session.setConfigOptionsRefresher(async () =>
+      buildSessionConfigOptions(
+        await getModelState(session.proc, { cwd: stored.cwd }),
+        await getThinkingState(session.proc)
+      )
+    )
 
     this.store.upsert({
       sessionId,
@@ -517,16 +545,259 @@ export class PiAcpAgent implements ACPAgent {
     return response
   }
 
-  async authenticate(_params: AuthenticateRequest) {
-    // Terminal Auth is handled out-of-band by re-launching the binary with `--terminal-login`.
-    // If the client calls `authenticate` anyway, we can no-op successfully.
-    return
+  async authenticate(params: AuthenticateRequest) {
+    // Terminal Auth is handled out-of-band by re-launching the binary with `--terminal-login`,
+    // so only the per-provider OAuth methods do anything here.
+    const providerId = providerFromAuthMethodId(params.methodId)
+    if (!providerId) return
+
+    const rt = await loadModelRuntime()
+    if (!rt) {
+      throw RequestError.internalError(
+        {},
+        'Couldn\'t load pi\'s login API (needs pi >= 0.99). Use "Launch pi" instead.'
+      )
+    }
+
+    try {
+      // No session yet, so there is no chat to print into: the browser is the whole UI.
+      await runOAuthLogin(rt, providerId, {
+        say: () => {},
+        // pi lists the default (browser) method first, e.g. Anthropic's browser vs copy-code login.
+        select: async (_title, options) => options[0]?.id ?? null,
+        openUrl: openBrowser
+      })
+    } catch (e) {
+      throw RequestError.internalError({}, `Login failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * In-flight /login or /logout per session. A flow waiting on a pasted code survives the turn
+   * being stopped ("detached"), so the user's next message can deliver the code.
+   */
+  private readonly authFlows = new Map<
+    string,
+    { abort: AbortController; done: Promise<void>; awaitingCode: ((code: string) => void) | null; detach: () => void }
+  >()
+
+  private async handleAuthCommand(
+    session: PiAcpSession,
+    cmd: 'login' | 'logout',
+    args: string[]
+  ): Promise<PromptResponse> {
+    const { sessionId } = session
+    let first = true
+    const say = (text: string) => {
+      const chunk = first ? text : `\n\n${text}`
+      first = false
+      void this.conn
+        .sessionUpdate({
+          sessionId,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } }
+        })
+        .catch(() => {})
+    }
+    const select = (title: string, options: { id: string; label: string }[]) =>
+      this.selectViaPermission(sessionId, title, options)
+
+    if (session.hasActiveTurn() || this.authFlows.has(sessionId)) {
+      say(`Wait for the current turn or login to finish before running /${cmd}.`)
+      return { stopReason: 'end_turn' }
+    }
+
+    const rt = await loadModelRuntime()
+    if (!rt) {
+      say("Couldn't load pi's login API (needs pi >= 0.99 on PATH). Run `pi` in a terminal and use /login there.")
+      return { stopReason: 'end_turn' }
+    }
+
+    const abort = new AbortController()
+    let detach!: () => void
+    const detached = new Promise<'detached'>(resolve => (detach = () => resolve('detached')))
+    const flow = { abort, detach, awaitingCode: null as ((code: string) => void) | null, done: Promise.resolve() }
+    const code = (signal: AbortSignal) =>
+      new Promise<string>(resolve => {
+        const deliver = (c: string) => {
+          flow.awaitingCode = null
+          resolve(c)
+        }
+        flow.awaitingCode = deliver
+        signal.addEventListener(
+          'abort',
+          () => {
+            if (flow.awaitingCode === deliver) flow.awaitingCode = null
+          },
+          { once: true }
+        )
+      })
+
+    flow.done = (async () => {
+      try {
+        const changed =
+          cmd === 'login'
+            ? await this.runLogin(rt, args, say, select, code, abort.signal)
+            : await this.runLogout(rt, args, say, select, abort.signal)
+        if (changed) await this.respawnForNewCredentials(sessionId, say)
+      } catch (e) {
+        if (!abort.signal.aborted) say(`/${cmd} failed: ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        this.authFlows.delete(sessionId)
+      }
+    })()
+    this.authFlows.set(sessionId, flow)
+
+    const outcome = await Promise.race([flow.done.then(() => 'done' as const), detached])
+    return { stopReason: outcome === 'detached' || abort.signal.aborted ? 'cancelled' : 'end_turn' }
+  }
+
+  /** Routes a prompt to a detached login waiting for a pasted code. Null = not consumed, handle normally. */
+  private async maybeDeliverAuthCode(sessionId: string, message: string): Promise<PromptResponse | null> {
+    const flow = this.authFlows.get(sessionId)
+    if (!flow) return null
+    if (!flow.awaitingCode || !looksLikeAuthCode(message)) {
+      // The user moved on; don't leave a callback server and a half-finished login behind.
+      flow.abort.abort()
+      await flow.done
+      return null
+    }
+    flow.awaitingCode(message.trim())
+    await flow.done
+    return { stopReason: 'end_turn' }
+  }
+
+  private async runLogin(
+    rt: ModelRuntimeLike,
+    args: string[],
+    say: (text: string) => void,
+    select: (title: string, options: { id: string; label: string }[]) => Promise<string | null>,
+    code: (signal: AbortSignal) => Promise<string>,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    const ref = args[0]
+    let provider = ref ? findProvider(rt, ref) : undefined
+    if (ref && !provider) {
+      say(
+        `Unknown provider "${ref}". Subscription providers: ${oauthProviders(rt)
+          .map(p => p.id)
+          .join(', ')}`
+      )
+      return false
+    }
+    if (provider && !provider.auth.oauth) {
+      say(
+        `${provider.name} uses an API key, which pi-acp won't take in chat (it would be saved in the thread). ` +
+          "Run `pi` in a terminal and use /login, or set the provider's API key environment variable."
+      )
+      return false
+    }
+    if (!provider) {
+      const list = oauthProviders(rt)
+      const id = await select(
+        'Log in to',
+        list.map(p => ({ id: p.id, label: providerLabel(p) }))
+      )
+      provider = list.find(p => p.id === id)
+      if (!provider) return false
+    }
+
+    await runOAuthLogin(
+      rt,
+      provider.id,
+      { say, select, code, text: args.slice(1).join(' '), openUrl: openBrowser },
+      signal
+    )
+    say(`Logged in to ${providerLabel(provider)}.`)
+    return true
+  }
+
+  private async runLogout(
+    rt: ModelRuntimeLike,
+    args: string[],
+    say: (text: string) => void,
+    select: (title: string, options: { id: string; label: string }[]) => Promise<string | null>,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    const creds = await rt.listCredentials({ signal })
+    const nameOf = (id: string) => rt.getProviders().find(p => p.id === id)?.name ?? id
+    if (!creds.length) {
+      say('No stored credentials to remove. /logout only removes credentials saved by /login.')
+      return false
+    }
+
+    const id = args[0]
+      ? (findProvider(rt, args[0])?.id ?? args[0])
+      : await select(
+          'Log out of',
+          creds.map(c => ({
+            id: c.providerId,
+            label: `${nameOf(c.providerId)} (${c.type === 'oauth' ? 'OAuth' : 'API key'})`
+          }))
+        )
+    if (!id) return false
+    if (!creds.some(c => c.providerId === id)) {
+      say(`No stored credentials for ${id}. Stored: ${creds.map(c => c.providerId).join(', ')}`)
+      return false
+    }
+
+    await rt.logout(id, { signal })
+    say(`Removed stored credentials for ${nameOf(id)}. Environment variables and models.json are unchanged.`)
+    return true
+  }
+
+  private async selectViaPermission(
+    sessionId: string,
+    title: string,
+    options: { id: string; label: string }[]
+  ): Promise<string | null> {
+    if (!options.length) return null
+    const res = await this.conn.requestPermission({
+      sessionId,
+      toolCall: { toolCallId: `pi-auth-${randomUUID()}`, title, kind: 'other', status: 'pending' },
+      options: options.map(o => ({ optionId: o.id, name: o.label, kind: 'allow_once' }))
+    })
+    if (res.outcome.outcome !== 'selected') return null
+    const picked = res.outcome.optionId
+    return options.some(o => o.id === picked) ? picked : null
+  }
+
+  /**
+   * A running pi only reads its model availability at startup, so a login/logout is invisible
+   * to it (and to the client's model picker) until the process restarts. Other open sessions
+   * keep their process; they pick up the change on their next restart.
+   */
+  private async respawnForNewCredentials(sessionId: string, say: (text: string) => void): Promise<void> {
+    const session = this.sessions.maybeGet(sessionId)
+    if (!session) return
+    if (session.hasActiveTurn()) {
+      say('New models appear in the picker once this session restarts.')
+      return
+    }
+    const extensionCommands = session.getPiExtensionCommands()
+    this.sessions.close(sessionId)
+    try {
+      const fresh = await this.autoRestoreSession(sessionId)
+      fresh.setPiExtensionCommands(extensionCommands)
+      const models = await getModelState(fresh.proc, { cwd: fresh.cwd })
+      const thinking = await getThinkingState(fresh.proc)
+      await this.conn.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: 'config_option_update', configOptions: buildSessionConfigOptions(models, thinking) }
+      })
+    } catch (e) {
+      say(
+        `Restarting pi to load the new models failed: ${e instanceof Error ? e.message : String(e)}. It restarts on your next message.`
+      )
+    }
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = await this.autoRestoreSession(params.sessionId)
 
     const { message, images } = promptToPiMessage(params.prompt)
+
+    const delivered = await this.maybeDeliverAuthCode(params.sessionId, message)
+    if (delivered) return delivered
 
     // Built-in ACP slash command handling (headless-friendly subset).
     // Note: file-based slash commands are expanded inside session.prompt().
@@ -536,6 +807,8 @@ export class PiAcpAgent implements ACPAgent {
       const cmd = space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)
       const argsString = space === -1 ? '' : trimmed.slice(space + 1)
       const args = parseCommandArgs(argsString)
+
+      if (cmd === 'login' || cmd === 'logout') return this.handleAuthCommand(session, cmd, args)
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
@@ -981,6 +1254,8 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
+    const authFlow = this.authFlows.get(params.sessionId)
+    if (authFlow) return authFlow.awaitingCode ? authFlow.detach() : authFlow.abort.abort()
     const session = await this.autoRestoreSession(params.sessionId)
     await session.cancel()
   }

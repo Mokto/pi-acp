@@ -225,6 +225,7 @@ export class SessionManager {
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (!s) return
+    s.markClosed()
     try {
       s.proc.dispose?.()
     } catch {
@@ -494,6 +495,10 @@ export class PiAcpSession {
   // of whether the commands are advertised, so manually-typed commands still resolve.
   setPiExtensionCommands(names: Iterable<string>): void {
     this.piExtensionCommandNames = new Set(names)
+  }
+
+  getPiExtensionCommands(): string[] {
+    return [...this.piExtensionCommandNames]
   }
 
   // Provide the builder used to refresh model/thinking selectors after pi changes
@@ -789,8 +794,21 @@ export class PiAcpSession {
     this.completeTurn('error')
   }
 
+  // Set when the manager disposes this session on purpose (close, respawn). The exit that
+  // follows is expected: don't warn, and don't evict, since a respawn may already have
+  // registered a new session under the same id.
+  private closed = false
+
+  markClosed(): void {
+    this.closed = true
+  }
+
   private async handleProcessExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     this.clearTurnWatchdog()
+    if (this.closed) {
+      if (this.pendingTurn) this.completeTurn('cancelled')
+      return
+    }
     const detail = signal ? `signal ${signal}` : `code ${code}`
 
     if (!this.pendingTurn) {

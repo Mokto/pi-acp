@@ -8,6 +8,147 @@ import {
   RequestError as RequestError3
 } from "@agentclientprotocol/sdk";
 
+// src/acp/login.ts
+import { spawn, spawnSync } from "child_process";
+import { existsSync, readFileSync, realpathSync } from "fs";
+import { dirname, isAbsolute, join } from "path";
+import { pathToFileURL } from "url";
+
+// src/pi-rpc/command.ts
+import { platform } from "os";
+function defaultPiCommand() {
+  return platform() === "win32" ? "pi.cmd" : "pi";
+}
+function getPiCommand(override) {
+  return override ?? defaultPiCommand();
+}
+function shouldUseShellForPiCommand(cmd) {
+  if (platform() !== "win32") return false;
+  const normalized = cmd.trim().toLowerCase();
+  return normalized.endsWith(".cmd") || normalized.endsWith(".bat");
+}
+
+// src/acp/login.ts
+var PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
+var LOGIN_TIMEOUT_MS = 5 * 6e4;
+function findPiPackageDir(piCommand = getPiCommand(process.env.PI_ACP_PI_COMMAND)) {
+  let bin = piCommand;
+  if (!isAbsolute(bin)) {
+    const which = spawnSync(process.platform === "win32" ? "where" : "which", [bin], { encoding: "utf-8" });
+    bin = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim() ?? "";
+    if (!bin) return null;
+  }
+  let dir;
+  try {
+    dir = dirname(realpathSync(bin));
+  } catch {
+    return null;
+  }
+  for (; ; ) {
+    const pkgPath = join(dir, "package.json");
+    if (existsSync(pkgPath)) {
+      try {
+        if (JSON.parse(readFileSync(pkgPath, "utf-8"))?.name === PI_PACKAGE_NAME) return dir;
+      } catch {
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+async function loadModelRuntime(pkgDir = findPiPackageDir()) {
+  if (!pkgDir) return null;
+  const entry = join(pkgDir, "dist", "index.js");
+  if (!existsSync(entry)) return null;
+  try {
+    const sdk = await import(pathToFileURL(entry).href);
+    if (typeof sdk?.ModelRuntime?.create !== "function") return null;
+    const rt = await sdk.ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
+    return typeof rt?.login === "function" ? rt : null;
+  } catch {
+    return null;
+  }
+}
+function oauthProviders(rt) {
+  return rt.getProviders().filter((p) => p.auth?.oauth).sort((a, b) => a.name.localeCompare(b.name));
+}
+function providerLabel(p) {
+  return p.auth.oauth?.name ?? p.name;
+}
+function findProvider(rt, ref) {
+  const r = ref.trim().toLowerCase();
+  return rt.getProviders().find((p) => p.id.toLowerCase() === r || p.name.toLowerCase() === r || p.auth?.oauth?.name?.toLowerCase() === r);
+}
+function looksLikeAuthCode(text) {
+  const t = text.trim();
+  if (/^https?:\/\//.test(t)) return /[?&#]code=/.test(t);
+  return /^\S{16,}$/.test(t);
+}
+function openBrowser(url) {
+  const [cmd, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : ["xdg-open", [url]];
+  spawn(cmd, args, { stdio: "ignore", detached: true }).on("error", () => {
+  }).unref();
+}
+function rejectOnAbort(signal) {
+  return new Promise((_, reject) => {
+    const fail = () => reject(new Error(signal?.reason?.name === "TimeoutError" ? "Login timed out" : "Login cancelled"));
+    if (signal?.aborted) return fail();
+    signal?.addEventListener("abort", fail, { once: true });
+  });
+}
+async function runOAuthLogin(rt, providerId, io, signal) {
+  const loginSignal = AbortSignal.any([AbortSignal.timeout(LOGIN_TIMEOUT_MS), ...signal ? [signal] : []]);
+  await rt.login(providerId, "oauth", {
+    signal: loginSignal,
+    async prompt(p) {
+      const s = AbortSignal.any([loginSignal, ...p.signal ? [p.signal] : []]);
+      if (p.type === "select") {
+        const picked = await Promise.race([io.select(p.message, [...p.options ?? []]), rejectOnAbort(s)]);
+        if (picked === null) throw new Error("Login cancelled");
+        return picked;
+      }
+      if (p.type === "text") return io.text ?? "";
+      if (p.type === "secret") {
+        throw new Error(
+          "This provider needs a secret pi cannot collect in chat. Run `pi` in a terminal and use /login."
+        );
+      }
+      return Promise.race([io.code ? io.code(s) : rejectOnAbort(s), rejectOnAbort(s)]);
+    },
+    notify(e) {
+      if (e.type === "auth_url") {
+        io.openUrl?.(e.url);
+        io.say(
+          `[Open the login page](${e.url}) and finish signing in there.` + (io.code ? "\n\nIf the browser can't reach this machine, or the page shows a code, stop this turn and send the final redirect URL or the code as your next message." : "")
+        );
+      } else if (e.type === "device_code") {
+        io.openUrl?.(e.verificationUri);
+        io.say(`Enter code **${e.userCode}** at ${e.verificationUri}`);
+      } else {
+        const links = (e.links ?? []).map((l) => `[${l.label ?? l.url}](${l.url})`).join(" ");
+        io.say(links ? `${e.message} ${links}` : e.message);
+      }
+    }
+  });
+}
+var ZED_OAUTH_METHOD_PREFIX = "pi_oauth:";
+var AUTHENTICATE_PROVIDERS = [
+  { providerId: "anthropic", label: "Claude Pro/Max" },
+  { providerId: "openai", label: "ChatGPT Plus/Pro" },
+  { providerId: "openrouter", label: "OpenRouter" }
+];
+function oauthAuthMethods() {
+  return AUTHENTICATE_PROVIDERS.map((p) => ({
+    id: `${ZED_OAUTH_METHOD_PREFIX}${p.providerId}`,
+    name: `Log in with ${p.label}`,
+    description: `Sign in to ${p.label} in your browser`
+  }));
+}
+function providerFromAuthMethodId(methodId) {
+  return methodId.startsWith(ZED_OAUTH_METHOD_PREFIX) ? methodId.slice(ZED_OAUTH_METHOD_PREFIX.length) : null;
+}
+
 // src/acp/auth.ts
 var PI_SETUP_METHOD_ID = "pi_terminal_login";
 function getAuthMethods(opts) {
@@ -31,7 +172,7 @@ function getAuthMethods(opts) {
       }
     };
   }
-  return [method];
+  return [method, ...oauthAuthMethods()];
 }
 function terminalAuthLaunchSpec() {
   const argv0 = process.argv[0] || "node";
@@ -49,29 +190,13 @@ function terminalAuthLaunchSpec() {
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
 import { execFile } from "child_process";
-import { readFileSync as readFileSync3 } from "fs";
-import { basename, isAbsolute, relative, resolve as resolvePath } from "path";
+import { readFileSync as readFileSync4 } from "fs";
+import { basename, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
-import { execFileSync, spawn } from "child_process";
+import { execFileSync, spawn as spawn2 } from "child_process";
 import * as readline from "readline";
-
-// src/pi-rpc/command.ts
-import { platform } from "os";
-function defaultPiCommand() {
-  return platform() === "win32" ? "pi.cmd" : "pi";
-}
-function getPiCommand(override) {
-  return override ?? defaultPiCommand();
-}
-function shouldUseShellForPiCommand(cmd) {
-  if (platform() !== "win32") return false;
-  const normalized = cmd.trim().toLowerCase();
-  return normalized.endsWith(".cmd") || normalized.endsWith(".bat");
-}
-
-// src/pi-rpc/process.ts
 var PiRpcSpawnError = class extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
   code;
@@ -144,7 +269,7 @@ var PiRpcProcess = class _PiRpcProcess {
     const cmd = getPiCommand(params.piCommand);
     const args = ["--mode", "rpc", "--no-themes"];
     if (params.sessionPath) args.push("--session", params.sessionPath);
-    const child = spawn(cmd, args, {
+    const child = spawn2(cmd, args, {
       cwd: params.cwd,
       stdio: "pipe",
       env: process.env,
@@ -188,8 +313,8 @@ var PiRpcProcess = class _PiRpcProcess {
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
         const { mkdirSync: mkdirSync3 } = await import("fs");
-        const { dirname: dirname3 } = await import("path");
-        mkdirSync3(dirname3(sessionFile), { recursive: true });
+        const { dirname: dirname4 } = await import("path");
+        mkdirSync3(dirname4(sessionFile), { recursive: true });
       }
     } catch {
     }
@@ -389,35 +514,35 @@ function maybeAuthRequiredError(err) {
 }
 
 // src/acp/session-store.ts
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "fs";
+import { dirname as dirname2 } from "path";
 
 // src/acp/paths.ts
 import { homedir } from "os";
-import { join } from "path";
+import { join as join2 } from "path";
 function getPiAcpDir() {
-  return join(homedir(), ".pi", "pi-acp");
+  return join2(homedir(), ".pi", "pi-acp");
 }
 function getPiAcpSessionMapPath() {
-  return join(getPiAcpDir(), "session-map.json");
+  return join2(getPiAcpDir(), "session-map.json");
 }
 function getPiAcpLiveDir() {
-  return join(getPiAcpDir(), "live");
+  return join2(getPiAcpDir(), "live");
 }
 function getPiAcpLiveSocketPath(pid) {
-  return join(getPiAcpLiveDir(), `${pid}.sock`);
+  return join2(getPiAcpLiveDir(), `${pid}.sock`);
 }
 function getPiAcpLivePidRegistryPath(pid) {
-  return join(getPiAcpLiveDir(), `${pid}.json`);
+  return join2(getPiAcpLiveDir(), `${pid}.json`);
 }
 
 // src/acp/session-store.ts
 function ensureParentDir(path) {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname2(path), { recursive: true });
 }
 function loadFile(path) {
   try {
-    const raw = readFileSync(path, "utf-8");
+    const raw = readFileSync2(path, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed?.version !== 1 || typeof parsed.sessions !== "object" || !parsed.sessions) {
       return { version: 1, sessions: {} };
@@ -588,9 +713,9 @@ function planNarratedToolCallEmit(accumulated, alreadyEmitted) {
 }
 
 // src/acp/slash-commands.ts
-import { existsSync, readdirSync, readFileSync as readFileSync2 } from "fs";
+import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join2, resolve } from "path";
+import { join as join3, resolve } from "path";
 function parseFrontmatter(content) {
   const frontmatter = {};
   if (!content.startsWith("---")) return { frontmatter, content };
@@ -606,11 +731,11 @@ function parseFrontmatter(content) {
 }
 function loadCommandsFromDir(dir, source, subdir = "") {
   const commands = [];
-  if (!existsSync(dir)) return commands;
+  if (!existsSync2(dir)) return commands;
   try {
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = join2(dir, entry.name);
+      const fullPath = join3(dir, entry.name);
       if (entry.isDirectory()) {
         const newSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
         commands.push(...loadCommandsFromDir(fullPath, source, newSubdir));
@@ -618,7 +743,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
       }
       if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
       try {
-        const rawContent = readFileSync2(fullPath, "utf-8");
+        const rawContent = readFileSync3(fullPath, "utf-8");
         const { frontmatter, content } = parseFrontmatter(rawContent);
         const name = entry.name.slice(0, -3);
         const sourceStr = source === "user" ? subdir ? `(user:${subdir})` : "(user)" : subdir ? `(project:${subdir})` : "(project)";
@@ -646,7 +771,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
 }
 function loadSlashCommands(cwd) {
   const commands = [];
-  const userDir = join2(homedir2(), ".pi", "agent", "prompts");
+  const userDir = join3(homedir2(), ".pi", "agent", "prompts");
   const projectDir = resolve(cwd, ".pi", "prompts");
   commands.push(...loadCommandsFromDir(userDir, "user"));
   commands.push(...loadCommandsFromDir(projectDir, "project"));
@@ -712,7 +837,7 @@ function expandSlashCommand(text, fileCommands) {
 }
 
 // src/acp/stay-awake.ts
-import { spawn as spawn2 } from "child_process";
+import { spawn as spawn3 } from "child_process";
 var proc = null;
 var holds = 0;
 var paused = 0;
@@ -724,7 +849,7 @@ function sync() {
   }
   if (!proc && process.platform === "darwin") {
     try {
-      const child = spawn2("caffeinate", ["-dims", "-w", String(process.pid)], { stdio: "ignore" });
+      const child = spawn3("caffeinate", ["-dims", "-w", String(process.pid)], { stdio: "ignore" });
       const forget = () => {
         if (proc === child) proc = null;
       };
@@ -835,7 +960,7 @@ function getEditOldTexts(args) {
 function getInitialFileDiffContent(toolName, args, cwd, snapshotOldText) {
   const rawPath = getToolPath(args);
   if (!rawPath) return void 0;
-  const path = isAbsolute(rawPath) ? rawPath : resolvePath(cwd, rawPath);
+  const path = isAbsolute2(rawPath) ? rawPath : resolvePath(cwd, rawPath);
   if (toolName === "edit") return void 0;
   if (toolName === "write") {
     const content = args?.content;
@@ -854,7 +979,7 @@ function getInitialFileDiffContent(toolName, args, cwd, snapshotOldText) {
 function toToolCallLocations(args, cwd, line) {
   const path = getToolPath(args);
   if (!path) return void 0;
-  const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path);
+  const resolvedPath = isAbsolute2(path) ? path : resolvePath(cwd, path);
   return [{ path: resolvedPath, ...typeof line === "number" ? { line } : {} }];
 }
 var SessionManager = class {
@@ -879,6 +1004,7 @@ var SessionManager = class {
   close(sessionId) {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    s.markClosed();
     try {
       s.proc.dispose?.();
     } catch {
@@ -1094,6 +1220,9 @@ var PiAcpSession = class _PiAcpSession {
   setPiExtensionCommands(names) {
     this.piExtensionCommandNames = new Set(names);
   }
+  getPiExtensionCommands() {
+    return [...this.piExtensionCommandNames];
+  }
   // Provide the builder used to refresh model/thinking selectors after pi changes
   // them on its own (see the `thinking_level_changed` handler).
   setConfigOptionsRefresher(refresh) {
@@ -1305,8 +1434,19 @@ var PiAcpSession = class _PiAcpSession {
     await this.flushEmits();
     this.completeTurn("error");
   }
+  // Set when the manager disposes this session on purpose (close, respawn). The exit that
+  // follows is expected: don't warn, and don't evict, since a respawn may already have
+  // registered a new session under the same id.
+  closed = false;
+  markClosed() {
+    this.closed = true;
+  }
   async handleProcessExit(code, signal) {
     this.clearTurnWatchdog();
+    if (this.closed) {
+      if (this.pendingTurn) this.completeTurn("cancelled");
+      return;
+    }
     const detail = signal ? `signal ${signal}` : `code ${code}`;
     if (!this.pendingTurn) {
       this.emit({
@@ -1562,7 +1702,7 @@ ${message}` }
   // branch", forcing a refresh) for detached HEAD or any read failure.
   getCurrentBranchSync() {
     try {
-      const head = readFileSync3(resolvePath(this.cwd, ".git", "HEAD"), "utf8").trim();
+      const head = readFileSync4(resolvePath(this.cwd, ".git", "HEAD"), "utf8").trim();
       const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
       return match ? match[1] : head || null;
     } catch {
@@ -1768,8 +1908,8 @@ ${message}` }
           const p = getToolPath(args);
           if (p) {
             try {
-              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p);
-              snapshotOldText = readFileSync3(abs, "utf8");
+              const abs = isAbsolute2(p) ? p : resolvePath(this.cwd, p);
+              snapshotOldText = readFileSync4(abs, "utf8");
               this.fileSnapshots.set(toolCallId, { path: abs, oldText: snapshotOldText });
               if (toolName === "edit") {
                 for (const needle of getEditOldTexts(args)) {
@@ -1779,7 +1919,7 @@ ${message}` }
               }
             } catch {
               snapshotOldText = null;
-              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p);
+              const abs = isAbsolute2(p) ? p : resolvePath(this.cwd, p);
               this.fileSnapshots.set(toolCallId, { path: abs, oldText: null });
             }
           }
@@ -1901,7 +2041,7 @@ ${message}` }
         }
         if (!isError && !initialDiffEmitted && snapshot) {
           try {
-            const newText = readFileSync3(snapshot.path, "utf8");
+            const newText = readFileSync4(snapshot.path, "utf8");
             if (snapshot.oldText === null || newText !== snapshot.oldText) {
               hasStructuredDiff = true;
               content = [
@@ -2310,7 +2450,7 @@ function toToolTitle(toolName, args, cwd) {
     let display = p;
     if (cwd) {
       try {
-        const rel = relative(cwd, isAbsolute(p) ? p : resolvePath(cwd, p));
+        const rel = relative(cwd, isAbsolute2(p) ? p : resolvePath(cwd, p));
         display = rel.length < p.length ? rel : basename(p);
       } catch {
         display = basename(p);
@@ -2355,31 +2495,31 @@ function toToolKind(toolName) {
 }
 
 // src/acp/pi-sessions.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, statSync, openSync, readSync, closeSync, existsSync as existsSync2 } from "fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync5, statSync, openSync, readSync, closeSync, existsSync as existsSync3 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join3, resolve as resolve2, isAbsolute as isAbsolute2 } from "path";
+import { join as join4, resolve as resolve2, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join3(homedir3(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join4(homedir3(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
-  const settingsPath = join3(agentDir, "settings.json");
+  const settingsPath = join4(agentDir, "settings.json");
   try {
-    if (!existsSync2(settingsPath)) return null;
-    const raw = readFileSync4(settingsPath, "utf8");
+    if (!existsSync3(settingsPath)) return null;
+    const raw = readFileSync5(settingsPath, "utf8");
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     const sessionDir = data.sessionDir;
     if (typeof sessionDir !== "string" || !sessionDir.trim()) return null;
-    return isAbsolute2(sessionDir) ? sessionDir : resolve2(agentDir, sessionDir);
+    return isAbsolute3(sessionDir) ? sessionDir : resolve2(agentDir, sessionDir);
   } catch {
     return null;
   }
 }
 function getPiSessionsDir() {
   const agentDir = getPiAgentDir();
-  return readSessionDirFromSettings(agentDir) ?? join3(agentDir, "sessions");
+  return readSessionDirFromSettings(agentDir) ?? join4(agentDir, "sessions");
 }
 function walkJsonlFiles(dir, out) {
   let entries;
@@ -2390,7 +2530,7 @@ function walkJsonlFiles(dir, out) {
   }
   for (const e of entries) {
     const name = typeof e.name === "string" ? e.name : String(e.name);
-    const p = join3(dir, name);
+    const p = join4(dir, name);
     if (e.isDirectory()) walkJsonlFiles(p, out);
     else if (e.isFile() && name.endsWith(".jsonl")) out.push(p);
   }
@@ -2533,7 +2673,7 @@ function pickUpdatedAtFromTail(tail) {
 }
 function pickFallbackTitleFromHead(path) {
   try {
-    const raw = readFileSync4(path, { encoding: "utf8" });
+    const raw = readFileSync5(path, { encoding: "utf8" });
     const lines = raw.split(/\r?\n/);
     for (const line0 of lines) {
       const line = line0.trim();
@@ -2709,9 +2849,9 @@ ${r.text}`;
 }
 
 // src/acp/pi-settings.ts
-import { existsSync as existsSync3, readFileSync as readFileSync5 } from "fs";
+import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { join as join4, resolve as resolve3 } from "path";
+import { join as join5, resolve as resolve3 } from "path";
 function isObject(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
@@ -2726,8 +2866,8 @@ function deepMerge(a, b) {
 }
 function readJsonFile(path) {
   try {
-    if (!existsSync3(path)) return {};
-    const raw = readFileSync5(path, "utf-8");
+    if (!existsSync4(path)) return {};
+    const raw = readFileSync6(path, "utf-8");
     const data = JSON.parse(raw);
     return isObject(data) ? data : {};
   } catch {
@@ -2735,14 +2875,14 @@ function readJsonFile(path) {
   }
 }
 function getMergedSettings(cwd) {
-  const globalSettingsPath = join4(getAgentDir(), "settings.json");
+  const globalSettingsPath = join5(getAgentDir(), "settings.json");
   const projectSettingsPath = resolve3(cwd, ".pi", "settings.json");
   const global = readJsonFile(globalSettingsPath);
   const project = readJsonFile(projectSettingsPath);
   return deepMerge(global, project);
 }
 function getAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join4(homedir4(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join5(homedir4(), ".pi", "agent");
 }
 function getEnableSkillCommands(cwd) {
   const merged = getMergedSettings(cwd);
@@ -2902,15 +3042,15 @@ function resolveEnabledModelIds(models, patterns) {
 import { createServer } from "net";
 import {
   chmodSync,
-  existsSync as existsSync4,
+  existsSync as existsSync5,
   mkdirSync as mkdirSync2,
   readdirSync as readdirSync3,
-  readFileSync as readFileSync6,
+  readFileSync as readFileSync7,
   renameSync,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "fs";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 function isLiveEnabled(env = process.env) {
   const v = env.PI_ACP_LIVE;
   if (v == null || v === "") return false;
@@ -2930,7 +3070,7 @@ function isObject2(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
 function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
-  if (!existsSync4(liveDir)) return;
+  if (!existsSync5(liveDir)) return;
   let names = [];
   try {
     names = readdirSync3(liveDir);
@@ -2947,9 +3087,9 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
     if (pid === process.pid) continue;
     if (isPidAlive(pid)) continue;
     for (const ext of ["json", "sock"]) {
-      const path = join5(liveDir, `${pid}.${ext}`);
+      const path = join6(liveDir, `${pid}.${ext}`);
       try {
-        if (existsSync4(path)) unlinkSync(path);
+        if (existsSync5(path)) unlinkSync(path);
       } catch {
       }
     }
@@ -2968,8 +3108,8 @@ var LiveServer = class {
   constructor(opts = {}) {
     this.pid = opts.pid ?? process.pid;
     this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
-    this.sockPath = opts.liveDir ? join5(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
-    this.registryPath = opts.liveDir ? join5(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+    this.sockPath = opts.liveDir ? join6(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join6(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
   }
   get socketPath() {
     return this.sockPath;
@@ -3072,7 +3212,7 @@ var LiveServer = class {
       chmodSync(this.registryPath, 384);
     } catch {
       try {
-        if (existsSync4(tmp)) unlinkSync(tmp);
+        if (existsSync5(tmp)) unlinkSync(tmp);
       } catch {
       }
     }
@@ -3200,17 +3340,18 @@ var LiveServer = class {
   }
   unlinkIfExists(path) {
     try {
-      if (existsSync4(path)) unlinkSync(path);
+      if (existsSync5(path)) unlinkSync(path);
     } catch {
     }
   }
 };
 
 // src/acp/agent.ts
-import { isAbsolute as isAbsolute3 } from "path";
-import { existsSync as existsSync5, readFileSync as readFileSync7, realpathSync, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "fs";
-import { join as join6, dirname as dirname2, basename as basename2 } from "path";
-import { spawnSync } from "child_process";
+import { isAbsolute as isAbsolute4 } from "path";
+import { existsSync as existsSync6, readFileSync as readFileSync8, realpathSync as realpathSync2, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "fs";
+import { join as join7, dirname as dirname3, basename as basename2 } from "path";
+import { spawnSync as spawnSync2 } from "child_process";
+import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
@@ -3240,7 +3381,7 @@ var TimeoutError = class extends Error {
 function buildSessionSummaryFromFile(sessionFile) {
   let raw;
   try {
-    raw = readFileSync7(sessionFile, "utf-8");
+    raw = readFileSync8(sessionFile, "utf-8");
   } catch {
     return "";
   }
@@ -3318,6 +3459,16 @@ function builtinAvailableCommands() {
     {
       name: "changelog",
       description: "Show pi changelog"
+    },
+    {
+      name: "login",
+      description: "Log in to a subscription provider (OAuth, opens your browser)",
+      input: { hint: "[provider]" }
+    },
+    {
+      name: "logout",
+      description: "Remove stored credentials for a provider",
+      input: { hint: "[provider]" }
     }
   ];
 }
@@ -3382,6 +3533,12 @@ var PiAcpAgent = class {
       proc: proc2,
       fileCommands
     });
+    session.setConfigOptionsRefresher(
+      async () => buildSessionConfigOptions(
+        await getModelState(session.proc, { cwd: stored.cwd }),
+        await getThinkingState(session.proc)
+      )
+    );
     this.store.upsert({
       sessionId,
       cwd: stored.cwd,
@@ -3411,7 +3568,7 @@ var PiAcpAgent = class {
     const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile : this.store.get(sessionId)?.sessionFile;
     if (typeof sessionFile === "string" && sessionFile.trim()) {
       try {
-        if (existsSync5(sessionFile)) unlinkSync2(sessionFile);
+        if (existsSync6(sessionFile)) unlinkSync2(sessionFile);
       } catch {
       }
     }
@@ -3451,7 +3608,7 @@ var PiAcpAgent = class {
     };
   }
   async newSession(params) {
-    if (!isAbsolute3(params.cwd)) {
+    if (!isAbsolute4(params.cwd)) {
       throw RequestError3.invalidParams(`cwd must be an absolute path: ${params.cwd}`);
     }
     this.lastSessionCwd = params.cwd;
@@ -3565,18 +3722,210 @@ var PiAcpAgent = class {
     }, 0);
     return response;
   }
-  async authenticate(_params) {
-    return;
+  async authenticate(params) {
+    const providerId = providerFromAuthMethodId(params.methodId);
+    if (!providerId) return;
+    const rt = await loadModelRuntime();
+    if (!rt) {
+      throw RequestError3.internalError(
+        {},
+        `Couldn't load pi's login API (needs pi >= 0.99). Use "Launch pi" instead.`
+      );
+    }
+    try {
+      await runOAuthLogin(rt, providerId, {
+        say: () => {
+        },
+        // pi lists the default (browser) method first, e.g. Anthropic's browser vs copy-code login.
+        select: async (_title, options) => options[0]?.id ?? null,
+        openUrl: openBrowser
+      });
+    } catch (e) {
+      throw RequestError3.internalError({}, `Login failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  /**
+   * In-flight /login or /logout per session. A flow waiting on a pasted code survives the turn
+   * being stopped ("detached"), so the user's next message can deliver the code.
+   */
+  authFlows = /* @__PURE__ */ new Map();
+  async handleAuthCommand(session, cmd, args) {
+    const { sessionId } = session;
+    let first = true;
+    const say = (text) => {
+      const chunk = first ? text : `
+
+${text}`;
+      first = false;
+      void this.conn.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } }
+      }).catch(() => {
+      });
+    };
+    const select = (title, options) => this.selectViaPermission(sessionId, title, options);
+    if (session.hasActiveTurn() || this.authFlows.has(sessionId)) {
+      say(`Wait for the current turn or login to finish before running /${cmd}.`);
+      return { stopReason: "end_turn" };
+    }
+    const rt = await loadModelRuntime();
+    if (!rt) {
+      say("Couldn't load pi's login API (needs pi >= 0.99 on PATH). Run `pi` in a terminal and use /login there.");
+      return { stopReason: "end_turn" };
+    }
+    const abort = new AbortController();
+    let detach;
+    const detached = new Promise((resolve4) => detach = () => resolve4("detached"));
+    const flow = { abort, detach, awaitingCode: null, done: Promise.resolve() };
+    const code = (signal) => new Promise((resolve4) => {
+      const deliver = (c) => {
+        flow.awaitingCode = null;
+        resolve4(c);
+      };
+      flow.awaitingCode = deliver;
+      signal.addEventListener(
+        "abort",
+        () => {
+          if (flow.awaitingCode === deliver) flow.awaitingCode = null;
+        },
+        { once: true }
+      );
+    });
+    flow.done = (async () => {
+      try {
+        const changed = cmd === "login" ? await this.runLogin(rt, args, say, select, code, abort.signal) : await this.runLogout(rt, args, say, select, abort.signal);
+        if (changed) await this.respawnForNewCredentials(sessionId, say);
+      } catch (e) {
+        if (!abort.signal.aborted) say(`/${cmd} failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        this.authFlows.delete(sessionId);
+      }
+    })();
+    this.authFlows.set(sessionId, flow);
+    const outcome = await Promise.race([flow.done.then(() => "done"), detached]);
+    return { stopReason: outcome === "detached" || abort.signal.aborted ? "cancelled" : "end_turn" };
+  }
+  /** Routes a prompt to a detached login waiting for a pasted code. Null = not consumed, handle normally. */
+  async maybeDeliverAuthCode(sessionId, message) {
+    const flow = this.authFlows.get(sessionId);
+    if (!flow) return null;
+    if (!flow.awaitingCode || !looksLikeAuthCode(message)) {
+      flow.abort.abort();
+      await flow.done;
+      return null;
+    }
+    flow.awaitingCode(message.trim());
+    await flow.done;
+    return { stopReason: "end_turn" };
+  }
+  async runLogin(rt, args, say, select, code, signal) {
+    const ref = args[0];
+    let provider = ref ? findProvider(rt, ref) : void 0;
+    if (ref && !provider) {
+      say(
+        `Unknown provider "${ref}". Subscription providers: ${oauthProviders(rt).map((p) => p.id).join(", ")}`
+      );
+      return false;
+    }
+    if (provider && !provider.auth.oauth) {
+      say(
+        `${provider.name} uses an API key, which pi-acp won't take in chat (it would be saved in the thread). Run \`pi\` in a terminal and use /login, or set the provider's API key environment variable.`
+      );
+      return false;
+    }
+    if (!provider) {
+      const list = oauthProviders(rt);
+      const id = await select(
+        "Log in to",
+        list.map((p) => ({ id: p.id, label: providerLabel(p) }))
+      );
+      provider = list.find((p) => p.id === id);
+      if (!provider) return false;
+    }
+    await runOAuthLogin(
+      rt,
+      provider.id,
+      { say, select, code, text: args.slice(1).join(" "), openUrl: openBrowser },
+      signal
+    );
+    say(`Logged in to ${providerLabel(provider)}.`);
+    return true;
+  }
+  async runLogout(rt, args, say, select, signal) {
+    const creds = await rt.listCredentials({ signal });
+    const nameOf = (id2) => rt.getProviders().find((p) => p.id === id2)?.name ?? id2;
+    if (!creds.length) {
+      say("No stored credentials to remove. /logout only removes credentials saved by /login.");
+      return false;
+    }
+    const id = args[0] ? findProvider(rt, args[0])?.id ?? args[0] : await select(
+      "Log out of",
+      creds.map((c) => ({
+        id: c.providerId,
+        label: `${nameOf(c.providerId)} (${c.type === "oauth" ? "OAuth" : "API key"})`
+      }))
+    );
+    if (!id) return false;
+    if (!creds.some((c) => c.providerId === id)) {
+      say(`No stored credentials for ${id}. Stored: ${creds.map((c) => c.providerId).join(", ")}`);
+      return false;
+    }
+    await rt.logout(id, { signal });
+    say(`Removed stored credentials for ${nameOf(id)}. Environment variables and models.json are unchanged.`);
+    return true;
+  }
+  async selectViaPermission(sessionId, title, options) {
+    if (!options.length) return null;
+    const res = await this.conn.requestPermission({
+      sessionId,
+      toolCall: { toolCallId: `pi-auth-${randomUUID()}`, title, kind: "other", status: "pending" },
+      options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
+    });
+    if (res.outcome.outcome !== "selected") return null;
+    const picked = res.outcome.optionId;
+    return options.some((o) => o.id === picked) ? picked : null;
+  }
+  /**
+   * A running pi only reads its model availability at startup, so a login/logout is invisible
+   * to it (and to the client's model picker) until the process restarts. Other open sessions
+   * keep their process; they pick up the change on their next restart.
+   */
+  async respawnForNewCredentials(sessionId, say) {
+    const session = this.sessions.maybeGet(sessionId);
+    if (!session) return;
+    if (session.hasActiveTurn()) {
+      say("New models appear in the picker once this session restarts.");
+      return;
+    }
+    const extensionCommands = session.getPiExtensionCommands();
+    this.sessions.close(sessionId);
+    try {
+      const fresh = await this.autoRestoreSession(sessionId);
+      fresh.setPiExtensionCommands(extensionCommands);
+      const models = await getModelState(fresh.proc, { cwd: fresh.cwd });
+      const thinking = await getThinkingState(fresh.proc);
+      await this.conn.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "config_option_update", configOptions: buildSessionConfigOptions(models, thinking) }
+      });
+    } catch (e) {
+      say(
+        `Restarting pi to load the new models failed: ${e instanceof Error ? e.message : String(e)}. It restarts on your next message.`
+      );
+    }
   }
   async prompt(params) {
     const session = await this.autoRestoreSession(params.sessionId);
     const { message, images } = promptToPiMessage(params.prompt);
+    const delivered = await this.maybeDeliverAuthCode(params.sessionId, message);
+    if (delivered) return delivered;
     if (images.length === 0 && message.trimStart().startsWith("/")) {
       const trimmed = message.trim();
       const space = trimmed.indexOf(" ");
       const cmd = space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
       const argsString = space === -1 ? "" : trimmed.slice(space + 1);
       const args = parseCommandArgs(argsString);
+      if (cmd === "login" || cmd === "logout") return this.handleAuthCommand(session, cmd, args);
       if (cmd === "compact") {
         const customInstructions = args.join(" ").trim() || void 0;
         const res = await session.proc.compact(customInstructions);
@@ -3754,22 +4103,22 @@ ${JSON.stringify(stats, null, 2)}`;
         const findChangelog = () => {
           try {
             const whichCmd = process.platform === "win32" ? "where" : "which";
-            const which = spawnSync(whichCmd, ["pi"], { encoding: "utf-8" });
+            const which = spawnSync2(whichCmd, ["pi"], { encoding: "utf-8" });
             const piPath = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim();
             if (piPath) {
-              const resolved = realpathSync(piPath);
-              const pkgRoot = dirname2(dirname2(resolved));
-              const p = join6(pkgRoot, "CHANGELOG.md");
-              if (existsSync5(p)) return p;
+              const resolved = realpathSync2(piPath);
+              const pkgRoot = dirname3(dirname3(resolved));
+              const p = join7(pkgRoot, "CHANGELOG.md");
+              if (existsSync6(p)) return p;
             }
           } catch {
           }
           try {
-            const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf-8" });
+            const npmRoot = spawnSync2("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join6(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
-              if (existsSync5(p)) return p;
+              const p = join7(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              if (existsSync6(p)) return p;
             }
           } catch {
           }
@@ -3788,7 +4137,7 @@ ${JSON.stringify(stats, null, 2)}`;
         }
         let text = "";
         try {
-          text = readFileSync7(changelogPath, "utf-8");
+          text = readFileSync8(changelogPath, "utf-8");
         } catch (e) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -3814,7 +4163,7 @@ ${JSON.stringify(stats, null, 2)}`;
         const state = await session.proc.getState();
         const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
         const messageCount = typeof state?.messageCount === "number" ? state.messageCount : 0;
-        if (!sessionFile || messageCount === 0 || !existsSync5(sessionFile)) {
+        if (!sessionFile || messageCount === 0 || !existsSync6(sessionFile)) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -3828,7 +4177,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         try {
-          const raw = readFileSync7(sessionFile, "utf-8");
+          const raw = readFileSync8(sessionFile, "utf-8");
           if (raw.trim().length === 0) {
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
@@ -3856,7 +4205,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join6(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join7(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -3946,6 +4295,8 @@ ${JSON.stringify(stats, null, 2)}`;
     }
   }
   async cancel(params) {
+    const authFlow = this.authFlows.get(params.sessionId);
+    if (authFlow) return authFlow.awaitingCode ? authFlow.detach() : authFlow.abort.abort();
     const session = await this.autoRestoreSession(params.sessionId);
     await session.cancel();
   }
@@ -3985,7 +4336,7 @@ ${JSON.stringify(stats, null, 2)}`;
     return { sessions, nextCursor, _meta: {} };
   }
   async loadSession(params) {
-    if (!isAbsolute3(params.cwd)) {
+    if (!isAbsolute4(params.cwd)) {
       throw RequestError3.invalidParams(`cwd must be an absolute path: ${params.cwd}`);
     }
     this.lastSessionCwd = params.cwd;
@@ -4045,7 +4396,7 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join6(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join7(params.cwd, ".pi-history-summary.md");
           try {
             writeFileSync3(summaryPath, summary, "utf-8");
           } catch {
@@ -4379,13 +4730,13 @@ function shouldSkipUpdateNotice() {
 function buildUpdateNotice() {
   if (shouldSkipUpdateNotice()) return null;
   try {
-    const piVersion = spawnSync("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
     );
     if (!installed || !isSemver(installed)) return null;
-    const latestRes = spawnSync("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
+    const latestRes = spawnSync2("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
       encoding: "utf-8",
       timeout: 800
     });
@@ -4402,7 +4753,7 @@ function buildStartupInfo(opts) {
   const md = [];
   let headerLine = "";
   try {
-    const piVersion = spawnSync("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
@@ -4421,14 +4772,14 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join6(opts.cwd, "AGENTS.md");
-  if (existsSync5(contextPath)) contextItems.push(contextPath);
+  const contextPath = join7(opts.cwd, "AGENTS.md");
+  if (existsSync6(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
       for (const e of readdirSync4(root)) {
-        const p = join6(root, e);
+        const p = join7(root, e);
         try {
           const st = statSync2(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
@@ -4448,7 +4799,7 @@ function buildStartupInfo(opts) {
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join6(dir, name);
+          const p = join7(dir, name);
           let st;
           try {
             st = statSync2(p);
@@ -4465,15 +4816,15 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join6(getAgentDir(), "skills");
+  const globalSkillsDir = join7(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join6(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join7(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join6(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join7(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join6(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join7(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
     const prompts = readdirSync4(promptsDir).filter((f) => f.endsWith(".md"));
     for (const f of prompts) promptsItems.push(`/${basename2(f, ".md")}`);
@@ -4481,15 +4832,15 @@ function buildStartupInfo(opts) {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join6(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join7(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
     const exts = readdirSync4(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join6(extDir, f));
+    for (const f of exts) extItems.push(join7(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join6(process.env.HOME ?? "", ".pi", "agent", "settings.json");
-    const settings = JSON.parse(readFileSync7(settingsPath, "utf-8"));
+    const settingsPath = join7(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settings = JSON.parse(readFileSync8(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
       const s = String(pkg2);
@@ -4512,14 +4863,14 @@ function buildStartupInfo(opts) {
 }
 function readNearestPackageJson(metaUrl) {
   try {
-    let dir = dirname2(fileURLToPath(metaUrl));
+    let dir = dirname3(fileURLToPath(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join6(dir, "package.json");
-      if (existsSync5(p)) {
-        const json = JSON.parse(readFileSync7(p, "utf-8"));
+      const p = join7(dir, "package.json");
+      if (existsSync6(p)) {
+        const json = JSON.parse(readFileSync8(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
-      dir = dirname2(dir);
+      dir = dirname3(dir);
     }
   } catch {
   }
@@ -4528,9 +4879,9 @@ function readNearestPackageJson(metaUrl) {
 
 // src/index.ts
 if (process.argv.includes("--terminal-login")) {
-  const { spawnSync: spawnSync2 } = await import("child_process");
+  const { spawnSync: spawnSync3 } = await import("child_process");
   const cmd = getPiCommand(process.env.PI_ACP_PI_COMMAND);
-  const res = spawnSync2(cmd, [], {
+  const res = spawnSync3(cmd, [], {
     stdio: "inherit",
     env: process.env,
     shell: shouldUseShellForPiCommand(cmd)

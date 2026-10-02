@@ -1,4 +1,5 @@
 import type { AuthMethod } from '@agentclientprotocol/sdk'
+import { oauthAuthMethods } from './login.js'
 
 export const PI_SETUP_METHOD_ID = 'pi_terminal_login'
 
@@ -38,7 +39,7 @@ export function getAuthMethods(opts?: { supportsTerminalAuthMeta?: boolean }): A
     }
   }
 
-  return [method as AuthMethod]
+  return [method as AuthMethod, ...oauthAuthMethods()]
 }
 
 function terminalAuthLaunchSpec(): { command: string; args: string[] } {

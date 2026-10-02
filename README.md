@@ -190,6 +190,8 @@ Loaded from:
 - `/changelog` – print the installed pi changelog (best-effort)
 - `/steering` - maps to `pi` Steering Mode, get/set
 - `/follow-up` - pats to `pi` Follow-up Mode, get/set
+- `/login [provider]` – OAuth login (Claude Pro/Max, ChatGPT, Copilot, …) from the chat; restarts the session's pi so new models show up
+- `/logout [provider]` – remove credentials stored by `/login`
 
 Other built-in commands:
 
@@ -216,6 +218,14 @@ pi-acp --terminal-login
 ```
 
 Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
+
+pi-acp also advertises browser-only OAuth methods (**Log in with Claude Pro/Max / ChatGPT Plus/Pro / OpenRouter**).
+Zed shows them next to **Launch pi**; picking one opens the provider's login page and saves the credential to pi's `auth.json`.
+
+Inside a thread, `/login [provider]` runs the same pi OAuth flow (needs pi >= 0.99, loaded from the `pi` on `PATH`).
+Device-code providers (Copilot, xAI, …) print the code in chat. If the browser can't reach the machine running pi-acp,
+stop the turn and send the final redirect URL (or the code the provider shows) as your next message.
+API keys are deliberately not accepted in chat, since Zed keeps the thread history; use `pi` in a terminal or an env var.
 
 ## Development
 
