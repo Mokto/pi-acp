@@ -1782,6 +1782,7 @@ ${message}` }
       const prNumber = /\/pull\/(\d+)\/?$/.exec(prLink)?.[1];
       parts.push(prNumber ? `[#${prNumber}](${prLink})` : `[PR](${prLink})`);
     }
+    parts.push((/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }));
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
 
