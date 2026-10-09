@@ -3462,6 +3462,10 @@ function builtinAvailableCommands() {
       description: "Show pi changelog"
     },
     {
+      name: "reload",
+      description: "Reload extensions, skills, prompts, context files and settings (restarts pi)"
+    },
+    {
       name: "login",
       description: "Log in to a subscription provider (OAuth, opens your browser)",
       input: { hint: "[provider]" }
@@ -3614,8 +3618,6 @@ var PiAcpAgent = class {
     }
     this.lastSessionCwd = params.cwd;
     const fileCommands = loadSlashCommands(params.cwd);
-    const enableSkillCommands = getEnableSkillCommands(params.cwd);
-    const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -3693,34 +3695,7 @@ var PiAcpAgent = class {
       }
     };
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0);
-    setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = await session.proc.getCommands();
-          const { commands, extensionCommandNames } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: enableExtensionCommands
-          });
-          session.setPiExtensionCommands(extensionCommandNames);
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: "available_commands_update",
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          });
-          return;
-        } catch {
-        }
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "available_commands_update",
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        });
-      })();
-    }, 0);
+    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0);
     return response;
   }
   async authenticate(params) {
@@ -3915,6 +3890,49 @@ ${text}`;
       );
     }
   }
+  async advertiseCommands(session, fileCommands = loadSlashCommands(session.cwd)) {
+    let commands;
+    try {
+      const pi = await session.proc.getCommands();
+      const res = toAvailableCommandsFromPiGetCommands(pi, {
+        enableSkillCommands: getEnableSkillCommands(session.cwd),
+        includeExtensionCommands: getEnableExtensionCommands(session.cwd)
+      });
+      session.setPiExtensionCommands(res.extensionCommandNames);
+      commands = res.commands;
+    } catch {
+      commands = toAvailableCommands(fileCommands);
+    }
+    await this.conn.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: mergeCommands(commands, builtinAvailableCommands())
+      }
+    });
+  }
+  async reloadSession(session) {
+    const { sessionId, mcpServers } = session;
+    const say = (text) => this.conn.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } }
+    });
+    if (session.hasActiveTurn()) return say("Cannot reload while a turn is running. Cancel it first.");
+    this.sessions.close(sessionId);
+    try {
+      const fresh = await this.autoRestoreSession(sessionId, mcpServers);
+      await this.advertiseCommands(fresh);
+      const models = await getModelState(fresh.proc, { cwd: fresh.cwd });
+      const thinking = await getThinkingState(fresh.proc);
+      await this.conn.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "config_option_update", configOptions: buildSessionConfigOptions(models, thinking) }
+      });
+    } catch (e) {
+      return say(`Reload failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await say("Reloaded extensions, skills, prompts, context files and settings.");
+  }
   async prompt(params) {
     const session = await this.autoRestoreSession(params.sessionId);
     const { message, images } = promptToPiMessage(params.prompt);
@@ -3927,6 +3945,10 @@ ${text}`;
       const argsString = space === -1 ? "" : trimmed.slice(space + 1);
       const args = parseCommandArgs(argsString);
       if (cmd === "login" || cmd === "logout") return this.handleAuthCommand(session, cmd, args);
+      if (cmd === "reload") {
+        await this.reloadSession(session);
+        return { stopReason: "end_turn" };
+      }
       if (cmd === "compact") {
         const customInstructions = args.join(" ").trim() || void 0;
         const res = await session.proc.compact(customInstructions);
@@ -4380,8 +4402,6 @@ ${JSON.stringify(stats, null, 2)}`;
   }
   async finishLoadSession(session, proc2, params, opts) {
     const fileCommands = loadSlashCommands(params.cwd);
-    const enableSkillCommands = getEnableSkillCommands(params.cwd);
-    const enableExtensionCommands = getEnableExtensionCommands(params.cwd);
     if (opts.replayHistory) {
       let data;
       let replayTimedOut = false;
@@ -4514,34 +4534,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         }
       }
     };
-    setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = await proc2.getCommands();
-          const { commands, extensionCommandNames } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: enableExtensionCommands
-          });
-          session.setPiExtensionCommands(extensionCommandNames);
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: "available_commands_update",
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          });
-          return;
-        } catch {
-        }
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "available_commands_update",
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        });
-      })();
-    }, 0);
+    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0);
     return response;
   }
   // Resolve a model identifier and apply it to the session's pi process.
