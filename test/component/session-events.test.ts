@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
@@ -1455,4 +1455,38 @@ test('PiAcpSession: session_info_changed forwards the pi session name as the ACP
     .filter(u => (u as any).update?.sessionUpdate === 'session_info_update')
     .map(u => (u as any).update.title)
   assert.deepEqual(titles, ['Fix payment retry', null])
+})
+
+test('PiAcpSession: an image read shows a clickable copy of the image in the tool card', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: '/repo',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'shot.png' } })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    isError: false,
+    result: {
+      content: [
+        { type: 'text', text: 'Read image file [image/png]' },
+        { type: 'image', data: Buffer.from('png-bytes').toString('base64'), mimeType: 'image/png' }
+      ]
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const text = (conn.updates.at(-1)!.update as any).content[0].content.text as string
+  const file = text.match(/^\[!\[shot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nRead image file \[image\/png\]$/)?.[1]
+  assert.ok(file, text)
+  assert.equal(readFileSync(file, 'utf8'), 'png-bytes')
 })

@@ -1,3 +1,34 @@
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, extname, join } from 'node:path'
+
+// Zed's "Go to File" on a tool call loads the file as a text buffer, which fails for images,
+// and Zed caches images by path for the app's lifetime, so an overwritten file would show a
+// stale picture. Saving each image under a fresh path and linking it sidesteps both.
+// ponytail: copies are left for the OS temp cleanup; delete per session if disk use matters.
+export function snapshotImageMarkdown(
+  result: unknown,
+  sourcePath: string,
+  dir = join(tmpdir(), 'pi-acp-images')
+): string | undefined {
+  const content = (result as any)?.content
+  const image = Array.isArray(content) ? content.find((c: any) => c?.type === 'image') : undefined
+  if (typeof image?.data !== 'string' || typeof image?.mimeType !== 'string') return undefined
+
+  const ext = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png'
+  const stem = basename(sourcePath, extname(sourcePath)).replace(/[^\p{L}\p{N}._-]+/gu, '-') || 'image'
+  const name = `${stem}.${ext}`
+  const file = join(dir, randomUUID(), name)
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, Buffer.from(image.data, 'base64'))
+  } catch {
+    return undefined
+  }
+  return `[![${name}](<${file}>)](<${file}>)`
+}
+
 export function toolResultToText(result: unknown): string {
   if (!result) return ''
 

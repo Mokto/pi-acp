@@ -191,7 +191,7 @@ function terminalAuthLaunchSpec() {
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
 import { execFile } from "child_process";
 import { readFileSync as readFileSync4 } from "fs";
-import { basename, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
+import { basename as basename2, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
@@ -312,9 +312,9 @@ var PiRpcProcess = class _PiRpcProcess {
       const state = await proc2.getState();
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
-        const { mkdirSync: mkdirSync3 } = await import("fs");
-        const { dirname: dirname4 } = await import("path");
-        mkdirSync3(dirname4(sessionFile), { recursive: true });
+        const { mkdirSync: mkdirSync4 } = await import("fs");
+        const { dirname: dirname5 } = await import("path");
+        mkdirSync4(dirname5(sessionFile), { recursive: true });
       }
     } catch {
     }
@@ -600,6 +600,26 @@ var SessionStore = class {
 };
 
 // src/acp/translate/pi-tools.ts
+import { randomUUID } from "crypto";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2 } from "fs";
+import { tmpdir } from "os";
+import { basename, dirname as dirname3, extname, join as join3 } from "path";
+function snapshotImageMarkdown(result, sourcePath, dir = join3(tmpdir(), "pi-acp-images")) {
+  const content = result?.content;
+  const image = Array.isArray(content) ? content.find((c) => c?.type === "image") : void 0;
+  if (typeof image?.data !== "string" || typeof image?.mimeType !== "string") return void 0;
+  const ext = image.mimeType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
+  const stem = basename(sourcePath, extname(sourcePath)).replace(/[^\p{L}\p{N}._-]+/gu, "-") || "image";
+  const name = `${stem}.${ext}`;
+  const file = join3(dir, randomUUID(), name);
+  try {
+    mkdirSync2(dirname3(file), { recursive: true });
+    writeFileSync2(file, Buffer.from(image.data, "base64"));
+  } catch {
+    return void 0;
+  }
+  return `[![${name}](<${file}>)](<${file}>)`;
+}
 function toolResultToText(result) {
   if (!result) return "";
   const details = result?.details;
@@ -715,7 +735,7 @@ function planNarratedToolCallEmit(accumulated, alreadyEmitted) {
 // src/acp/slash-commands.ts
 import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join3, resolve } from "path";
+import { join as join4, resolve } from "path";
 function parseFrontmatter(content) {
   const frontmatter = {};
   if (!content.startsWith("---")) return { frontmatter, content };
@@ -735,7 +755,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
   try {
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = join3(dir, entry.name);
+      const fullPath = join4(dir, entry.name);
       if (entry.isDirectory()) {
         const newSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
         commands.push(...loadCommandsFromDir(fullPath, source, newSubdir));
@@ -771,7 +791,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
 }
 function loadSlashCommands(cwd) {
   const commands = [];
-  const userDir = join3(homedir2(), ".pi", "agent", "prompts");
+  const userDir = join4(homedir2(), ".pi", "agent", "prompts");
   const projectDir = resolve(cwd, ".pi", "prompts");
   commands.push(...loadCommandsFromDir(userDir, "user"));
   commands.push(...loadCommandsFromDir(projectDir, "project"));
@@ -1182,6 +1202,7 @@ var PiAcpSession = class _PiAcpSession {
   fileMutationDiffsEmitted = /* @__PURE__ */ new Set();
   bashToolCallIds = /* @__PURE__ */ new Set();
   bashOutputSnapshots = /* @__PURE__ */ new Map();
+  readToolCallPaths = /* @__PURE__ */ new Map();
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   subagentToolCalls = /* @__PURE__ */ new Map();
@@ -1386,6 +1407,7 @@ var PiAcpSession = class _PiAcpSession {
     this.fileMutationDiffsEmitted.delete(toolCallId);
     this.bashToolCallIds.delete(toolCallId);
     this.bashOutputSnapshots.delete(toolCallId);
+    this.readToolCallPaths.delete(toolCallId);
     const prefix = `${toolCallId}__`;
     for (const [key, syntheticId] of this.subagentToolCalls) {
       if (key.startsWith(prefix)) {
@@ -1928,6 +1950,7 @@ ${message}` }
         const locations = toToolCallLocations(args, this.cwd, line);
         const initialFileContent = isFileMutation ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText) : void 0;
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId);
+        if (toolName === "read" && locations) this.readToolCallPaths.set(toolCallId, locations[0].path);
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, "in_progress");
           const title = toToolTitle(toolName, args, this.cwd);
@@ -2032,7 +2055,11 @@ ${message}` }
           this.cleanupToolCall(toolCallId);
           break;
         }
-        const text = toolResultToText(result);
+        const readPath = this.readToolCallPaths.get(toolCallId);
+        const imageMarkdown = readPath && !isError ? snapshotImageMarkdown(result, readPath) : void 0;
+        const text = imageMarkdown ? `${imageMarkdown}
+
+${toolResultToText(result)}` : toolResultToText(result);
         const snapshot = this.fileSnapshots.get(toolCallId);
         const initialDiffEmitted = this.fileMutationDiffsEmitted.has(toolCallId);
         let content;
@@ -2452,12 +2479,12 @@ function toToolTitle(toolName, args, cwd) {
     if (cwd) {
       try {
         const rel = relative(cwd, isAbsolute2(p) ? p : resolvePath(cwd, p));
-        display = rel.length < p.length ? rel : basename(p);
+        display = rel.length < p.length ? rel : basename2(p);
       } catch {
-        display = basename(p);
+        display = basename2(p);
       }
     } else {
-      display = basename(p);
+      display = basename2(p);
     }
     const verb = toolVerb(toolName);
     return `${verb} ${display}`;
@@ -2498,14 +2525,14 @@ function toToolKind(toolName) {
 // src/acp/pi-sessions.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync5, statSync, openSync, readSync, closeSync, existsSync as existsSync3 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join4, resolve as resolve2, isAbsolute as isAbsolute3 } from "path";
+import { join as join5, resolve as resolve2, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join4(homedir3(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join5(homedir3(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
-  const settingsPath = join4(agentDir, "settings.json");
+  const settingsPath = join5(agentDir, "settings.json");
   try {
     if (!existsSync3(settingsPath)) return null;
     const raw = readFileSync5(settingsPath, "utf8");
@@ -2520,7 +2547,7 @@ function readSessionDirFromSettings(agentDir) {
 }
 function getPiSessionsDir() {
   const agentDir = getPiAgentDir();
-  return readSessionDirFromSettings(agentDir) ?? join4(agentDir, "sessions");
+  return readSessionDirFromSettings(agentDir) ?? join5(agentDir, "sessions");
 }
 function walkJsonlFiles(dir, out) {
   let entries;
@@ -2531,7 +2558,7 @@ function walkJsonlFiles(dir, out) {
   }
   for (const e of entries) {
     const name = typeof e.name === "string" ? e.name : String(e.name);
-    const p = join4(dir, name);
+    const p = join5(dir, name);
     if (e.isDirectory()) walkJsonlFiles(p, out);
     else if (e.isFile() && name.endsWith(".jsonl")) out.push(p);
   }
@@ -2852,7 +2879,7 @@ ${r.text}`;
 // src/acp/pi-settings.ts
 import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { join as join5, resolve as resolve3 } from "path";
+import { join as join6, resolve as resolve3 } from "path";
 function isObject(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
@@ -2876,14 +2903,14 @@ function readJsonFile(path) {
   }
 }
 function getMergedSettings(cwd) {
-  const globalSettingsPath = join5(getAgentDir(), "settings.json");
+  const globalSettingsPath = join6(getAgentDir(), "settings.json");
   const projectSettingsPath = resolve3(cwd, ".pi", "settings.json");
   const global = readJsonFile(globalSettingsPath);
   const project = readJsonFile(projectSettingsPath);
   return deepMerge(global, project);
 }
 function getAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join5(homedir4(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join6(homedir4(), ".pi", "agent");
 }
 function getEnableSkillCommands(cwd) {
   const merged = getMergedSettings(cwd);
@@ -3044,14 +3071,14 @@ import { createServer } from "net";
 import {
   chmodSync,
   existsSync as existsSync5,
-  mkdirSync as mkdirSync2,
+  mkdirSync as mkdirSync3,
   readdirSync as readdirSync3,
   readFileSync as readFileSync7,
   renameSync,
   unlinkSync,
-  writeFileSync as writeFileSync2
+  writeFileSync as writeFileSync3
 } from "fs";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 function isLiveEnabled(env = process.env) {
   const v = env.PI_ACP_LIVE;
   if (v == null || v === "") return false;
@@ -3088,7 +3115,7 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
     if (pid === process.pid) continue;
     if (isPidAlive(pid)) continue;
     for (const ext of ["json", "sock"]) {
-      const path = join6(liveDir, `${pid}.${ext}`);
+      const path = join7(liveDir, `${pid}.${ext}`);
       try {
         if (existsSync5(path)) unlinkSync(path);
       } catch {
@@ -3109,8 +3136,8 @@ var LiveServer = class {
   constructor(opts = {}) {
     this.pid = opts.pid ?? process.pid;
     this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
-    this.sockPath = opts.liveDir ? join6(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
-    this.registryPath = opts.liveDir ? join6(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+    this.sockPath = opts.liveDir ? join7(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join7(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
   }
   get socketPath() {
     return this.sockPath;
@@ -3132,7 +3159,7 @@ var LiveServer = class {
   }
   async start() {
     if (this.disposed || this.started) return;
-    mkdirSync2(this.liveDir, { recursive: true, mode: 448 });
+    mkdirSync3(this.liveDir, { recursive: true, mode: 448 });
     try {
       chmodSync(this.liveDir, 448);
     } catch {
@@ -3208,7 +3235,7 @@ var LiveServer = class {
     const data = { pid: this.pid, sock: this.sockPath, sessions };
     const tmp = `${this.registryPath}.tmp`;
     try {
-      writeFileSync2(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
+      writeFileSync3(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
       renameSync(tmp, this.registryPath);
       chmodSync(this.registryPath, 384);
     } catch {
@@ -3349,10 +3376,10 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync6, readFileSync as readFileSync8, realpathSync as realpathSync2, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "fs";
-import { join as join7, dirname as dirname3, basename as basename2 } from "path";
+import { existsSync as existsSync6, readFileSync as readFileSync8, realpathSync as realpathSync2, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
+import { join as join8, dirname as dirname4, basename as basename3 } from "path";
 import { spawnSync as spawnSync2 } from "child_process";
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { fileURLToPath } from "url";
 function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
@@ -3854,7 +3881,7 @@ ${text}`;
     if (!options.length) return null;
     const res = await this.conn.requestPermission({
       sessionId,
-      toolCall: { toolCallId: `pi-auth-${randomUUID()}`, title, kind: "other", status: "pending" },
+      toolCall: { toolCallId: `pi-auth-${randomUUID2()}`, title, kind: "other", status: "pending" },
       options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
     });
     if (res.outcome.outcome !== "selected") return null;
@@ -4130,8 +4157,8 @@ ${JSON.stringify(stats, null, 2)}`;
             const piPath = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim();
             if (piPath) {
               const resolved = realpathSync2(piPath);
-              const pkgRoot = dirname3(dirname3(resolved));
-              const p = join7(pkgRoot, "CHANGELOG.md");
+              const pkgRoot = dirname4(dirname4(resolved));
+              const p = join8(pkgRoot, "CHANGELOG.md");
               if (existsSync6(p)) return p;
             }
           } catch {
@@ -4140,7 +4167,7 @@ ${JSON.stringify(stats, null, 2)}`;
             const npmRoot = spawnSync2("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join7(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              const p = join8(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
               if (existsSync6(p)) return p;
             }
           } catch {
@@ -4228,7 +4255,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join7(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join8(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -4417,9 +4444,9 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join7(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join8(params.cwd, ".pi-history-summary.md");
           try {
-            writeFileSync3(summaryPath, summary, "utf-8");
+            writeFileSync4(summaryPath, summary, "utf-8");
           } catch {
           }
           session.setStartupInfo(
@@ -4766,14 +4793,14 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join7(opts.cwd, "AGENTS.md");
+  const contextPath = join8(opts.cwd, "AGENTS.md");
   if (existsSync6(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
       for (const e of readdirSync4(root)) {
-        const p = join7(root, e);
+        const p = join8(root, e);
         try {
           const st = statSync2(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
@@ -4793,7 +4820,7 @@ function buildStartupInfo(opts) {
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join7(dir, name);
+          const p = join8(dir, name);
           let st;
           try {
             st = statSync2(p);
@@ -4810,30 +4837,30 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join7(getAgentDir(), "skills");
+  const globalSkillsDir = join8(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join7(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join8(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join7(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join8(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join7(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join8(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
     const prompts = readdirSync4(promptsDir).filter((f) => f.endsWith(".md"));
-    for (const f of prompts) promptsItems.push(`/${basename2(f, ".md")}`);
+    for (const f of prompts) promptsItems.push(`/${basename3(f, ".md")}`);
   } catch {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join7(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join8(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
     const exts = readdirSync4(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join7(extDir, f));
+    for (const f of exts) extItems.push(join8(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join7(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settingsPath = join8(process.env.HOME ?? "", ".pi", "agent", "settings.json");
     const settings = JSON.parse(readFileSync8(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
@@ -4857,14 +4884,14 @@ function buildStartupInfo(opts) {
 }
 function readNearestPackageJson(metaUrl) {
   try {
-    let dir = dirname3(fileURLToPath(metaUrl));
+    let dir = dirname4(fileURLToPath(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join7(dir, "package.json");
+      const p = join8(dir, "package.json");
       if (existsSync6(p)) {
         const json = JSON.parse(readFileSync8(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
-      dir = dirname3(dir);
+      dir = dirname4(dir);
     }
   } catch {
   }

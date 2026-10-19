@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toolResultToText } from '../../src/acp/translate/pi-tools.js'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { snapshotImageMarkdown, toolResultToText } from '../../src/acp/translate/pi-tools.js'
 
 test('toolResultToText: extracts text from content blocks', () => {
   const text = toolResultToText({
@@ -37,4 +40,23 @@ test('toolResultToText: extracts bash stdout/stderr from details', () => {
   assert.match(text, /stderr:/)
   assert.match(text, /warn/)
   assert.match(text, /exit code: 0/)
+})
+
+test('snapshotImageMarkdown: saves the image under a fresh path and links it to itself', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-test-'))
+  const result = {
+    content: [
+      { type: 'text', text: 'Read image file [image/png]' },
+      { type: 'image', data: Buffer.from('png-bytes').toString('base64'), mimeType: 'image/png' }
+    ]
+  }
+
+  const first = snapshotImageMarkdown(result, '~/Desktop/My shot #2 (é).PNG', dir)!
+  const second = snapshotImageMarkdown(result, '~/Desktop/My shot #2 (é).PNG', dir)!
+  const file = first.match(/^\[!\[My-shot-2-é-\.png\]\(<(.+)>\)\]\(<\1>\)$/)?.[1]
+
+  assert.ok(file?.startsWith(dir), first)
+  assert.equal(readFileSync(file!, 'utf8'), 'png-bytes')
+  assert.notEqual(first, second)
+  assert.equal(snapshotImageMarkdown({ content: [{ type: 'text', text: 'hi' }] }, 'a.png', dir), undefined)
 })

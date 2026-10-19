@@ -17,7 +17,7 @@ import { promisify } from 'node:util'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { snapshotImageMarkdown, toolResultToText } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -433,6 +433,7 @@ export class PiAcpSession {
   private fileMutationDiffsEmitted = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
+  private readToolCallPaths = new Map<string, string>()
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   private subagentToolCalls = new Map<string, string>()
@@ -730,6 +731,7 @@ export class PiAcpSession {
     this.fileMutationDiffsEmitted.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    this.readToolCallPaths.delete(toolCallId)
     // Clean up any subagent tool calls spawned under this parent
     const prefix = `${toolCallId}__`
     for (const [key, syntheticId] of this.subagentToolCalls) {
@@ -1393,6 +1395,7 @@ export class PiAcpSession {
           ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText)
           : undefined
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId)
+        if (toolName === 'read' && locations) this.readToolCallPaths.set(toolCallId, locations[0].path)
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
@@ -1519,7 +1522,9 @@ export class PiAcpSession {
           break
         }
 
-        const text = toolResultToText(result)
+        const readPath = this.readToolCallPaths.get(toolCallId)
+        const imageMarkdown = readPath && !isError ? snapshotImageMarkdown(result, readPath) : undefined
+        const text = imageMarkdown ? `${imageMarkdown}\n\n${toolResultToText(result)}` : toolResultToText(result)
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         const initialDiffEmitted = this.fileMutationDiffsEmitted.has(toolCallId)
