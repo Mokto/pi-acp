@@ -190,8 +190,8 @@ function terminalAuthLaunchSpec() {
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
 import { execFile } from "child_process";
-import { readFileSync as readFileSync4 } from "fs";
-import { basename as basename2, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
+import { basename as basename3, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
@@ -732,10 +732,210 @@ function planNarratedToolCallEmit(accumulated, alreadyEmitted) {
   return { emit, suppressFrom: null };
 }
 
-// src/acp/slash-commands.ts
-import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync3 } from "fs";
+// src/acp/translate/plan-usage.ts
+import { readdirSync, readFileSync as readFileSync4 } from "fs";
+import { basename as basename2, join as join5 } from "path";
+
+// src/acp/pi-settings.ts
+import { existsSync as existsSync2, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
 import { join as join4, resolve } from "path";
+function isObject(x) {
+  return Boolean(x) && typeof x === "object" && !Array.isArray(x);
+}
+function deepMerge(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const av = out[k];
+    if (isObject(av) && isObject(v)) out[k] = deepMerge(av, v);
+    else out[k] = v;
+  }
+  return out;
+}
+function readJsonFile(path) {
+  try {
+    if (!existsSync2(path)) return {};
+    const raw = readFileSync3(path, "utf-8");
+    const data = JSON.parse(raw);
+    return isObject(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+function getMergedSettings(cwd) {
+  const globalSettingsPath = join4(getAgentDir(), "settings.json");
+  const projectSettingsPath = resolve(cwd, ".pi", "settings.json");
+  const global = readJsonFile(globalSettingsPath);
+  const project = readJsonFile(projectSettingsPath);
+  return deepMerge(global, project);
+}
+function getAgentDir() {
+  return process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join4(homedir2(), ".pi", "agent");
+}
+function getEnableSkillCommands(cwd) {
+  const merged = getMergedSettings(cwd);
+  const direct = merged.enableSkillCommands;
+  if (typeof direct === "boolean") return direct;
+  const nested = isObject(merged.skills) ? merged.skills.enableSkillCommands : void 0;
+  if (typeof nested === "boolean") return nested;
+  return true;
+}
+function getEnableExtensionCommands(cwd) {
+  const merged = getMergedSettings(cwd);
+  const direct = merged.enableExtensionCommands;
+  if (typeof direct === "boolean") return direct;
+  return true;
+}
+function getEnabledModels(cwd) {
+  const merged = getMergedSettings(cwd);
+  const value = merged.enabledModels;
+  if (!Array.isArray(value)) return void 0;
+  const patterns = value.filter((v) => typeof v === "string" && v.trim().length > 0);
+  return patterns.length > 0 ? patterns : void 0;
+}
+function getQuietStartup(cwd) {
+  const merged = getMergedSettings(cwd);
+  const direct = merged.quietStartup;
+  if (typeof direct === "boolean") return direct;
+  const legacy = merged.quietStart;
+  if (typeof legacy === "boolean") return legacy;
+  return false;
+}
+
+// src/acp/translate/provider-name.ts
+var PROVIDER_NAMES = {
+  anthropic: "Anthropic",
+  cursor: "Cursor",
+  deepseek: "DeepSeek",
+  google: "Google",
+  openai: "OpenAI",
+  "openai-codex": "OpenAI Codex",
+  openrouter: "OpenRouter",
+  xai: "xAI"
+};
+function providerDisplayName(id) {
+  return Object.hasOwn(PROVIDER_NAMES, id) ? PROVIDER_NAMES[id] : id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+// src/acp/translate/plan-usage.ts
+var PLAN_USAGE_CONFIG_ID = "plan_usage";
+var AUTOMATIC = "automatic";
+var STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1e3;
+var PROVIDER_ORDER = ["anthropic", "openai-codex", "cursor"];
+var pickedRow = null;
+function pickPlanUsageRow(value) {
+  pickedRow = value === AUTOMATIC ? null : value;
+}
+function getPlanUsageDir() {
+  return join5(getAgentDir(), "plan-usage");
+}
+function isUsageWindow(w) {
+  const { label, utilization, resetsAt } = w ?? {};
+  return typeof label === "string" && typeof utilization === "number" && Number.isFinite(utilization) && typeof resetsAt === "string" && !Number.isNaN(Date.parse(resetsAt));
+}
+function readPlanUsage(dir = getPlanUsageDir()) {
+  let files;
+  try {
+    files = readdirSync(dir).filter((f) => /^[a-z0-9-]+\.json$/.test(f));
+  } catch {
+    return null;
+  }
+  const usage = {};
+  for (const file of files) {
+    try {
+      const parsed = JSON.parse(readFileSync4(join5(dir, file), "utf8"));
+      if (typeof parsed?.updatedAt !== "string" || !Array.isArray(parsed.windows)) continue;
+      usage[basename2(file, ".json")] = { updatedAt: parsed.updatedAt, windows: parsed.windows.filter(isUsageWindow) };
+    } catch {
+    }
+  }
+  return Object.keys(usage).length ? usage : null;
+}
+function formatPercent(fraction) {
+  const pct = fraction * 100;
+  const whole = Math.round(pct);
+  return whole === 0 && pct > 0 ? `${Number(pct.toFixed(2))}%` : `${whole}%`;
+}
+function formatTimeUntil(ms) {
+  const minutes = Math.ceil(ms / 6e4);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+function formatClock(date, now) {
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (date.toDateString() === now.toDateString()) return time;
+  return `${date.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${time}`;
+}
+function providerRank(id) {
+  const i = PROVIDER_ORDER.indexOf(id);
+  return i === -1 ? PROVIDER_ORDER.length : i;
+}
+function limitRows(usage, now) {
+  const seen = /* @__PURE__ */ new Set();
+  return Object.entries(usage).filter(([, p]) => now.getTime() - Date.parse(p.updatedAt) <= STALE_AFTER_MS).sort(([a], [b]) => providerRank(a) - providerRank(b) || a.localeCompare(b)).flatMap(
+    ([id, provider]) => provider.windows.flatMap((w) => {
+      const value = `${id}:${w.label}`;
+      if (seen.has(value)) return [];
+      seen.add(value);
+      const resetsAt = new Date(w.resetsAt);
+      const msLeft = resetsAt.getTime() - now.getTime();
+      const label = `${providerDisplayName(id)} / ${w.label}`;
+      const expired = msLeft <= 0;
+      return [
+        {
+          id,
+          value,
+          heading: expired ? "Updates after the next reply" : `Resets in ${formatTimeUntil(msLeft)}`,
+          name: `${label} \xB7 ${expired ? "reset" : formatPercent(w.utilization)}`,
+          description: `${expired ? "Reset at" : "Resets"} ${formatClock(resetsAt, now)}`,
+          utilization: expired ? -1 : w.utilization
+        }
+      ];
+    })
+  );
+}
+function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ */ new Date(), picked = pickedRow) {
+  if (!usage) return null;
+  const rows = limitRows(usage, now);
+  if (!rows.length) return null;
+  const closestToLimit = (candidates) => candidates.reduce((a, b) => b.utilization > a.utilization ? b : a);
+  const forModel = rows.filter((r) => r.id === currentProvider);
+  const automatic = closestToLimit(forModel.length ? forModel : rows);
+  const pickedLimit = rows.find((r) => r.value === picked);
+  const pickApplies = pickedLimit && (!forModel.length || pickedLimit.id === currentProvider);
+  return {
+    type: "select",
+    id: PLAN_USAGE_CONFIG_ID,
+    name: "Plan usage",
+    description: "Subscription limits per provider, for the whole account. The button follows the current model and shows the limit closest to running out, unless you pick one.",
+    currentValue: pickApplies ? pickedLimit.value : AUTOMATIC,
+    options: [
+      {
+        group: AUTOMATIC,
+        name: "Automatic",
+        options: [
+          {
+            value: AUTOMATIC,
+            name: automatic.name,
+            description: "Shows whichever of the current model's limits is closest to running out. Pick a limit below to always show that one instead."
+          }
+        ]
+      },
+      ...rows.map(({ value, heading, name, description }) => ({
+        group: value,
+        name: heading,
+        options: [{ value, name, description }]
+      }))
+    ]
+  };
+}
+
+// src/acp/slash-commands.ts
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { homedir as homedir3 } from "os";
+import { join as join6, resolve as resolve2 } from "path";
 function parseFrontmatter(content) {
   const frontmatter = {};
   if (!content.startsWith("---")) return { frontmatter, content };
@@ -751,11 +951,11 @@ function parseFrontmatter(content) {
 }
 function loadCommandsFromDir(dir, source, subdir = "") {
   const commands = [];
-  if (!existsSync2(dir)) return commands;
+  if (!existsSync3(dir)) return commands;
   try {
-    const entries = readdirSync(dir, { withFileTypes: true });
+    const entries = readdirSync2(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = join4(dir, entry.name);
+      const fullPath = join6(dir, entry.name);
       if (entry.isDirectory()) {
         const newSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
         commands.push(...loadCommandsFromDir(fullPath, source, newSubdir));
@@ -763,7 +963,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
       }
       if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
       try {
-        const rawContent = readFileSync3(fullPath, "utf-8");
+        const rawContent = readFileSync5(fullPath, "utf-8");
         const { frontmatter, content } = parseFrontmatter(rawContent);
         const name = entry.name.slice(0, -3);
         const sourceStr = source === "user" ? subdir ? `(user:${subdir})` : "(user)" : subdir ? `(project:${subdir})` : "(project)";
@@ -791,8 +991,8 @@ function loadCommandsFromDir(dir, source, subdir = "") {
 }
 function loadSlashCommands(cwd) {
   const commands = [];
-  const userDir = join4(homedir2(), ".pi", "agent", "prompts");
-  const projectDir = resolve(cwd, ".pi", "prompts");
+  const userDir = join6(homedir3(), ".pi", "agent", "prompts");
+  const projectDir = resolve2(cwd, ".pi", "prompts");
   commands.push(...loadCommandsFromDir(userDir, "user"));
   commands.push(...loadCommandsFromDir(projectDir, "project"));
   return commands;
@@ -1012,6 +1212,9 @@ var SessionManager = class {
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll() {
     for (const [id] of this.sessions) this.close(id);
+  }
+  pushConfigOptionUpdates() {
+    for (const s of this.sessions.values()) void s.pushConfigOptionUpdate();
   }
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId) {
@@ -1725,7 +1928,7 @@ ${message}` }
   // branch", forcing a refresh) for detached HEAD or any read failure.
   getCurrentBranchSync() {
     try {
-      const head = readFileSync4(resolvePath(this.cwd, ".git", "HEAD"), "utf8").trim();
+      const head = readFileSync6(resolvePath(this.cwd, ".git", "HEAD"), "utf8").trim();
       const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
       return match ? match[1] : head || null;
     } catch {
@@ -1745,7 +1948,7 @@ ${message}` }
     }
     this.prLinkCache = { url, branch, fetchedAt: Date.now() };
   }
-  // Best-effort refresh of the model/thinking selectors. A stale selector is
+  // Best-effort refresh of the config option selectors. A stale selector is
   // preferable to crashing the event loop, so failures are swallowed.
   async pushConfigOptionUpdate() {
     const refresh = this.refreshConfigOptions;
@@ -1934,7 +2137,7 @@ ${message}` }
           if (p) {
             try {
               const abs = isAbsolute2(p) ? p : resolvePath(this.cwd, p);
-              snapshotOldText = readFileSync4(abs, "utf8");
+              snapshotOldText = readFileSync6(abs, "utf8");
               this.fileSnapshots.set(toolCallId, { path: abs, oldText: snapshotOldText });
               if (toolName === "edit") {
                 for (const needle of getEditOldTexts(args)) {
@@ -2071,7 +2274,7 @@ ${toolResultToText(result)}` : toolResultToText(result);
         }
         if (!isError && !initialDiffEmitted && snapshot) {
           try {
-            const newText = readFileSync4(snapshot.path, "utf8");
+            const newText = readFileSync6(snapshot.path, "utf8");
             if (snapshot.oldText === null || newText !== snapshot.oldText) {
               hasStructuredDiff = true;
               content = [
@@ -2212,6 +2415,7 @@ ${formatAutoRetryMessage(ev)}` }
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
+          if (existsSync4(getPlanUsageDir())) void this.pushConfigOptionUpdate();
           await this.flushEmits();
           if (this.pendingTurnIsExtensionCommand) return;
           this.completeTurn(this.cancelRequested ? "cancelled" : turnError ? "error" : "end_turn");
@@ -2489,12 +2693,12 @@ function toToolTitle(toolName, args, cwd) {
     if (cwd) {
       try {
         const rel = relative(cwd, isAbsolute2(p) ? p : resolvePath(cwd, p));
-        display = rel.length < p.length ? rel : basename2(p);
+        display = rel.length < p.length ? rel : basename3(p);
       } catch {
-        display = basename2(p);
+        display = basename3(p);
       }
     } else {
-      display = basename2(p);
+      display = basename3(p);
     }
     const verb = toolVerb(toolName);
     return `${verb} ${display}`;
@@ -2533,42 +2737,42 @@ function toToolKind(toolName) {
 }
 
 // src/acp/pi-sessions.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync5, statSync, openSync, readSync, closeSync, existsSync as existsSync3 } from "fs";
-import { homedir as homedir3 } from "os";
-import { join as join5, resolve as resolve2, isAbsolute as isAbsolute3 } from "path";
+import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync5 } from "fs";
+import { homedir as homedir4 } from "os";
+import { join as join7, resolve as resolve3, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join5(homedir3(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join7(homedir4(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
-  const settingsPath = join5(agentDir, "settings.json");
+  const settingsPath = join7(agentDir, "settings.json");
   try {
-    if (!existsSync3(settingsPath)) return null;
-    const raw = readFileSync5(settingsPath, "utf8");
+    if (!existsSync5(settingsPath)) return null;
+    const raw = readFileSync7(settingsPath, "utf8");
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     const sessionDir = data.sessionDir;
     if (typeof sessionDir !== "string" || !sessionDir.trim()) return null;
-    return isAbsolute3(sessionDir) ? sessionDir : resolve2(agentDir, sessionDir);
+    return isAbsolute3(sessionDir) ? sessionDir : resolve3(agentDir, sessionDir);
   } catch {
     return null;
   }
 }
 function getPiSessionsDir() {
   const agentDir = getPiAgentDir();
-  return readSessionDirFromSettings(agentDir) ?? join5(agentDir, "sessions");
+  return readSessionDirFromSettings(agentDir) ?? join7(agentDir, "sessions");
 }
 function walkJsonlFiles(dir, out) {
   let entries;
   try {
-    entries = readdirSync2(dir, { withFileTypes: true, encoding: "utf8" });
+    entries = readdirSync3(dir, { withFileTypes: true, encoding: "utf8" });
   } catch {
     return;
   }
   for (const e of entries) {
     const name = typeof e.name === "string" ? e.name : String(e.name);
-    const p = join5(dir, name);
+    const p = join7(dir, name);
     if (e.isDirectory()) walkJsonlFiles(p, out);
     else if (e.isFile() && name.endsWith(".jsonl")) out.push(p);
   }
@@ -2711,7 +2915,7 @@ function pickUpdatedAtFromTail(tail) {
 }
 function pickFallbackTitleFromHead(path) {
   try {
-    const raw = readFileSync5(path, { encoding: "utf8" });
+    const raw = readFileSync7(path, { encoding: "utf8" });
     const lines = raw.split(/\r?\n/);
     for (const line0 of lines) {
       const line = line0.trim();
@@ -2800,8 +3004,10 @@ function normalizePiAssistantText(content) {
 // src/acp/translate/config-options.ts
 var MODEL_CONFIG_ID = "model";
 var THINKING_CONFIG_ID = "thinking";
-function buildSessionConfigOptions(models, thinking) {
+function buildSessionConfigOptions(models, thinking, usage = null) {
   const options = [];
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
+  if (usageOption) options.push(usageOption);
   if (models && models.availableModels.length) {
     options.push({
       type: "select",
@@ -2884,72 +3090,6 @@ ${r.text}`;
     }
   }
   return { message, images };
-}
-
-// src/acp/pi-settings.ts
-import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
-import { homedir as homedir4 } from "os";
-import { join as join6, resolve as resolve3 } from "path";
-function isObject(x) {
-  return Boolean(x) && typeof x === "object" && !Array.isArray(x);
-}
-function deepMerge(a, b) {
-  const out = { ...a };
-  for (const [k, v] of Object.entries(b)) {
-    const av = out[k];
-    if (isObject(av) && isObject(v)) out[k] = deepMerge(av, v);
-    else out[k] = v;
-  }
-  return out;
-}
-function readJsonFile(path) {
-  try {
-    if (!existsSync4(path)) return {};
-    const raw = readFileSync6(path, "utf-8");
-    const data = JSON.parse(raw);
-    return isObject(data) ? data : {};
-  } catch {
-    return {};
-  }
-}
-function getMergedSettings(cwd) {
-  const globalSettingsPath = join6(getAgentDir(), "settings.json");
-  const projectSettingsPath = resolve3(cwd, ".pi", "settings.json");
-  const global = readJsonFile(globalSettingsPath);
-  const project = readJsonFile(projectSettingsPath);
-  return deepMerge(global, project);
-}
-function getAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join6(homedir4(), ".pi", "agent");
-}
-function getEnableSkillCommands(cwd) {
-  const merged = getMergedSettings(cwd);
-  const direct = merged.enableSkillCommands;
-  if (typeof direct === "boolean") return direct;
-  const nested = isObject(merged.skills) ? merged.skills.enableSkillCommands : void 0;
-  if (typeof nested === "boolean") return nested;
-  return true;
-}
-function getEnableExtensionCommands(cwd) {
-  const merged = getMergedSettings(cwd);
-  const direct = merged.enableExtensionCommands;
-  if (typeof direct === "boolean") return direct;
-  return true;
-}
-function getEnabledModels(cwd) {
-  const merged = getMergedSettings(cwd);
-  const value = merged.enabledModels;
-  if (!Array.isArray(value)) return void 0;
-  const patterns = value.filter((v) => typeof v === "string" && v.trim().length > 0);
-  return patterns.length > 0 ? patterns : void 0;
-}
-function getQuietStartup(cwd) {
-  const merged = getMergedSettings(cwd);
-  const direct = merged.quietStartup;
-  if (typeof direct === "boolean") return direct;
-  const legacy = merged.quietStart;
-  if (typeof legacy === "boolean") return legacy;
-  return false;
 }
 
 // src/acp/pi-commands.ts
@@ -3080,15 +3220,15 @@ function resolveEnabledModelIds(models, patterns) {
 import { createServer } from "net";
 import {
   chmodSync,
-  existsSync as existsSync5,
+  existsSync as existsSync6,
   mkdirSync as mkdirSync3,
-  readdirSync as readdirSync3,
-  readFileSync as readFileSync7,
+  readdirSync as readdirSync4,
+  readFileSync as readFileSync8,
   renameSync,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
-import { join as join7 } from "path";
+import { join as join8 } from "path";
 function isLiveEnabled(env = process.env) {
   const v = env.PI_ACP_LIVE;
   if (v == null || v === "") return false;
@@ -3108,10 +3248,10 @@ function isObject2(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
 function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
-  if (!existsSync5(liveDir)) return;
+  if (!existsSync6(liveDir)) return;
   let names = [];
   try {
-    names = readdirSync3(liveDir);
+    names = readdirSync4(liveDir);
   } catch {
     return;
   }
@@ -3125,9 +3265,9 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
     if (pid === process.pid) continue;
     if (isPidAlive(pid)) continue;
     for (const ext of ["json", "sock"]) {
-      const path = join7(liveDir, `${pid}.${ext}`);
+      const path = join8(liveDir, `${pid}.${ext}`);
       try {
-        if (existsSync5(path)) unlinkSync(path);
+        if (existsSync6(path)) unlinkSync(path);
       } catch {
       }
     }
@@ -3146,8 +3286,8 @@ var LiveServer = class {
   constructor(opts = {}) {
     this.pid = opts.pid ?? process.pid;
     this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
-    this.sockPath = opts.liveDir ? join7(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
-    this.registryPath = opts.liveDir ? join7(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+    this.sockPath = opts.liveDir ? join8(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join8(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
   }
   get socketPath() {
     return this.sockPath;
@@ -3250,7 +3390,7 @@ var LiveServer = class {
       chmodSync(this.registryPath, 384);
     } catch {
       try {
-        if (existsSync5(tmp)) unlinkSync(tmp);
+        if (existsSync6(tmp)) unlinkSync(tmp);
       } catch {
       }
     }
@@ -3378,7 +3518,7 @@ var LiveServer = class {
   }
   unlinkIfExists(path) {
     try {
-      if (existsSync5(path)) unlinkSync(path);
+      if (existsSync6(path)) unlinkSync(path);
     } catch {
     }
   }
@@ -3386,8 +3526,8 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync6, readFileSync as readFileSync8, realpathSync as realpathSync2, readdirSync as readdirSync4, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
-import { join as join8, dirname as dirname4, basename as basename3 } from "path";
+import { existsSync as existsSync7, readFileSync as readFileSync9, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
+import { join as join9, dirname as dirname4, basename as basename4 } from "path";
 import { spawnSync as spawnSync2 } from "child_process";
 import { randomUUID as randomUUID2 } from "crypto";
 import { fileURLToPath } from "url";
@@ -3419,7 +3559,7 @@ var TimeoutError = class extends Error {
 function buildSessionSummaryFromFile(sessionFile) {
   let raw;
   try {
-    raw = readFileSync8(sessionFile, "utf-8");
+    raw = readFileSync9(sessionFile, "utf-8");
   } catch {
     return "";
   }
@@ -3530,7 +3670,18 @@ var PiAcpAgent = class {
   sessions;
   store = new SessionStore();
   live;
+  lastPlanUsage = "null";
+  planUsageTimer = setInterval(() => {
+    try {
+      const next = JSON.stringify(buildPlanUsageOption(readPlanUsage()));
+      if (next === this.lastPlanUsage) return;
+      this.lastPlanUsage = next;
+      this.sessions.pushConfigOptionUpdates();
+    } catch {
+    }
+  }, 6e4).unref();
   dispose() {
+    clearInterval(this.planUsageTimer);
     this.sessions.disposeAll();
     this.live?.dispose();
   }
@@ -3578,7 +3729,8 @@ var PiAcpAgent = class {
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     );
     this.store.upsert({
@@ -3610,7 +3762,7 @@ var PiAcpAgent = class {
     const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile : this.store.get(sessionId)?.sessionFile;
     if (typeof sessionFile === "string" && sessionFile.trim()) {
       try {
-        if (existsSync6(sessionFile)) unlinkSync2(sessionFile);
+        if (existsSync7(sessionFile)) unlinkSync2(sessionFile);
       } catch {
       }
     }
@@ -3709,7 +3861,8 @@ var PiAcpAgent = class {
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     );
     const quietStartup = getQuietStartup(params.cwd);
@@ -3724,7 +3877,7 @@ var PiAcpAgent = class {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -3919,7 +4072,10 @@ ${text}`;
       const thinking = await getThinkingState(fresh.proc);
       await this.conn.sessionUpdate({
         sessionId,
-        update: { sessionUpdate: "config_option_update", configOptions: buildSessionConfigOptions(models, thinking) }
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+        }
       });
     } catch (e) {
       say(
@@ -3963,7 +4119,10 @@ ${text}`;
       const thinking = await getThinkingState(fresh.proc);
       await this.conn.sessionUpdate({
         sessionId,
-        update: { sessionUpdate: "config_option_update", configOptions: buildSessionConfigOptions(models, thinking) }
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+        }
       });
     } catch (e) {
       return say(`Reload failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -4168,8 +4327,8 @@ ${JSON.stringify(stats, null, 2)}`;
             if (piPath) {
               const resolved = realpathSync2(piPath);
               const pkgRoot = dirname4(dirname4(resolved));
-              const p = join8(pkgRoot, "CHANGELOG.md");
-              if (existsSync6(p)) return p;
+              const p = join9(pkgRoot, "CHANGELOG.md");
+              if (existsSync7(p)) return p;
             }
           } catch {
           }
@@ -4177,8 +4336,8 @@ ${JSON.stringify(stats, null, 2)}`;
             const npmRoot = spawnSync2("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join8(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
-              if (existsSync6(p)) return p;
+              const p = join9(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              if (existsSync7(p)) return p;
             }
           } catch {
           }
@@ -4197,7 +4356,7 @@ ${JSON.stringify(stats, null, 2)}`;
         }
         let text = "";
         try {
-          text = readFileSync8(changelogPath, "utf-8");
+          text = readFileSync9(changelogPath, "utf-8");
         } catch (e) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -4223,7 +4382,7 @@ ${JSON.stringify(stats, null, 2)}`;
         const state = await session.proc.getState();
         const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
         const messageCount = typeof state?.messageCount === "number" ? state.messageCount : 0;
-        if (!sessionFile || messageCount === 0 || !existsSync6(sessionFile)) {
+        if (!sessionFile || messageCount === 0 || !existsSync7(sessionFile)) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -4237,7 +4396,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         try {
-          const raw = readFileSync8(sessionFile, "utf-8");
+          const raw = readFileSync9(sessionFile, "utf-8");
           if (raw.trim().length === 0) {
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
@@ -4265,7 +4424,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join8(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join9(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -4454,7 +4613,7 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join8(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join9(params.cwd, ".pi-history-summary.md");
           try {
             writeFileSync4(summaryPath, summary, "utf-8");
           } catch {
@@ -4558,13 +4717,14 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     );
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -4617,12 +4777,16 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         await session.setThinkingLevelWhenIdle(level);
         break;
       }
+      case PLAN_USAGE_CONFIG_ID:
+        pickPlanUsageRow(String(params.value));
+        this.sessions.pushConfigOptionUpdates();
+        break;
       default:
         throw RequestError3.invalidParams(`Unknown configId: ${params.configId}`);
     }
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
-    return { configOptions: buildSessionConfigOptions(models, thinking) };
+    return { configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()) };
   }
   async setSessionMode(params) {
     const session = await this.autoRestoreSession(params.sessionId);
@@ -4695,7 +4859,7 @@ async function getModelState(proc2, pre) {
     const name = String(m?.name ?? id);
     return {
       modelId: `${provider}/${id}`,
-      name: `${provider}/${name}`,
+      name: `${providerDisplayName(provider)} / ${name}`,
       description: null
     };
   }).filter(Boolean);
@@ -4803,14 +4967,14 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join8(opts.cwd, "AGENTS.md");
-  if (existsSync6(contextPath)) contextItems.push(contextPath);
+  const contextPath = join9(opts.cwd, "AGENTS.md");
+  if (existsSync7(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
-      for (const e of readdirSync4(root)) {
-        const p = join8(root, e);
+      for (const e of readdirSync5(root)) {
+        const p = join9(root, e);
         try {
           const st = statSync2(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
@@ -4824,13 +4988,13 @@ function buildStartupInfo(opts) {
         const dir = stack.pop();
         let entries = [];
         try {
-          entries = readdirSync4(dir);
+          entries = readdirSync5(dir);
         } catch {
           continue;
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join8(dir, name);
+          const p = join9(dir, name);
           let st;
           try {
             st = statSync2(p);
@@ -4847,31 +5011,31 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join8(getAgentDir(), "skills");
+  const globalSkillsDir = join9(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join8(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join9(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join8(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join9(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join8(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join9(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
-    const prompts = readdirSync4(promptsDir).filter((f) => f.endsWith(".md"));
-    for (const f of prompts) promptsItems.push(`/${basename3(f, ".md")}`);
+    const prompts = readdirSync5(promptsDir).filter((f) => f.endsWith(".md"));
+    for (const f of prompts) promptsItems.push(`/${basename4(f, ".md")}`);
   } catch {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join8(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join9(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
-    const exts = readdirSync4(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join8(extDir, f));
+    const exts = readdirSync5(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
+    for (const f of exts) extItems.push(join9(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join8(process.env.HOME ?? "", ".pi", "agent", "settings.json");
-    const settings = JSON.parse(readFileSync8(settingsPath, "utf-8"));
+    const settingsPath = join9(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settings = JSON.parse(readFileSync9(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
       const s = String(pkg2);
@@ -4896,9 +5060,9 @@ function readNearestPackageJson(metaUrl) {
   try {
     let dir = dirname4(fileURLToPath(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join8(dir, "package.json");
-      if (existsSync6(p)) {
-        const json = JSON.parse(readFileSync8(p, "utf-8"));
+      const p = join9(dir, "package.json");
+      if (existsSync7(p)) {
+        const json = JSON.parse(readFileSync9(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
       dir = dirname4(dir);
