@@ -11,7 +11,7 @@ import type {
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { execFile } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
@@ -30,6 +30,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
+import { getPlanUsageDir } from './translate/plan-usage.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 
@@ -211,6 +212,10 @@ export class SessionManager {
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll(): void {
     for (const [id] of this.sessions) this.close(id)
+  }
+
+  pushConfigOptionUpdates(): void {
+    for (const s of this.sessions.values()) void s.pushConfigOptionUpdate()
   }
 
   /** Get a registered session if it exists (no throw). */
@@ -1142,9 +1147,9 @@ export class PiAcpSession {
     this.prLinkCache = { url, branch, fetchedAt: Date.now() }
   }
 
-  // Best-effort refresh of the model/thinking selectors. A stale selector is
+  // Best-effort refresh of the config option selectors. A stale selector is
   // preferable to crashing the event loop, so failures are swallowed.
-  private async pushConfigOptionUpdate(): Promise<void> {
+  async pushConfigOptionUpdate(): Promise<void> {
     const refresh = this.refreshConfigOptions
     if (!refresh) return
     try {
@@ -1726,6 +1731,7 @@ export class PiAcpSession {
         void (async () => {
           await this.flushEmits()
           await this.maybeEmitTokenStats()
+          if (existsSync(getPlanUsageDir())) void this.pushConfigOptionUpdate()
           await this.flushEmits()
           // A nested turn inside a still-running extension command (see
           // pendingTurnIsExtensionCommand above) — its own agent_end, not the command's.

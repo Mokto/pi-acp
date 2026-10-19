@@ -1,4 +1,5 @@
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import { buildPlanUsageOption, type PlanUsage } from './plan-usage.js'
 
 // Config option ids the adapter advertises. These double as the `configId` the
 // client sends back via `session/set_config_option`.
@@ -23,9 +24,13 @@ export type ConfigThinkingState = {
 
 export function buildSessionConfigOptions(
   models: ConfigModelState,
-  thinking: ConfigThinkingState
+  thinking: ConfigThinkingState,
+  usage: PlanUsage | null = null
 ): SessionConfigOption[] {
   const options: SessionConfigOption[] = []
+
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split('/')[0] ?? null)
+  if (usageOption) options.push(usageOption)
 
   if (models && models.availableModels.length) {
     options.push({

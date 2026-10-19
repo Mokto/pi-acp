@@ -52,6 +52,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { buildSessionConfigOptions, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import { buildPlanUsageOption, PLAN_USAGE_CONFIG_ID, pickPlanUsageRow, readPlanUsage } from './translate/plan-usage.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { providerDisplayName } from './translate/provider-name.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
@@ -246,8 +247,20 @@ export class PiAcpAgent implements ACPAgent {
   private readonly sessions: SessionManager
   private readonly store = new SessionStore()
   private readonly live: LiveServer | null
+  private lastPlanUsage = 'null'
+  private readonly planUsageTimer = setInterval(() => {
+    try {
+      const next = JSON.stringify(buildPlanUsageOption(readPlanUsage()))
+      if (next === this.lastPlanUsage) return
+      this.lastPlanUsage = next
+      this.sessions.pushConfigOptionUpdates()
+    } catch {
+      // ignore
+    }
+  }, 60_000).unref()
 
   dispose(): void {
+    clearInterval(this.planUsageTimer)
     this.sessions.disposeAll()
     this.live?.dispose()
   }
@@ -300,7 +313,8 @@ export class PiAcpAgent implements ACPAgent {
     session.setConfigOptionsRefresher(async () =>
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     )
 
@@ -474,7 +488,8 @@ export class PiAcpAgent implements ACPAgent {
     session.setConfigOptionsRefresher(async () =>
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     )
 
@@ -498,7 +513,7 @@ export class PiAcpAgent implements ACPAgent {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -755,7 +770,10 @@ export class PiAcpAgent implements ACPAgent {
       const thinking = await getThinkingState(fresh.proc)
       await this.conn.sessionUpdate({
         sessionId,
-        update: { sessionUpdate: 'config_option_update', configOptions: buildSessionConfigOptions(models, thinking) }
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+        }
       })
     } catch (e) {
       say(
@@ -805,7 +823,10 @@ export class PiAcpAgent implements ACPAgent {
       const thinking = await getThinkingState(fresh.proc)
       await this.conn.sessionUpdate({
         sessionId,
-        update: { sessionUpdate: 'config_option_update', configOptions: buildSessionConfigOptions(models, thinking) }
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+        }
       })
     } catch (e) {
       return say(`Reload failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -1530,14 +1551,15 @@ export class PiAcpAgent implements ACPAgent {
     session.setConfigOptionsRefresher(async () =>
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
-        await getThinkingState(session.proc)
+        await getThinkingState(session.proc),
+        readPlanUsage()
       )
     )
 
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -1600,13 +1622,17 @@ export class PiAcpAgent implements ACPAgent {
         await session.setThinkingLevelWhenIdle(level)
         break
       }
+      case PLAN_USAGE_CONFIG_ID:
+        pickPlanUsageRow(String(params.value))
+        this.sessions.pushConfigOptionUpdates()
+        break
       default:
         throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
     }
 
     const models = await getModelState(session.proc, { cwd: session.cwd })
     const thinking = await getThinkingState(session.proc)
-    return { configOptions: buildSessionConfigOptions(models, thinking) }
+    return { configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()) }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {

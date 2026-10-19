@@ -10,5 +10,5 @@ const PROVIDER_NAMES: Record<string, string> = {
 }
 
 export function providerDisplayName(id: string): string {
-  return PROVIDER_NAMES[id] ?? id.charAt(0).toUpperCase() + id.slice(1)
+  return Object.hasOwn(PROVIDER_NAMES, id) ? PROVIDER_NAMES[id]! : id.charAt(0).toUpperCase() + id.slice(1)
 }
