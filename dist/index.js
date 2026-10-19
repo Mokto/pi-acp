@@ -1380,6 +1380,7 @@ var PiAcpSession = class _PiAcpSession {
   // accounting where intermediate tool-call turns report input=0, making the
   // last assistant message's totalTokens look tiny.
   peakContextTokens = 0;
+  extensionStatuses = /* @__PURE__ */ new Map();
   // Cached `gh pr view` lookup for the footer PR link. Gated on sessionStartBranch
   // (see getPrLinkCached): a session that never changes branch never shells out to
   // gh, so a branch with a pre-existing PR from earlier work doesn't get reported
@@ -2008,6 +2009,7 @@ ${message}` }
       parts.push(prNumber ? `[#${prNumber}](${prLink})` : `[PR](${prLink})`);
     }
     parts.push((/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }));
+    parts.push(...this.extensionStatuses.values());
     if (parts.length)
       this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `
 
@@ -2462,6 +2464,14 @@ ${formatAutoRetryMessage(ev)}` }
         }
       });
       await this.proc.sendExtensionUiResponse({ id, cancelled: true });
+      return;
+    }
+    if (method === "setStatus") {
+      const key = stringProp(ev, "statusKey");
+      if (!key) return;
+      const text = stringProp(ev, "statusText");
+      if (text) this.extensionStatuses.set(key, text);
+      else this.extensionStatuses.delete(key);
       return;
     }
     if (method === "notify") {
