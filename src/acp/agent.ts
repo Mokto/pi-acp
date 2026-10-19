@@ -53,6 +53,7 @@ import {
 } from './translate/bash.js'
 import { buildSessionConfigOptions, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { promptToPiMessage } from './translate/prompt.js'
+import { providerDisplayName } from './translate/provider-name.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import {
   getAgentDir,
@@ -1727,7 +1728,7 @@ async function getModelState(
       const name = String(m?.name ?? id)
       return {
         modelId: `${provider}/${id}`,
-        name: `${provider}/${name}`,
+        name: `${providerDisplayName(provider)} / ${name}`,
         description: null
       } satisfies ModelInfo
     })
