@@ -820,7 +820,8 @@ function providerDisplayName(id) {
 // src/acp/translate/plan-usage.ts
 var PLAN_USAGE_CONFIG_ID = "plan_usage";
 var AUTOMATIC = "automatic";
-var STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1e3;
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var STALE_AFTER_MS = 7 * DAY_MS;
 var PROVIDER_ORDER = ["anthropic", "openai-codex", "cursor"];
 var pickedRow = null;
 function pickPlanUsageRow(value) {
@@ -864,13 +865,19 @@ function formatTimeUntil(ms) {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 function formatClock(date, now) {
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-  if (date.toDateString() === now.toDateString()) return time;
-  return `${date.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${time}`;
+  const time = { hour: "2-digit", minute: "2-digit", hour12: false };
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], time);
+  return date.toLocaleString([], { weekday: "short", day: "numeric", month: "short", ...time });
 }
 function providerRank(id) {
   const i = PROVIDER_ORDER.indexOf(id);
   return i === -1 ? PROVIDER_ORDER.length : i;
+}
+function headingFor(msLeft, resetsAt, now) {
+  if (msLeft <= 0) return "Updates after the next reply";
+  const countdown = `Resets in ${formatTimeUntil(msLeft)}`;
+  if (msLeft < DAY_MS) return countdown;
+  return `${countdown} \xB7 ${formatClock(resetsAt, now)}`;
 }
 function limitRows(usage, now) {
   const seen = /* @__PURE__ */ new Set();
@@ -881,14 +888,15 @@ function limitRows(usage, now) {
       seen.add(value);
       const resetsAt = new Date(w.resetsAt);
       const msLeft = resetsAt.getTime() - now.getTime();
-      const label = `${providerDisplayName(id)} / ${w.label}`;
       const expired = msLeft <= 0;
+      const shortName = `${w.label} \xB7 ${expired ? "reset" : formatPercent(w.utilization)}`;
       return [
         {
           id,
           value,
-          heading: expired ? "Updates after the next reply" : `Resets in ${formatTimeUntil(msLeft)}`,
-          name: `${label} \xB7 ${expired ? "reset" : formatPercent(w.utilization)}`,
+          heading: headingFor(msLeft, resetsAt, now),
+          name: `${providerDisplayName(id)} / ${shortName}`,
+          shortName,
           description: `${expired ? "Reset at" : "Resets"} ${formatClock(resetsAt, now)}`,
           utilization: expired ? -1 : w.utilization
         }
@@ -918,8 +926,8 @@ function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ 
         options: [
           {
             value: AUTOMATIC,
-            name: automatic.name,
-            description: "Shows whichever of the current model's limits is closest to running out. Pick a limit below to always show that one instead."
+            name: automatic.id === currentProvider ? automatic.shortName : automatic.name,
+            description: `${automatic.name} \xB7 ${automatic.description}. Shows whichever of the current model's limits is closest to running out. Pick a limit below to always show that one instead.`
           }
         ]
       },

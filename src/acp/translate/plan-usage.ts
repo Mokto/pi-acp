@@ -7,7 +7,8 @@ import { providerDisplayName } from './provider-name.js'
 export const PLAN_USAGE_CONFIG_ID = 'plan_usage'
 const AUTOMATIC = 'automatic'
 
-const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+const STALE_AFTER_MS = 7 * DAY_MS
 const PROVIDER_ORDER = ['anthropic', 'openai-codex', 'cursor']
 
 export type UsageWindow = { label: string; utilization: number; resetsAt: string }
@@ -78,9 +79,9 @@ function formatTimeUntil(ms: number): string {
 }
 
 function formatClock(date: Date, now: Date): string {
-  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-  if (date.toDateString() === now.toDateString()) return time
-  return `${date.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`
+  const time = { hour: '2-digit', minute: '2-digit', hour12: false } as const
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], time)
+  return date.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', ...time })
 }
 
 function providerRank(id: string): number {
@@ -88,7 +89,22 @@ function providerRank(id: string): number {
   return i === -1 ? PROVIDER_ORDER.length : i
 }
 
-type LimitRow = { id: string; value: string; heading: string; name: string; description: string; utilization: number }
+type LimitRow = {
+  id: string
+  value: string
+  heading: string
+  name: string
+  shortName: string
+  description: string
+  utilization: number
+}
+
+function headingFor(msLeft: number, resetsAt: Date, now: Date): string {
+  if (msLeft <= 0) return 'Updates after the next reply'
+  const countdown = `Resets in ${formatTimeUntil(msLeft)}`
+  if (msLeft < DAY_MS) return countdown
+  return `${countdown} · ${formatClock(resetsAt, now)}`
+}
 
 function limitRows(usage: PlanUsage, now: Date): LimitRow[] {
   const seen = new Set<string>()
@@ -102,14 +118,15 @@ function limitRows(usage: PlanUsage, now: Date): LimitRow[] {
         seen.add(value)
         const resetsAt = new Date(w.resetsAt)
         const msLeft = resetsAt.getTime() - now.getTime()
-        const label = `${providerDisplayName(id)} / ${w.label}`
         const expired = msLeft <= 0
+        const shortName = `${w.label} · ${expired ? 'reset' : formatPercent(w.utilization)}`
         return [
           {
             id,
             value,
-            heading: expired ? 'Updates after the next reply' : `Resets in ${formatTimeUntil(msLeft)}`,
-            name: `${label} · ${expired ? 'reset' : formatPercent(w.utilization)}`,
+            heading: headingFor(msLeft, resetsAt, now),
+            name: `${providerDisplayName(id)} / ${shortName}`,
+            shortName,
             description: `${expired ? 'Reset at' : 'Resets'} ${formatClock(resetsAt, now)}`,
             utilization: expired ? -1 : w.utilization
           }
@@ -150,9 +167,8 @@ export function buildPlanUsageOption(
         options: [
           {
             value: AUTOMATIC,
-            name: automatic.name,
-            description:
-              "Shows whichever of the current model's limits is closest to running out. Pick a limit below to always show that one instead."
+            name: automatic.id === currentProvider ? automatic.shortName : automatic.name,
+            description: `${automatic.name} · ${automatic.description}. Shows whichever of the current model's limits is closest to running out. Pick a limit below to always show that one instead.`
           }
         ]
       },
