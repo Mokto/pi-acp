@@ -40,12 +40,24 @@ function select(o: SessionConfigOption | null): Select {
 }
 const groups = (o: Select) => o.options as Group[]
 const limits = (o: Select) => groups(o).slice(1)
+const clock = (iso: string) =>
+  new Date(iso).toLocaleString([], {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  })
+const weekdayTime = (iso: string) =>
+  new Date(iso).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+const monthDay = (iso: string) => new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' })
 const shown = (o: Select) =>
   groups(o)
     .flatMap(g => g.options)
     .find(x => x.value === o.currentValue)?.name
 
-test('plan usage: providers in a fixed order, one row each under a "resets in" heading', () => {
+test('plan usage: providers in a fixed order, one row each under a "resets in" heading, dated when over a day away', () => {
   assert.deepEqual(limits(select(buildPlanUsageOption(usage, 'anthropic', now, null))), [
     {
       group: 'anthropic:5-hour',
@@ -54,48 +66,54 @@ test('plan usage: providers in a fixed order, one row each under a "resets in" h
     },
     {
       group: 'anthropic:Weekly',
-      name: 'Resets in 2d 4h',
+      name: `Resets in 2d 4h · ${weekdayTime('2026-10-21T19:00:00Z')}`,
       options: [
         {
           value: 'anthropic:Weekly',
           name: 'Anthropic / Weekly · 78%',
-          description: `Resets ${new Date('2026-10-21T19:00:00Z').toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} 19:00`
+          description: `Resets ${clock('2026-10-21T19:00:00Z')}`
         }
       ]
     },
     {
       group: 'cursor:Monthly',
-      name: 'Resets in 20d 22h',
+      name: `Resets in 20d · ${monthDay('2026-11-09T13:19:00Z')}`,
       options: [
         {
           value: 'cursor:Monthly',
           name: 'Cursor / Monthly · 5%',
-          description: `Resets ${new Date('2026-11-09T13:19:00Z').toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} 13:19`
+          description: `Resets ${clock('2026-11-09T13:19:00Z')}`
         }
       ]
     }
   ])
 })
 
-test('plan usage: Automatic comes first, mirrors the limit closest to running out, and explains itself', () => {
+test('plan usage: Automatic comes first, mirrors the limit closest to running out without repeating the model provider, and explains itself', () => {
   const o = select(buildPlanUsageOption(usage, 'anthropic', now, null))
   const [automatic] = groups(o)
   assert.equal(automatic?.name, 'Automatic')
   assert.equal(automatic?.options[0]?.value, 'automatic')
+  assert.equal(
+    automatic?.options[0]?.description.startsWith(
+      `Anthropic / Weekly · 78% · Resets ${clock('2026-10-21T19:00:00Z')}. `
+    ),
+    true
+  )
   assert.match(automatic?.options[0]?.description ?? '', /closest to running out/)
   assert.equal(o.currentValue, 'automatic')
-  assert.equal(shown(o), 'Anthropic / Weekly · 78%')
+  assert.equal(shown(o), 'Weekly · 78%')
 })
 
 test("plan usage: the button follows the current model; a pick chooses among that provider's limits", () => {
-  assert.equal(shown(select(buildPlanUsageOption(usage, 'cursor', now, null))), 'Cursor / Monthly · 5%')
+  assert.equal(shown(select(buildPlanUsageOption(usage, 'cursor', now, null))), 'Monthly · 5%')
   assert.equal(shown(select(buildPlanUsageOption(usage, 'deepseek', now, null))), 'Anthropic / Weekly · 78%')
   const picked = select(buildPlanUsageOption(usage, 'anthropic', now, 'anthropic:5-hour'))
   assert.equal(picked.currentValue, 'anthropic:5-hour')
   assert.equal(shown(picked), 'Anthropic / 5-hour · 30%')
   const otherProvider = select(buildPlanUsageOption(usage, 'cursor', now, 'anthropic:5-hour'))
   assert.equal(otherProvider.currentValue, 'automatic')
-  assert.equal(shown(otherProvider), 'Cursor / Monthly · 5%')
+  assert.equal(shown(otherProvider), 'Monthly · 5%')
   assert.equal(
     shown(select(buildPlanUsageOption(usage, 'deepseek', now, 'anthropic:5-hour'))),
     'Anthropic / 5-hour · 30%'
@@ -127,10 +145,22 @@ test('plan usage: under an hour shows minutes; tiny nonzero usage does not read 
   assert.equal(limits(o)[0]?.options[0]?.name, 'Anthropic / 5-hour · 0.4%')
 })
 
+test('plan usage: a reset on the same weekday a week out shows the date, since the weekday alone would read as today', () => {
+  const o = select(
+    buildPlanUsageOption(
+      { anthropic: { updatedAt, windows: [{ label: 'Weekly', utilization: 0.1, resetsAt: '2026-10-26T14:00:00Z' }] } },
+      null,
+      now,
+      null
+    )
+  )
+  assert.equal(limits(o)[0]?.name, `Resets in 6d · ${monthDay('2026-10-26T14:00:00Z')}`)
+})
+
 test('plan usage: a window whose reset has passed shows as reset, not as a stale number', () => {
   const o = select(buildPlanUsageOption(usage, 'anthropic', new Date('2026-10-19T20:00:00Z'), null))
   assert.equal(limits(o)[0]?.options[0]?.name, 'Anthropic / 5-hour · reset')
-  assert.equal(shown(o), 'Anthropic / Weekly · 78%')
+  assert.equal(shown(o), 'Weekly · 78%')
 })
 
 test('plan usage: a provider not updated for a week drops out; nothing left hides the option', () => {
