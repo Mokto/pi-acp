@@ -84,7 +84,9 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 
 This fork ships as a **GitHub release with a prebuilt tarball asset**, not on npm — the `pi-acp` npm name belongs to upstream (`deepstereo`/svkozak). Users install with `npm i -g <release-asset-url>` (see the README "Install this fork's release" section).
 
-To cut a release for version `X.Y.Z`:
+Releases are automated: every push to `main` runs `.github/workflows/release.yml`, which runs the gate, bumps the **patch** version, rebuilds `dist/`, commits `release: vX.Y.Z`, tags, pushes, creates the GitHub release with both tarballs, and verifies the install. Do not bump the version or commit `release:` commits by hand. For a minor/major bump, run `npm version <minor|major> --no-git-tag-version` in your PR; the workflow then publishes `X.Y.1` / `X.0.1` on merge.
+
+Manual fallback (if the workflow is broken), for version `X.Y.Z`:
 
 1. Clean working tree on `main`. Run the gate: `npm run typecheck && npm run lint && npm run test` — all must pass.
 2. Bump the version without a git tag: `npm version <patch|minor|major> --no-git-tag-version`.
@@ -115,8 +117,8 @@ To cut a release for version `X.Y.Z`:
 
 - **Do NOT advertise `npm i -g github:Mokto/pi-acp#vX.Y.Z`** — it is broken. npm symlinks global git-dependency installs into a transient `_cacache/tmp` clone that is then deleted, leaving the `bin` dangling with no `dist`. The release-asset tarball avoids this.
 - **`dist/` is committed on purpose** (tracked in git, but excluded from prettier/lint) so the repo is self-contained and `npm pack` always ships a current build. There is intentionally **no `prepack`/`prepare` script**: those run a build during git/pack/install flows where devDependencies are unavailable (`tsup: command not found`) and break installs. `prepublishOnly` still builds before any future `npm publish`.
-- **Always `npm run build` before committing/packing** so committed `dist/` never drifts from `src/`.
-- **`github-release.yml` does not auto-run on a freshly forked repo** until Actions is enabled once via the GitHub UI (repo → Actions tab → enable). Until then, create releases manually with `gh release create` as above. `npm-publish.yml` targets the npm path and would 403 on this fork (the npm name isn't ours).
+- **Always `npm run build` before committing/packing** so committed `dist/` never drifts from `src/`. The release workflow rebuilds `dist/` in CI, so PRs don't strictly need to commit it.
+- **The release workflow can't loop**: its own push uses `GITHUB_TOKEN`, which never triggers workflows, and it also skips `release:` head commits. It pushes directly to `main`, so adding branch protection to `main` will break it unless the bot is allowed to bypass. `npm-publish.yml` targets the npm path and would 403 on this fork (the npm name isn't ours).
 
 ## Client information
 

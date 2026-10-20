@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Pushes made with GITHUB_TOKEN don't trigger workflows, but guard against a manual "release:" commit too.
+    if: ${{ !startsWith(github.event.head_commit.message, 'release:') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+
+      - name: Bump version, build, commit and tag
+        id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          VERSION=$(npm version patch --no-git-tag-version | sed 's/^v//')
+          npm run build
+          git add package.json package-lock.json dist
+          git commit -m "release: v${VERSION}"
+          git tag -a "v${VERSION}" -m "pi-acp v${VERSION}"
+          git push --atomic origin HEAD:main "v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          npm pack
+          cp "pi-acp-${VERSION}.tgz" pi-acp.tgz
+          gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes \
+            "pi-acp-${VERSION}.tgz" pi-acp.tgz
+
+      - name: Verify published install
+        run: |
+          PFX=$(mktemp -d)
+          npm i -g --prefix "$PFX" "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${{ steps.bump.outputs.version }}/pi-acp.tgz"
+          printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n' \
+            | timeout 20 node "$PFX/bin/pi-acp" | tee out.json
+          grep -q '"result"' out.json
