@@ -49,6 +49,9 @@ const clock = (iso: string) =>
     minute: '2-digit',
     hour12: false
   })
+const weekdayTime = (iso: string) =>
+  new Date(iso).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+const monthDay = (iso: string) => new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' })
 const shown = (o: Select) =>
   groups(o)
     .flatMap(g => g.options)
@@ -63,7 +66,7 @@ test('plan usage: providers in a fixed order, one row each under a "resets in" h
     },
     {
       group: 'anthropic:Weekly',
-      name: `Resets in 2d 4h · ${clock('2026-10-21T19:00:00Z')}`,
+      name: `Resets in 2d 4h · ${weekdayTime('2026-10-21T19:00:00Z')}`,
       options: [
         {
           value: 'anthropic:Weekly',
@@ -74,7 +77,7 @@ test('plan usage: providers in a fixed order, one row each under a "resets in" h
     },
     {
       group: 'cursor:Monthly',
-      name: `Resets in 20d 22h · ${clock('2026-11-09T13:19:00Z')}`,
+      name: `Resets in 20d · ${monthDay('2026-11-09T13:19:00Z')}`,
       options: [
         {
           value: 'cursor:Monthly',
@@ -140,6 +143,18 @@ test('plan usage: under an hour shows minutes; tiny nonzero usage does not read 
   )
   assert.equal(limits(o)[0]?.name, 'Resets in 8m')
   assert.equal(limits(o)[0]?.options[0]?.name, 'Anthropic / 5-hour · 0.4%')
+})
+
+test('plan usage: a reset on the same weekday a week out shows the date, since the weekday alone would read as today', () => {
+  const o = select(
+    buildPlanUsageOption(
+      { anthropic: { updatedAt, windows: [{ label: 'Weekly', utilization: 0.1, resetsAt: '2026-10-26T14:00:00Z' }] } },
+      null,
+      now,
+      null
+    )
+  )
+  assert.equal(limits(o)[0]?.name, `Resets in 6d · ${monthDay('2026-10-26T14:00:00Z')}`)
 })
 
 test('plan usage: a window whose reset has passed shows as reset, not as a stale number', () => {

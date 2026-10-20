@@ -864,10 +864,10 @@ function formatTimeUntil(ms) {
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
+var TIME = { hour: "2-digit", minute: "2-digit", hour12: false };
 function formatClock(date, now) {
-  const time = { hour: "2-digit", minute: "2-digit", hour12: false };
-  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], time);
-  return date.toLocaleString([], { weekday: "short", day: "numeric", month: "short", ...time });
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], TIME);
+  return date.toLocaleString([], { weekday: "short", day: "numeric", month: "short", ...TIME });
 }
 function providerRank(id) {
   const i = PROVIDER_ORDER.indexOf(id);
@@ -877,7 +877,9 @@ function headingFor(msLeft, resetsAt, now) {
   if (msLeft <= 0) return "Updates after the next reply";
   const countdown = `Resets in ${formatTimeUntil(msLeft)}`;
   if (msLeft < DAY_MS) return countdown;
-  return `${countdown} \xB7 ${formatClock(resetsAt, now)}`;
+  if (msLeft < 7 * DAY_MS && resetsAt.getDay() !== now.getDay())
+    return `${countdown} \xB7 ${resetsAt.toLocaleString([], { weekday: "short", ...TIME })}`;
+  return `Resets in ${Math.floor(msLeft / DAY_MS)}d \xB7 ${resetsAt.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 function limitRows(usage, now) {
   const seen = /* @__PURE__ */ new Set();
