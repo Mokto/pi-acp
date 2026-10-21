@@ -10,6 +10,7 @@ const TEXT = 'cookies.\u2028Read our policy\u2029end'
 // Answers every command; for get_messages it first emits an event, then writes the
 // response in two pieces split inside the 3-byte U+2028, so it reaches us as two chunks.
 const FAKE_PI = `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('1.3.0'); process.exit(0) }
 const TEXT = ${JSON.stringify(TEXT)}
 let buf = ''
 process.stdin.setEncoding('utf8')
@@ -33,14 +34,19 @@ process.stdin.on('data', async chunk => {
 })
 `
 
+function writeFakePi(dir: string, source: string): string {
+  const path = join(dir, 'fake-pi.mjs')
+  writeFileSync(path, source)
+  chmodSync(path, 0o755)
+  return path
+}
+
 test(
   'PiRpcProcess: keeps records containing U+2028/U+2029 whole instead of splitting them like readline',
   { timeout: 5_000 },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-acp-framing-'))
-    const fakePi = join(dir, 'fake-pi.mjs')
-    writeFileSync(fakePi, FAKE_PI)
-    chmodSync(fakePi, 0o755)
+    const fakePi = writeFakePi(dir, FAKE_PI)
 
     const proc = await PiRpcProcess.spawn({ cwd: dir, piCommand: fakePi })
     try {
@@ -57,3 +63,17 @@ test(
     }
   }
 )
+
+test('PiRpcProcess: refuses a pi older than 0.80.4 instead of starting sessions whose turns never finish', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-old-pi-'))
+  const fakePi = writeFakePi(dir, `#!/usr/bin/env node\nconsole.log('0.79.9')\n`)
+  try {
+    await assert.rejects(
+      () => PiRpcProcess.spawn({ cwd: dir, piCommand: fakePi }),
+      (e: Error) =>
+        e.name === 'PiRpcSpawnError' && e.message.includes('pi v0.79.9 is too old') && e.message.includes('0.80.4')
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

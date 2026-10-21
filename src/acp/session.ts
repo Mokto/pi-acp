@@ -380,8 +380,8 @@ export class PiAcpSession {
   // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
   // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
   private inAgentLoop = false
-  // Error from the latest `agent_end`, reported on `agent_settled`. A retry's own
-  // `agent_end` overwrites it, so an attempt pi recovered from doesn't fail the turn.
+  // Error from the current run's `agent_end`, reported on `agent_settled`. Cleared on
+  // `agent_start`, so a failed attempt that pi retried doesn't fail the turn.
   private agentRunError = ''
 
   // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
@@ -1671,6 +1671,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
+        this.agentRunError = ''
         this.resetNarratedToolCallGate()
         break
       }

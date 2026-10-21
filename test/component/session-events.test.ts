@@ -990,6 +990,32 @@ test('PiAcpSession: finishes the turn on agent_settled even when the agent_end r
   assert.equal(await p, 'end_turn')
 })
 
+test('PiAcpSession: a retried run does not inherit the failed attempt error when its own agent_end is lost', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'agent_end',
+    willRetry: true,
+    messages: [{ role: 'assistant', content: [], stopReason: 'error', errorMessage: '529 overloaded' }]
+  })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_settled' })
+
+  assert.equal(await p, 'end_turn')
+})
+
 test('PiAcpSession: agent_end with assistant stopReason error surfaces text and resolves error', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

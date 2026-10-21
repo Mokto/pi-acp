@@ -195,7 +195,7 @@ import { basename as basename3, isAbsolute as isAbsolute2, relative, resolve as 
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
-import { execFileSync, spawn as spawn2 } from "child_process";
+import { execFileSync, spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
 var PiRpcSpawnError = class extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
   code;
@@ -212,6 +212,26 @@ var ANSI_ESCAPE_REGEX = new RegExp(
   `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
   "g"
 );
+var MIN_PI_VERSION = [0, 80, 4];
+var supportedPiCommands = /* @__PURE__ */ new Set();
+function assertSupportedPiVersion(cmd) {
+  if (supportedPiCommands.has(cmd)) return;
+  const res = spawnSync2(cmd, ["--version"], {
+    encoding: "utf-8",
+    timeout: 5e3,
+    shell: shouldUseShellForPiCommand(cmd)
+  });
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${res.stdout ?? ""}${res.stderr ?? ""}`);
+  if (!match) return;
+  const found = match.slice(1, 4).map(Number);
+  const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i]);
+  if (differsAt !== -1 && found[differsAt] < MIN_PI_VERSION[differsAt]) {
+    throw new PiRpcSpawnError(
+      `pi v${found.join(".")} is too old: pi-acp needs pi ${MIN_PI_VERSION.join(".")} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+    );
+  }
+  supportedPiCommands.add(cmd);
+}
 function stripAnsi(s) {
   return s.replace(ANSI_ESCAPE_REGEX, "");
 }
@@ -280,6 +300,7 @@ var PiRpcProcess = class _PiRpcProcess {
   }
   static async spawn(params) {
     const cmd = getPiCommand(params.piCommand);
+    assertSupportedPiVersion(cmd);
     const args = ["--mode", "rpc", "--no-themes"];
     if (params.sessionPath) args.push("--session", params.sessionPath);
     const child = spawn2(cmd, args, {
@@ -1377,8 +1398,8 @@ var PiAcpSession = class _PiAcpSession {
   // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
   // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
   inAgentLoop = false;
-  // Error from the latest `agent_end`, reported on `agent_settled`. A retry's own
-  // `agent_end` overwrites it, so an attempt pi recovered from doesn't fail the turn.
+  // Error from the current run's `agent_end`, reported on `agent_settled`. Cleared on
+  // `agent_start`, so a failed attempt that pi retried doesn't fail the turn.
   agentRunError = "";
   // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
   // dump and tip /compact instead — see translate/narrated-tool-calls.ts.
@@ -2403,6 +2424,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "agent_start": {
         this.inAgentLoop = true;
+        this.agentRunError = "";
         this.resetNarratedToolCallGate();
         break;
       }
@@ -3559,7 +3581,7 @@ var LiveServer = class {
 import { isAbsolute as isAbsolute4 } from "path";
 import { existsSync as existsSync7, readFileSync as readFileSync9, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
 import { join as join9, dirname as dirname4, basename as basename4 } from "path";
-import { spawnSync as spawnSync2 } from "child_process";
+import { spawnSync as spawnSync3 } from "child_process";
 import { randomUUID as randomUUID2 } from "crypto";
 import { fileURLToPath } from "url";
 function getMessagesTimeoutMs() {
@@ -4353,7 +4375,7 @@ ${JSON.stringify(stats, null, 2)}`;
         const findChangelog = () => {
           try {
             const whichCmd = process.platform === "win32" ? "where" : "which";
-            const which = spawnSync2(whichCmd, ["pi"], { encoding: "utf-8" });
+            const which = spawnSync3(whichCmd, ["pi"], { encoding: "utf-8" });
             const piPath = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim();
             if (piPath) {
               const resolved = realpathSync2(piPath);
@@ -4364,7 +4386,7 @@ ${JSON.stringify(stats, null, 2)}`;
           } catch {
           }
           try {
-            const npmRoot = spawnSync2("npm", ["root", "-g"], { encoding: "utf-8" });
+            const npmRoot = spawnSync3("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
               const p = join9(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
@@ -4956,13 +4978,13 @@ function shouldSkipUpdateNotice() {
 function buildUpdateNotice() {
   if (shouldSkipUpdateNotice()) return null;
   try {
-    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync3("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
     );
     if (!installed || !isSemver(installed)) return null;
-    const latestRes = spawnSync2("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
+    const latestRes = spawnSync3("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
       encoding: "utf-8",
       timeout: 800
     });
@@ -4979,7 +5001,7 @@ function buildStartupInfo(opts) {
   const md = [];
   let headerLine = "";
   try {
-    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync3("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
@@ -5105,9 +5127,9 @@ function readNearestPackageJson(metaUrl) {
 
 // src/index.ts
 if (process.argv.includes("--terminal-login")) {
-  const { spawnSync: spawnSync3 } = await import("child_process");
+  const { spawnSync: spawnSync4 } = await import("child_process");
   const cmd = getPiCommand(process.env.PI_ACP_PI_COMMAND);
-  const res = spawnSync3(cmd, [], {
+  const res = spawnSync4(cmd, [], {
     stdio: "inherit",
     env: process.env,
     shell: shouldUseShellForPiCommand(cmd)
