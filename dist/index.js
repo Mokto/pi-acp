@@ -4838,26 +4838,14 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
   async applyModelSelection(session, modelIdParam) {
-    let provider = null;
-    let modelId = null;
-    if (modelIdParam.includes("/")) {
-      const [p, ...rest] = modelIdParam.split("/");
-      provider = p;
-      modelId = rest.join("/");
-    } else {
-      modelId = modelIdParam;
-    }
-    if (!provider) {
-      const found = findPiModelById(await session.proc.getAvailableModels(), modelId);
-      if (found) {
-        provider = found.provider;
-        modelId = found.id;
-      }
-    }
-    if (!provider || !modelId) {
+    const slash = modelIdParam.indexOf("/");
+    const provider = slash === -1 ? null : modelIdParam.slice(0, slash);
+    const modelId = slash === -1 ? modelIdParam : modelIdParam.slice(slash + 1);
+    const found = findPiModelById(await session.proc.getAvailableModels(), modelId, provider);
+    if (!found) {
       throw RequestError3.invalidParams(`Unknown modelId: ${modelIdParam}`);
     }
-    await session.setModelWhenIdle(provider, modelId);
+    await session.setModelWhenIdle(found.provider, found.id);
   }
   // ACP `session/set_config_option`. Recent clients drive both the model and
   // reasoning pickers through config options rather than the `models`/`modes`
@@ -4905,7 +4893,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     return {};
   }
 };
-function findPiModelById(data, id) {
+function findPiModelById(data, id, provider) {
   if (!id || !data || typeof data !== "object") return void 0;
   const models = data.models;
   if (!Array.isArray(models)) return void 0;
@@ -4913,8 +4901,8 @@ function findPiModelById(data, id) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry;
     if (String(record.id) !== id) continue;
-    const provider = String(record.provider ?? "").trim();
-    if (provider) return { provider, id };
+    const recordProvider = String(record.provider ?? "").trim();
+    if (recordProvider && (!provider || recordProvider === provider)) return { provider: recordProvider, id };
   }
   return void 0;
 }

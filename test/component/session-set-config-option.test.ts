@@ -102,6 +102,21 @@ test('setSessionConfigOption: a pick deferred during a reply shows as selected w
   assert.equal(res2.configOptions.find(o => o.id === 'thinking')?.currentValue, 'high')
 })
 
+test('setSessionConfigOption: a model pi does not offer is refused at once, not deferred until after the reply', async () => {
+  const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
+  const agent = makeAgent(proc)
+  void (agent as unknown as { sessions: FakeSessions }).sessions.get().prompt('hello')
+
+  for (const value of ['test/model-z', 'other/model-b']) {
+    await assert.rejects(
+      () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value }),
+      /invalid params/i
+    )
+  }
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'high' })
+  assert.equal(res.configOptions.find(o => o.id === 'model')?.currentValue, 'test/model-a')
+})
+
 test('setSessionConfigOption: resolves a bare model id via available models', async () => {
   const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
   const agent = makeAgent(proc)

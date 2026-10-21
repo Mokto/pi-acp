@@ -1578,30 +1578,18 @@ export class PiAcpAgent implements ACPAgent {
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
   private async applyModelSelection(session: PiAcpSession, modelIdParam: string): Promise<void> {
-    let provider: string | null = null
-    let modelId: string | null = null
+    const slash = modelIdParam.indexOf('/')
+    const provider = slash === -1 ? null : modelIdParam.slice(0, slash)
+    const modelId = slash === -1 ? modelIdParam : modelIdParam.slice(slash + 1)
 
-    if (modelIdParam.includes('/')) {
-      const [p, ...rest] = modelIdParam.split('/')
-      provider = p
-      modelId = rest.join('/')
-    } else {
-      modelId = modelIdParam
-    }
-
-    if (!provider) {
-      const found = findPiModelById(await session.proc.getAvailableModels(), modelId)
-      if (found) {
-        provider = found.provider
-        modelId = found.id
-      }
-    }
-
-    if (!provider || !modelId) {
+    // pi rejects models outside this list. Check here, because a switch deferred during a reply
+    // is shown as selected before pi sees it.
+    const found = findPiModelById(await session.proc.getAvailableModels(), modelId, provider)
+    if (!found) {
       throw RequestError.invalidParams(`Unknown modelId: ${modelIdParam}`)
     }
 
-    await session.setModelWhenIdle(provider, modelId)
+    await session.setModelWhenIdle(found.provider, found.id)
   }
 
   // ACP `session/set_config_option`. Recent clients drive both the model and
@@ -1659,9 +1647,13 @@ export class PiAcpAgent implements ACPAgent {
   }
 }
 
-// Resolve a bare model id against pi's `get_available_models` payload (unknown
-// shape from the RPC bridge), returning the matching provider + id pair.
-function findPiModelById(data: unknown, id: string | null): { provider: string; id: string } | undefined {
+// Find a model in pi's `get_available_models` payload (unknown shape from the RPC
+// bridge), returning the matching provider + id pair. A null provider matches any.
+function findPiModelById(
+  data: unknown,
+  id: string,
+  provider: string | null
+): { provider: string; id: string } | undefined {
   if (!id || !data || typeof data !== 'object') return undefined
   const models = (data as { models?: unknown }).models
   if (!Array.isArray(models)) return undefined
@@ -1670,8 +1662,8 @@ function findPiModelById(data: unknown, id: string | null): { provider: string; 
     if (!entry || typeof entry !== 'object') continue
     const record = entry as { id?: unknown; provider?: unknown }
     if (String(record.id) !== id) continue
-    const provider = String(record.provider ?? '').trim()
-    if (provider) return { provider, id }
+    const recordProvider = String(record.provider ?? '').trim()
+    if (recordProvider && (!provider || recordProvider === provider)) return { provider: recordProvider, id }
   }
 
   return undefined
