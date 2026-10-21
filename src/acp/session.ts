@@ -34,6 +34,7 @@ import { getPlanUsageDir } from './translate/plan-usage.js'
 import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
+import { withTimeout } from './timeout.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -76,6 +77,10 @@ type ContextUsage = {
 
 const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
 const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
+// pi answers get_session_stats in about a millisecond; missing this means pi is frozen, and
+// the stats are cosmetic, so the turn finishes with the last known count instead of waiting
+// on the watchdog.
+const CONTEXT_USAGE_TIMEOUT_MS = 2_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -811,12 +816,11 @@ export class PiAcpSession {
   private async handleTurnWatchdog(): Promise<void> {
     if (!this.pendingTurn) return
 
-    const timeoutMsg = this.inferenceStartup
-      ? 'Turn timed out waiting for pi to begin inference; aborting and recovering.'
-      : 'Turn timed out due to pi inactivity (no output); aborting and recovering.'
+    const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs()
+    const duration = ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.ceil(ms / 1000)} s`
     this.emit({
       sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: timeoutMsg }
+      content: { type: 'text', text: `Turn timed out: no output from pi for ${duration}.` }
     })
 
     try {
@@ -1217,7 +1221,8 @@ export class PiAcpSession {
   }
 
   private async readContextUsage(): Promise<ContextUsage> {
-    const raw = ((await this.proc.getSessionStats()) as { contextUsage?: unknown } | null)?.contextUsage
+    const stats = await withTimeout(this.proc.getSessionStats(), CONTEXT_USAGE_TIMEOUT_MS)
+    const raw = (stats as { contextUsage?: unknown } | null)?.contextUsage
     const cu = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
     if (typeof cu.contextWindow === 'number') this.contextWindow = cu.contextWindow
     const tokens = typeof cu.tokens === 'number' ? cu.tokens : null

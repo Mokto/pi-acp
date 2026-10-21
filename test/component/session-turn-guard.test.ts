@@ -188,7 +188,9 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
     const timeoutMsg = conn.updates.find(
       u =>
         u.update.sessionUpdate === 'agent_message_chunk' &&
-        (u.update as { content?: { text?: string } }).content?.text?.includes('inactivity')
+        (u.update as { content?: { text?: string } }).content?.text?.startsWith(
+          'Turn timed out: no output from pi for 1 s'
+        )
     )
     assert.ok(timeoutMsg, 'expected a turn inactivity timeout message')
   } finally {

@@ -36,6 +36,7 @@ import {
   type ModelRuntimeLike
 } from './login.js'
 import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
+import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
@@ -79,32 +80,6 @@ import { randomUUID } from 'node:crypto'
 function getMessagesTimeoutMs(): number {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS)
   return Number.isFinite(v) && v > 0 ? v : 15_000
-}
-
-/**
- * Races `promise` against a timeout. Rejects with a TimeoutError if the timeout fires first.
- */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms)
-    promise.then(
-      v => {
-        clearTimeout(timer)
-        resolve(v)
-      },
-      e => {
-        clearTimeout(timer)
-        reject(e)
-      }
-    )
-  })
-}
-
-class TimeoutError extends Error {
-  constructor(ms: number) {
-    super(`Timed out after ${ms}ms`)
-    this.name = 'TimeoutError'
-  }
 }
 
 /**
