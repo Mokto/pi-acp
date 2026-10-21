@@ -65,6 +65,14 @@ type QueuedTurn = {
 
 type DeferredModel = { provider: string; modelId: string }
 
+type ContextUsage = {
+  raw: unknown
+  tokens: number | null
+  displayTokens: number | null
+  contextWindow: number | null
+  percent: number | null
+}
+
 const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
 const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
@@ -646,6 +654,7 @@ export class PiAcpSession {
       return
     }
     await this.proc.setModel(provider, modelId)
+    void this.pushUsageUpdate()
   }
 
   async setThinkingLevelWhenIdle(level: string): Promise<void> {
@@ -857,7 +866,10 @@ export class PiAcpSession {
     this.deferredModel = null
     this.deferredThinkingLevel = null
 
-    if (model) await this.proc.setModel(model.provider, model.modelId)
+    if (model) {
+      await this.proc.setModel(model.provider, model.modelId)
+      void this.pushUsageUpdate()
+    }
     if (thinking) {
       await this.proc.setThinkingLevel(thinking as Parameters<PiRpcProcess['setThinkingLevel']>[0])
     }
@@ -1164,50 +1176,74 @@ export class PiAcpSession {
     }
   }
 
+  // Drives Zed's context ring next to the composer dropdowns. Skipped when pi doesn't
+  // know the model's window or has no post-compaction count yet.
+  private emitUsageUpdate(tokens: number | null, contextWindow: number | null): void {
+    if (!tokens || !contextWindow) return
+    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: contextWindow })
+  }
+
+  /** Refreshes the context ring outside turn ends: on a reopened thread and after a model switch. */
+  async pushUsageUpdate(): Promise<void> {
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE === 'false') return
+    try {
+      const usage = await this.readContextUsage()
+      this.emitUsageUpdate(usage.displayTokens, usage.contextWindow)
+    } catch {
+      // Stats are cosmetic; the ring appears after the next turn instead.
+    }
+  }
+
+  private async readContextUsage(): Promise<ContextUsage> {
+    const raw = ((await this.proc.getSessionStats()) as { contextUsage?: unknown } | null)?.contextUsage
+    const cu = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+    if (typeof cu.contextWindow === 'number') this.contextWindow = cu.contextWindow
+    const tokens = typeof cu.tokens === 'number' ? cu.tokens : null
+
+    // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
+    // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
+    if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens)
+
+    return {
+      raw,
+      tokens,
+      displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
+      contextWindow: this.contextWindow,
+      percent: typeof cu.percent === 'number' ? cu.percent : null
+    }
+  }
+
   private async maybeEmitTokenStats(): Promise<void> {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === 'false') return
     const debug = process.env.PI_ACP_DEBUG_TOKEN_USAGE === 'true'
 
-    // Prefer inline usage accumulated from turn_end events (zero latency, no extra RPC call).
-    // Fall back to getSessionStats() with one retry if pi fires agent_end before updating stats.
-    let stats: any = null
-    let contextWindow: number | null = this.contextWindow
-    let contextTokens: number | null = null
-    let contextPercent: number | null = null
-
+    let usage: ContextUsage
     try {
-      stats = (await this.proc.getSessionStats()) as any
-      if (stats?.contextUsage && typeof stats.contextUsage === 'object') {
-        const cu = stats.contextUsage as Record<string, unknown>
-        if (typeof cu.contextWindow === 'number') {
-          contextWindow = cu.contextWindow
-          this.contextWindow = contextWindow
-        }
-        if (typeof cu.tokens === 'number') contextTokens = cu.tokens
-        if (typeof cu.percent === 'number') contextPercent = cu.percent
-      }
+      usage = await this.readContextUsage()
     } catch (err) {
       if (debug)
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: `[token debug] getSessionStats error: ${String(err)}` }
         })
+      usage = {
+        raw: undefined,
+        tokens: null,
+        displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : null,
+        contextWindow: this.contextWindow,
+        percent: null
+      }
     }
 
     if (debug) {
       this.emit({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: `\n[token debug] contextUsage=${JSON.stringify(stats?.contextUsage)}` }
+        content: { type: 'text', text: `\n[token debug] contextUsage=${JSON.stringify(usage.raw)}` }
       })
     }
 
-    // Show current context window usage: tokens currently in context and how full it is.
-    // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
-    // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
-    if (contextTokens !== null && contextTokens > 0) {
-      this.peakContextTokens = Math.max(this.peakContextTokens, contextTokens)
-    }
-    const displayTokens = this.peakContextTokens > 0 ? this.peakContextTokens : contextTokens
+    const { contextWindow, tokens: contextTokens, percent: contextPercent, displayTokens } = usage
+    this.emitUsageUpdate(displayTokens, contextWindow)
     const parts: string[] = []
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)

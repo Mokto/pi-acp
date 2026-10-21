@@ -1592,6 +1592,7 @@ var PiAcpSession = class _PiAcpSession {
       return;
     }
     await this.proc.setModel(provider, modelId);
+    void this.pushUsageUpdate();
   }
   async setThinkingLevelWhenIdle(level) {
     if (this.pendingTurn) {
@@ -1746,7 +1747,10 @@ var PiAcpSession = class _PiAcpSession {
     const thinking = this.deferredThinkingLevel;
     this.deferredModel = null;
     this.deferredThinkingLevel = null;
-    if (model) await this.proc.setModel(model.provider, model.modelId);
+    if (model) {
+      await this.proc.setModel(model.provider, model.modelId);
+      void this.pushUsageUpdate();
+    }
     if (thinking) {
       await this.proc.setThinkingLevel(thinking);
     }
@@ -2007,42 +2011,64 @@ ${message}` }
     } catch {
     }
   }
+  // Drives Zed's context ring next to the composer dropdowns. Skipped when pi doesn't
+  // know the model's window or has no post-compaction count yet.
+  emitUsageUpdate(tokens, contextWindow) {
+    if (!tokens || !contextWindow) return;
+    this.emit({ sessionUpdate: "usage_update", used: tokens, size: contextWindow });
+  }
+  /** Refreshes the context ring outside turn ends: on a reopened thread and after a model switch. */
+  async pushUsageUpdate() {
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
+    try {
+      const usage = await this.readContextUsage();
+      this.emitUsageUpdate(usage.displayTokens, usage.contextWindow);
+    } catch {
+    }
+  }
+  async readContextUsage() {
+    const raw = (await this.proc.getSessionStats())?.contextUsage;
+    const cu = raw && typeof raw === "object" ? raw : {};
+    if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
+    const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
+    if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens);
+    return {
+      raw,
+      tokens,
+      displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
+      contextWindow: this.contextWindow,
+      percent: typeof cu.percent === "number" ? cu.percent : null
+    };
+  }
   async maybeEmitTokenStats() {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
     const debug = process.env.PI_ACP_DEBUG_TOKEN_USAGE === "true";
-    let stats = null;
-    let contextWindow = this.contextWindow;
-    let contextTokens = null;
-    let contextPercent = null;
+    let usage;
     try {
-      stats = await this.proc.getSessionStats();
-      if (stats?.contextUsage && typeof stats.contextUsage === "object") {
-        const cu = stats.contextUsage;
-        if (typeof cu.contextWindow === "number") {
-          contextWindow = cu.contextWindow;
-          this.contextWindow = contextWindow;
-        }
-        if (typeof cu.tokens === "number") contextTokens = cu.tokens;
-        if (typeof cu.percent === "number") contextPercent = cu.percent;
-      }
+      usage = await this.readContextUsage();
     } catch (err) {
       if (debug)
         this.emit({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `[token debug] getSessionStats error: ${String(err)}` }
         });
+      usage = {
+        raw: void 0,
+        tokens: null,
+        displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : null,
+        contextWindow: this.contextWindow,
+        percent: null
+      };
     }
     if (debug) {
       this.emit({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: `
-[token debug] contextUsage=${JSON.stringify(stats?.contextUsage)}` }
+[token debug] contextUsage=${JSON.stringify(usage.raw)}` }
       });
     }
-    if (contextTokens !== null && contextTokens > 0) {
-      this.peakContextTokens = Math.max(this.peakContextTokens, contextTokens);
-    }
-    const displayTokens = this.peakContextTokens > 0 ? this.peakContextTokens : contextTokens;
+    const { contextWindow, tokens: contextTokens, percent: contextPercent, displayTokens } = usage;
+    this.emitUsageUpdate(displayTokens, contextWindow);
     const parts = [];
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`);
@@ -4784,7 +4810,10 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         }
       }
     };
-    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0);
+    setTimeout(() => {
+      void this.advertiseCommands(session, fileCommands);
+      void session.pushUsageUpdate();
+    }, 0);
     return response;
   }
   // Resolve a model identifier and apply it to the session's pi process.
