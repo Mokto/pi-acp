@@ -1770,6 +1770,7 @@ export class PiAcpSession {
         // End of this model segment: tip /compact if it narrated tools, then reset for the next.
         this.flushNarratedToolCallGate()
         void this.pushUsageUpdate()
+        if (existsSync(getPlanUsageDir())) void this.pushConfigOptionUpdate()
         break
       }
 
