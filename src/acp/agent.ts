@@ -37,7 +37,7 @@ import {
 } from './login.js'
 import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess } from '../pi-rpc/process.js'
+import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -166,8 +166,6 @@ function buildSessionSummaryFromFile(sessionFile: string): string {
     '_Auto-generated from session JSONL. History was too large to replay in the UI._'
   ].join('\n\n')
 }
-
-type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -1661,10 +1659,6 @@ export class PiAcpAgent implements ACPAgent {
   }
 }
 
-function isThinkingLevel(x: string): x is ThinkingLevel {
-  return x === 'off' || x === 'minimal' || x === 'low' || x === 'medium' || x === 'high' || x === 'xhigh'
-}
-
 // Resolve a bare model id against pi's `get_available_models` payload (unknown
 // shape from the RPC bridge), returning the matching provider + id pair.
 function findPiModelById(data: unknown, id: string | null): { provider: string; id: string } | undefined {
@@ -1710,16 +1704,31 @@ async function getThinkingState(
   const tl = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
   if (tl && isThinkingLevel(tl)) current = tl
 
-  const available: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+  let supported: ThinkingLevel[] = []
+  try {
+    supported = await proc.getAvailableThinkingLevels()
+  } catch {
+    // pi before 0.81 has no get_available_thinking_levels.
+  }
+  if (!supported.length) supported = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
 
   return {
     currentModeId: current,
-    availableModes: available.map(id => ({
+    availableModes: THINKING_LEVELS.filter(id => id === current || supported.includes(id)).map(id => ({
       id,
-      name: `Thinking: ${id}`,
-      description: null
+      ...THINKING_LEVEL_LABELS[id]
     }))
   }
+}
+
+const THINKING_LEVEL_LABELS: Record<ThinkingLevel, { name: string; description: string }> = {
+  off: { name: 'Off', description: 'No reasoning' },
+  minimal: { name: 'Minimal', description: 'Very brief reasoning' },
+  low: { name: 'Low', description: 'Light reasoning' },
+  medium: { name: 'Medium', description: 'Moderate reasoning' },
+  high: { name: 'High', description: 'Deep reasoning' },
+  xhigh: { name: 'Extra high', description: 'Extra-high reasoning' },
+  max: { name: 'Max', description: 'Maximum reasoning' }
 }
 
 // The v1 SDK dropped the `ModelInfo`/`SessionModelState` types (model selection

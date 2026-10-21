@@ -127,3 +127,82 @@ test('setSessionConfigOption: rejects an unknown configId', async () => {
       err instanceof Error && String((err as { data?: unknown }).data ?? '').includes('Unknown configId')
   )
 })
+
+class LevelsProc extends FakeProc {
+  constructor(
+    current: { provider: string; id: string },
+    thinkingLevel: string,
+    private readonly levelsByModel: Record<string, string[]>
+  ) {
+    super(baseModels, current, thinkingLevel)
+  }
+
+  async getAvailableThinkingLevels() {
+    const { model } = await this.getState()
+    return this.levelsByModel[model.id] ?? []
+  }
+}
+
+function thinkingChoices(res: { configOptions: Array<{ id: string }> }) {
+  const think = res.configOptions.find(o => o.id === 'thinking') as
+    | { options: Array<{ value: string; name: string; description?: string | null }> }
+    | undefined
+  return think?.options ?? []
+}
+
+test('setSessionConfigOption: thinking lists only the current model levels, labelled', async () => {
+  const proc = new LevelsProc({ provider: 'test', id: 'model-a' }, 'high', { 'model-a': ['off', 'low', 'high', 'max'] })
+  const agent = makeAgent(proc)
+
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'max' })
+
+  assert.deepEqual(proc.setThinkingCalls, ['max'])
+  assert.deepEqual(
+    thinkingChoices(res).map(o => [o.value, o.name, o.description]),
+    [
+      ['off', 'Off', 'No reasoning'],
+      ['low', 'Low', 'Light reasoning'],
+      ['high', 'High', 'Deep reasoning'],
+      ['max', 'Max', 'Maximum reasoning']
+    ]
+  )
+})
+
+test('setSessionConfigOption: thinking levels follow a model switch', async () => {
+  const proc = new LevelsProc({ provider: 'test', id: 'model-a' }, 'off', {
+    'model-a': ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
+    'model-b': ['off', 'low', 'medium', 'high']
+  })
+  const agent = makeAgent(proc)
+
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/model-b' })
+
+  assert.deepEqual(
+    thinkingChoices(res).map(o => o.value),
+    ['off', 'low', 'medium', 'high']
+  )
+})
+
+test('setSessionConfigOption: the current thinking level stays listed when pi omits it', async () => {
+  const proc = new LevelsProc({ provider: 'test', id: 'model-a' }, 'medium', { 'model-a': ['off'] })
+  const agent = makeAgent(proc)
+
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/model-a' })
+
+  assert.deepEqual(
+    thinkingChoices(res).map(o => o.value),
+    ['off', 'medium']
+  )
+})
+
+test('setSessionConfigOption: pi without get_available_thinking_levels gets the fixed list, without max', async () => {
+  const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
+  const agent = makeAgent(proc)
+
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'medium' })
+
+  assert.deepEqual(
+    thinkingChoices(res).map(o => o.value),
+    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+  )
+})

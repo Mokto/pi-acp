@@ -89,6 +89,14 @@ test('resolveEnabledModelIds: strips a trailing thinking-level suffix', () => {
   ])
 })
 
+test('resolveEnabledModelIds: strips the max thinking level', () => {
+  assert.deepEqual(
+    [...resolveEnabledModelIds(MODELS, ['anthropic/Claude Opus 4.8:max'])],
+    ['anthropic/claude-opus-4-8']
+  )
+  assert.ok(resolveEnabledModelIds(MODELS, ['anthropic/claude-opus-*:max']).has('anthropic/claude-opus-4-8'))
+})
+
 test('resolveEnabledModelIds: keeps a colon suffix that is not a thinking level', () => {
   // The fast variant has a real colon in its id, so it must still match.
   const ids = resolveEnabledModelIds(MODELS, ['cursor/composer-2-5:fast'])

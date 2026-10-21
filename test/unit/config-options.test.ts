@@ -27,9 +27,9 @@ const models: ConfigModelState = {
 const thinking: ConfigThinkingState = {
   currentModeId: 'medium',
   availableModes: [
-    { id: 'off', name: 'Thinking: off' },
-    { id: 'medium', name: 'Thinking: medium' },
-    { id: 'high', name: 'Thinking: high' }
+    { id: 'off', name: 'Off' },
+    { id: 'medium', name: 'Medium' },
+    { id: 'high', name: 'High' }
   ]
 }
 
@@ -49,9 +49,9 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
   assert.equal(think.category, 'thought_level')
   assert.equal(think.currentValue, 'medium')
   assert.deepEqual(think.options, [
-    { value: 'off', name: 'off', description: null },
-    { value: 'medium', name: 'medium', description: null },
-    { value: 'high', name: 'high', description: null }
+    { value: 'off', name: 'Off', description: null },
+    { value: 'medium', name: 'Medium', description: null },
+    { value: 'high', name: 'High', description: null }
   ])
 })
 
