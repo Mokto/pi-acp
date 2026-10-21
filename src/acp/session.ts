@@ -927,12 +927,12 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The full prompt is finished when we see `agent_settled`.
     this.proc.prompt(t.message, t.images, { streamingBehavior: opts?.streamingBehavior }).then(
-      () => {
-        // Recognised pi commands (e.g. extension slash commands) run synchronously and
-        // emit no agent loop, so pi never sends `agent_settled`. Complete the turn on the
-        // prompt response instead. Model turns answer the prompt request early (before
-        // `agent_start`), so this only fires for known command messages.
-        if (!this.isExtensionCommandMessage(t.message)) return
+      disposition => {
+        // A prompt pi handled without an agent run (an extension command or input handler)
+        // never gets `agent_settled`, so complete the turn on the prompt response instead.
+        // pi before 0.99 reports no disposition; fall back to recognising command names.
+        const handled = disposition ? disposition === 'handled' : this.isExtensionCommandMessage(t.message)
+        if (!handled) return
         void this.flushEmits().finally(() => {
           this.pendingTurnIsExtensionCommand = false
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
