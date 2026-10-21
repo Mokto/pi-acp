@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiPromptDisposition, PiRpcEvent } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -33,6 +33,7 @@ export class FakePiRpcProcess {
     streamingBehavior?: 'steer' | 'followUp'
   }> = []
   readonly extensionUiResponses: unknown[] = []
+  promptDisposition: PiPromptDisposition | undefined = undefined
   abortCount = 0
   exited = false
 
@@ -63,8 +64,9 @@ export class FakePiRpcProcess {
     message: string,
     attachments: unknown[] = [],
     opts?: { streamingBehavior?: 'steer' | 'followUp' }
-  ): Promise<void> {
+  ): Promise<PiPromptDisposition | undefined> {
     this.prompts.push({ message, attachments, streamingBehavior: opts?.streamingBehavior })
+    return this.promptDisposition
   }
 
   async abort(): Promise<void> {

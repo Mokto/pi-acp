@@ -101,7 +101,7 @@ class RejectingFakePiRpcProcess extends FakePiRpcProcess {
     message: string,
     attachments: unknown[] = [],
     opts?: { streamingBehavior?: 'steer' | 'followUp' }
-  ): Promise<void> {
+  ): Promise<never> {
     this.prompts.push({ message, attachments, streamingBehavior: opts?.streamingBehavior })
     throw new Error('write after stream destroyed')
   }

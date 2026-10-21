@@ -55,6 +55,10 @@ export type PiPromptOptions = {
   streamingBehavior?: 'steer' | 'followUp'
 }
 
+// What pi did with a prompt (pi 0.99+). `handled`: an extension command or input handler
+// consumed it and no agent run started, so no `agent_settled` will follow.
+export type PiPromptDisposition = 'handled' | 'started' | 'queued'
+
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number]
 
@@ -300,7 +304,11 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = [], opts?: PiPromptOptions): Promise<void> {
+  async prompt(
+    message: string,
+    images: unknown[] = [],
+    opts?: PiPromptOptions
+  ): Promise<PiPromptDisposition | undefined> {
     const send = (streamingBehavior?: 'steer' | 'followUp') => {
       const behavior = streamingBehavior ?? opts?.streamingBehavior
       return this.request({
@@ -321,6 +329,8 @@ export class PiRpcProcess {
       }
       if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
     }
+    const disposition = (res.data as { disposition?: unknown } | undefined)?.disposition
+    return disposition === 'handled' || disposition === 'started' || disposition === 'queued' ? disposition : undefined
   }
 
   async abort(): Promise<void> {

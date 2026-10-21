@@ -18,10 +18,10 @@ class NestedTurnFakePiRpcProcess extends FakePiRpcProcess {
     message: string,
     attachments: unknown[] = [],
     opts?: { streamingBehavior?: 'steer' | 'followUp' }
-  ): Promise<void> {
+  ): Promise<undefined> {
     await super.prompt(message, attachments, opts)
-    return new Promise<void>(resolve => {
-      this.resolvers.push(resolve)
+    return new Promise<undefined>(resolve => {
+      this.resolvers.push(() => resolve(undefined))
     })
   }
 
@@ -81,6 +81,16 @@ test('PiAcpSession: nested agent_settled during a command does not end the ACP t
 
   assert.equal(await pending, 'end_turn')
   assert.equal(session.hasActiveTurn(), false)
+})
+
+test('PiAcpSession: a message pi reports as handled completes without agent_settled', async () => {
+  const proc = new FakePiRpcProcess()
+  proc.promptDisposition = 'handled'
+  const session = makeSession(proc)
+
+  // Not a known command name: an input handler consumed it. Without the disposition
+  // check this await waits for an `agent_settled` that never comes.
+  assert.equal(await session.prompt('consumed by an input handler'), 'end_turn')
 })
 
 test('PiAcpSession: a non-command message still waits for agent_settled', async () => {
