@@ -43,6 +43,8 @@ class FakeProc {
   onEvent() {
     return () => {}
   }
+
+  async prompt() {}
 }
 
 class FakeSessions {
@@ -84,6 +86,35 @@ test('setSessionConfigOption: model option applies provider/model and refreshes 
   assert.deepEqual(proc.setModelCalls, [{ provider: 'test', modelId: 'model-b' }])
   const model = res.configOptions.find(o => o.id === 'model')
   assert.equal(model?.currentValue, 'test/model-b')
+})
+
+test('setSessionConfigOption: a pick deferred during a reply shows as selected while it waits', async () => {
+  const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
+  const agent = makeAgent(proc)
+  void (agent as unknown as { sessions: FakeSessions }).sessions.get().prompt('hello')
+
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/model-b' })
+  const res2 = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'high' })
+
+  assert.deepEqual(proc.setModelCalls, [])
+  assert.deepEqual(proc.setThinkingCalls, [])
+  assert.equal(res.configOptions.find(o => o.id === 'model')?.currentValue, 'test/model-b')
+  assert.equal(res2.configOptions.find(o => o.id === 'thinking')?.currentValue, 'high')
+})
+
+test('setSessionConfigOption: a model pi does not offer is refused at once, not deferred until after the reply', async () => {
+  const proc = new FakeProc(baseModels, { provider: 'test', id: 'model-a' }, 'medium')
+  const agent = makeAgent(proc)
+  void (agent as unknown as { sessions: FakeSessions }).sessions.get().prompt('hello')
+
+  for (const value of ['test/model-z', 'other/model-b']) {
+    await assert.rejects(
+      () => agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value }),
+      /invalid params/i
+    )
+  }
+  const res = await agent.setSessionConfigOption({ sessionId: 's1', configId: 'thinking', value: 'high' })
+  assert.equal(res.configOptions.find(o => o.id === 'model')?.currentValue, 'test/model-a')
 })
 
 test('setSessionConfigOption: resolves a bare model id via available models', async () => {

@@ -988,6 +988,44 @@ function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ 
   };
 }
 
+// src/acp/translate/config-options.ts
+var MODEL_CONFIG_ID = "model";
+var THINKING_CONFIG_ID = "thinking";
+function buildSessionConfigOptions(models, thinking, usage = null) {
+  const options = [];
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
+  if (usageOption) options.push(usageOption);
+  if (models && models.availableModels.length) {
+    options.push({
+      type: "select",
+      id: MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      currentValue: models.currentModelId,
+      options: models.availableModels.map((m) => ({
+        value: m.modelId,
+        name: m.name,
+        description: m.description ?? null
+      }))
+    });
+  }
+  if (thinking.availableModes.length) {
+    options.push({
+      type: "select",
+      id: THINKING_CONFIG_ID,
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: thinking.currentModeId,
+      options: thinking.availableModes.map((m) => ({
+        value: m.id,
+        name: m.name,
+        description: m.description ?? null
+      }))
+    });
+  }
+  return options;
+}
+
 // src/acp/slash-commands.ts
 import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir3 } from "os";
@@ -1613,6 +1651,19 @@ var PiAcpSession = class _PiAcpSession {
     }
     await this.proc.setThinkingLevel(level);
   }
+  /** Shows a model or thinking change deferred during a reply as selected, so Zed's dropdowns keep the pick. */
+  withDeferredConfig(options) {
+    const deferred = {
+      [MODEL_CONFIG_ID]: this.deferredModel && `${this.deferredModel.provider}/${this.deferredModel.modelId}`,
+      [THINKING_CONFIG_ID]: this.deferredThinkingLevel
+    };
+    return options.map((o) => {
+      const value = deferred[o.id];
+      if (!value || o.type !== "select") return o;
+      const listed = o.options.some((x) => "value" in x ? x.value === value : x.options.some((y) => y.value === value));
+      return listed ? { ...o, currentValue: value } : o;
+    });
+  }
   emit(update) {
     if (this.observers.size > 0) {
       for (const fn of [...this.observers]) {
@@ -1759,12 +1810,17 @@ var PiAcpSession = class _PiAcpSession {
     const thinking = this.deferredThinkingLevel;
     this.deferredModel = null;
     this.deferredThinkingLevel = null;
-    if (model) {
-      await this.proc.setModel(model.provider, model.modelId);
-      void this.pushUsageUpdate();
-    }
-    if (thinking) {
-      await this.proc.setThinkingLevel(thinking);
+    try {
+      if (model) {
+        await this.proc.setModel(model.provider, model.modelId);
+        void this.pushUsageUpdate();
+      }
+      if (thinking) {
+        await this.proc.setThinkingLevel(thinking);
+      }
+    } catch (err) {
+      process.stderr.write(`pi-acp: deferred model/thinking change failed (${String(err)})
+`);
     }
     if (model || thinking) void this.pushConfigOptionUpdate();
   }
@@ -2019,7 +2075,7 @@ ${message}` }
     const refresh = this.refreshConfigOptions;
     if (!refresh) return;
     try {
-      const configOptions = await refresh();
+      const configOptions = this.withDeferredConfig(await refresh());
       this.emit({ sessionUpdate: "config_option_update", configOptions });
     } catch {
     }
@@ -3091,44 +3147,6 @@ function normalizePiMessageText(content) {
 function normalizePiAssistantText(content) {
   if (!Array.isArray(content)) return "";
   return content.map((c) => c?.type === "text" && typeof c.text === "string" ? c.text : "").filter(Boolean).join("");
-}
-
-// src/acp/translate/config-options.ts
-var MODEL_CONFIG_ID = "model";
-var THINKING_CONFIG_ID = "thinking";
-function buildSessionConfigOptions(models, thinking, usage = null) {
-  const options = [];
-  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
-  if (usageOption) options.push(usageOption);
-  if (models && models.availableModels.length) {
-    options.push({
-      type: "select",
-      id: MODEL_CONFIG_ID,
-      name: "Model",
-      category: "model",
-      currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
-    });
-  }
-  if (thinking.availableModes.length) {
-    options.push({
-      type: "select",
-      id: THINKING_CONFIG_ID,
-      name: "Thinking",
-      category: "thought_level",
-      currentValue: thinking.currentModeId,
-      options: thinking.availableModes.map((m) => ({
-        value: m.id,
-        name: m.name,
-        description: m.description ?? null
-      }))
-    });
-  }
-  return options;
 }
 
 // src/acp/translate/prompt.ts
@@ -4825,26 +4843,14 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
   // Accepts either "provider/model" (preferred, matches how we advertise) or a
   // bare "model" id (resolved against pi's available models).
   async applyModelSelection(session, modelIdParam) {
-    let provider = null;
-    let modelId = null;
-    if (modelIdParam.includes("/")) {
-      const [p, ...rest] = modelIdParam.split("/");
-      provider = p;
-      modelId = rest.join("/");
-    } else {
-      modelId = modelIdParam;
-    }
-    if (!provider) {
-      const found = findPiModelById(await session.proc.getAvailableModels(), modelId);
-      if (found) {
-        provider = found.provider;
-        modelId = found.id;
-      }
-    }
-    if (!provider || !modelId) {
+    const slash = modelIdParam.indexOf("/");
+    const provider = slash === -1 ? null : modelIdParam.slice(0, slash);
+    const modelId = slash === -1 ? modelIdParam : modelIdParam.slice(slash + 1);
+    const found = findPiModelById(await session.proc.getAvailableModels(), modelId, provider);
+    if (!found) {
       throw RequestError3.invalidParams(`Unknown modelId: ${modelIdParam}`);
     }
-    await session.setModelWhenIdle(provider, modelId);
+    await session.setModelWhenIdle(found.provider, found.id);
   }
   // ACP `session/set_config_option`. Recent clients drive both the model and
   // reasoning pickers through config options rather than the `models`/`modes`
@@ -4873,7 +4879,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     }
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
-    return { configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()) };
+    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) };
   }
   async setSessionMode(params) {
     const session = await this.autoRestoreSession(params.sessionId);
@@ -4892,7 +4898,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     return {};
   }
 };
-function findPiModelById(data, id) {
+function findPiModelById(data, id, provider) {
   if (!id || !data || typeof data !== "object") return void 0;
   const models = data.models;
   if (!Array.isArray(models)) return void 0;
@@ -4900,8 +4906,8 @@ function findPiModelById(data, id) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry;
     if (String(record.id) !== id) continue;
-    const provider = String(record.provider ?? "").trim();
-    if (provider) return { provider, id };
+    const recordProvider = String(record.provider ?? "").trim();
+    if (recordProvider && (!provider || recordProvider === provider)) return { provider: recordProvider, id };
   }
   return void 0;
 }

@@ -56,6 +56,64 @@ test('PiAcpSession: refreshes the selectors after flushing a deferred model swit
   assert.ok(modelSwitchesSeenByRefresh.includes(1))
 })
 
+test('PiAcpSession: a selector refresh during the reply keeps the deferred model', async () => {
+  const proc = new FakePiRpcProcess()
+  const conn = new FakeAgentSideConnection()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  session.setConfigOptionsRefresher(async () => [
+    {
+      type: 'select',
+      id: 'model',
+      name: 'Model',
+      currentValue: 'test/model-a',
+      options: [
+        { value: 'test/model-a', name: 'A' },
+        { value: 'test/model-b', name: 'B' }
+      ]
+    }
+  ])
+
+  void session.prompt('hello')
+  await session.setModelWhenIdle('test', 'model-b')
+  await session.pushConfigOptionUpdate()
+  await flushMicrotasks()
+
+  const pushed = conn.updates.map(u => u.update).filter(u => u.sessionUpdate === 'config_option_update')
+  assert.equal(pushed.at(-1)?.configOptions[0]?.currentValue, 'test/model-b')
+})
+
+test('PiAcpSession: a held model switch that pi rejects still refreshes the selectors', async () => {
+  class RejectingProc extends FakePiRpcProcess {
+    override async setModel(): Promise<void> {
+      throw new Error('pi set_model failed: No API key for test/model-b')
+    }
+  }
+  const proc = new RejectingProc()
+  const session = makeSession(proc)
+  let refreshes = 0
+  session.setConfigOptionsRefresher(async () => {
+    refreshes++
+    return []
+  })
+
+  const pending = session.prompt('hello')
+  await session.setModelWhenIdle('test', 'model-b')
+  const refreshesBeforeEnd = refreshes
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await pending
+  await flushMicrotasks()
+
+  assert.ok(refreshes > refreshesBeforeEnd)
+})
+
 test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes after agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
