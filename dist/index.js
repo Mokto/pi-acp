@@ -403,6 +403,8 @@ var PiRpcProcess = class _PiRpcProcess {
       }
       if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`);
     }
+    const disposition = res.data?.disposition;
+    return disposition === "handled" || disposition === "started" || disposition === "queued" ? disposition : void 0;
   }
   async abort() {
     this.killChildren();
@@ -1868,8 +1870,9 @@ var PiAcpSession = class _PiAcpSession {
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
     });
     this.proc.prompt(t.message, t.images, { streamingBehavior: opts?.streamingBehavior }).then(
-      () => {
-        if (!this.isExtensionCommandMessage(t.message)) return;
+      (disposition) => {
+        const handled = disposition ? disposition === "handled" : this.isExtensionCommandMessage(t.message);
+        if (!handled) return;
         void this.flushEmits().finally(() => {
           this.pendingTurnIsExtensionCommand = false;
           this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
@@ -2111,7 +2114,7 @@ ${message}` }
     if (!tokens || !contextWindow) return;
     this.emit({ sessionUpdate: "usage_update", used: tokens, size: contextWindow });
   }
-  /** Refreshes the context ring outside turn ends: on a reopened thread and after a model switch. */
+  /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
   async pushUsageUpdate() {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
     try {
@@ -2568,6 +2571,8 @@ ${formatAutoRetryMessage(ev)}` }
       case "turn_end": {
         this.inferenceStartup = true;
         this.flushNarratedToolCallGate();
+        void this.pushUsageUpdate();
+        if (existsSync4(getPlanUsageDir())) void this.pushConfigOptionUpdate();
         break;
       }
       case "agent_end": {
