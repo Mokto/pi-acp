@@ -31,6 +31,7 @@ import {
 } from './translate/bash.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
 import { getPlanUsageDir } from './translate/plan-usage.js'
+import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 
@@ -665,6 +666,20 @@ export class PiAcpSession {
     await this.proc.setThinkingLevel(level as Parameters<PiRpcProcess['setThinkingLevel']>[0])
   }
 
+  /** Shows a model or thinking change deferred during a reply as selected, so Zed's dropdowns keep the pick. */
+  withDeferredConfig(options: SessionConfigOption[]): SessionConfigOption[] {
+    const deferred: Record<string, string | null> = {
+      [MODEL_CONFIG_ID]: this.deferredModel && `${this.deferredModel.provider}/${this.deferredModel.modelId}`,
+      [THINKING_CONFIG_ID]: this.deferredThinkingLevel
+    }
+    return options.map(o => {
+      const value = deferred[o.id]
+      if (!value || o.type !== 'select') return o
+      const listed = o.options.some(x => ('value' in x ? x.value === value : x.options.some(y => y.value === value)))
+      return listed ? { ...o, currentValue: value } : o
+    })
+  }
+
   private emit(update: SessionUpdate): void {
     if (this.observers.size > 0) {
       for (const fn of [...this.observers]) {
@@ -1170,7 +1185,7 @@ export class PiAcpSession {
     const refresh = this.refreshConfigOptions
     if (!refresh) return
     try {
-      const configOptions = await refresh()
+      const configOptions = this.withDeferredConfig(await refresh())
       this.emit({ sessionUpdate: 'config_option_update', configOptions })
     } catch {
       // ignore

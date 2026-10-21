@@ -988,6 +988,44 @@ function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ 
   };
 }
 
+// src/acp/translate/config-options.ts
+var MODEL_CONFIG_ID = "model";
+var THINKING_CONFIG_ID = "thinking";
+function buildSessionConfigOptions(models, thinking, usage = null) {
+  const options = [];
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
+  if (usageOption) options.push(usageOption);
+  if (models && models.availableModels.length) {
+    options.push({
+      type: "select",
+      id: MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      currentValue: models.currentModelId,
+      options: models.availableModels.map((m) => ({
+        value: m.modelId,
+        name: m.name,
+        description: m.description ?? null
+      }))
+    });
+  }
+  if (thinking.availableModes.length) {
+    options.push({
+      type: "select",
+      id: THINKING_CONFIG_ID,
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: thinking.currentModeId,
+      options: thinking.availableModes.map((m) => ({
+        value: m.id,
+        name: m.name,
+        description: m.description ?? null
+      }))
+    });
+  }
+  return options;
+}
+
 // src/acp/slash-commands.ts
 import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir3 } from "os";
@@ -1613,6 +1651,19 @@ var PiAcpSession = class _PiAcpSession {
     }
     await this.proc.setThinkingLevel(level);
   }
+  /** Shows a model or thinking change deferred during a reply as selected, so Zed's dropdowns keep the pick. */
+  withDeferredConfig(options) {
+    const deferred = {
+      [MODEL_CONFIG_ID]: this.deferredModel && `${this.deferredModel.provider}/${this.deferredModel.modelId}`,
+      [THINKING_CONFIG_ID]: this.deferredThinkingLevel
+    };
+    return options.map((o) => {
+      const value = deferred[o.id];
+      if (!value || o.type !== "select") return o;
+      const listed = o.options.some((x) => "value" in x ? x.value === value : x.options.some((y) => y.value === value));
+      return listed ? { ...o, currentValue: value } : o;
+    });
+  }
   emit(update) {
     if (this.observers.size > 0) {
       for (const fn of [...this.observers]) {
@@ -2019,7 +2070,7 @@ ${message}` }
     const refresh = this.refreshConfigOptions;
     if (!refresh) return;
     try {
-      const configOptions = await refresh();
+      const configOptions = this.withDeferredConfig(await refresh());
       this.emit({ sessionUpdate: "config_option_update", configOptions });
     } catch {
     }
@@ -3091,44 +3142,6 @@ function normalizePiMessageText(content) {
 function normalizePiAssistantText(content) {
   if (!Array.isArray(content)) return "";
   return content.map((c) => c?.type === "text" && typeof c.text === "string" ? c.text : "").filter(Boolean).join("");
-}
-
-// src/acp/translate/config-options.ts
-var MODEL_CONFIG_ID = "model";
-var THINKING_CONFIG_ID = "thinking";
-function buildSessionConfigOptions(models, thinking, usage = null) {
-  const options = [];
-  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
-  if (usageOption) options.push(usageOption);
-  if (models && models.availableModels.length) {
-    options.push({
-      type: "select",
-      id: MODEL_CONFIG_ID,
-      name: "Model",
-      category: "model",
-      currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
-    });
-  }
-  if (thinking.availableModes.length) {
-    options.push({
-      type: "select",
-      id: THINKING_CONFIG_ID,
-      name: "Thinking",
-      category: "thought_level",
-      currentValue: thinking.currentModeId,
-      options: thinking.availableModes.map((m) => ({
-        value: m.id,
-        name: m.name,
-        description: m.description ?? null
-      }))
-    });
-  }
-  return options;
 }
 
 // src/acp/translate/prompt.ts
@@ -4873,7 +4886,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     }
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
-    return { configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()) };
+    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) };
   }
   async setSessionMode(params) {
     const session = await this.autoRestoreSession(params.sessionId);

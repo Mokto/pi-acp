@@ -1633,7 +1633,7 @@ export class PiAcpAgent implements ACPAgent {
 
     const models = await getModelState(session.proc, { cwd: session.cwd })
     const thinking = await getThinkingState(session.proc)
-    return { configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()) }
+    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
