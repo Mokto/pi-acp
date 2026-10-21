@@ -149,7 +149,7 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
-- `PI_ACP_TURN_INACTIVITY_MS` — max idle time (ms) while waiting for pi events during a turn (default: `120000` / 2 min).
+- `PI_ACP_TURN_INACTIVITY_MS` — max idle time (ms) while waiting for pi events during a turn (default: `3600000` / 60 min).
 - `PI_ACP_INFERENCE_STARTUP_MS` — max wait (ms) for the first model output after a prompt (default: `300000` / 5 min).
 - `PI_ACP_LIVE=1` — opt-in. Opens a per-process unix socket at `~/.pi/pi-acp/live/<pid>.sock` and a registry file `~/.pi/pi-acp/live/<pid>.json` so a local sidecar (e.g. Slack) can attach to live sessions, prompt, and receive the same `session/update` stream Zed sees. **Default off.** Unset / any other value: no socket, no files, no extra work. A failed listen is logged to stderr and never takes the ACP client down.
 
