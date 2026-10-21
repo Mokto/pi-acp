@@ -1766,6 +1766,7 @@ var PiAcpSession = class _PiAcpSession {
     if (thinking) {
       await this.proc.setThinkingLevel(thinking);
     }
+    if (model || thinking) void this.pushConfigOptionUpdate();
   }
   startTurn(t, opts) {
     if (!opts?.retrying) {

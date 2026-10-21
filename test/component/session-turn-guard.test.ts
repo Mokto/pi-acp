@@ -37,6 +37,25 @@ test('PiAcpSession: defers setModel while a turn is active and flushes after age
   assert.deepEqual(proc.setModelCalls, [{ provider: 'test', modelId: 'model-b' }])
 })
 
+test('PiAcpSession: refreshes the selectors after flushing a deferred model switch', async () => {
+  const proc = new FakePiRpcProcess()
+  const session = makeSession(proc)
+  const modelSwitchesSeenByRefresh: number[] = []
+  session.setConfigOptionsRefresher(async () => {
+    modelSwitchesSeenByRefresh.push(proc.setModelCalls.length)
+    return []
+  })
+
+  const pending = session.prompt('hello')
+  await session.setModelWhenIdle('test', 'model-b')
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await pending
+  await flushMicrotasks()
+
+  assert.ok(modelSwitchesSeenByRefresh.includes(1))
+})
+
 test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes after agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
