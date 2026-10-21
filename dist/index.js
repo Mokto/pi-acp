@@ -1810,12 +1810,17 @@ var PiAcpSession = class _PiAcpSession {
     const thinking = this.deferredThinkingLevel;
     this.deferredModel = null;
     this.deferredThinkingLevel = null;
-    if (model) {
-      await this.proc.setModel(model.provider, model.modelId);
-      void this.pushUsageUpdate();
-    }
-    if (thinking) {
-      await this.proc.setThinkingLevel(thinking);
+    try {
+      if (model) {
+        await this.proc.setModel(model.provider, model.modelId);
+        void this.pushUsageUpdate();
+      }
+      if (thinking) {
+        await this.proc.setThinkingLevel(thinking);
+      }
+    } catch (err) {
+      process.stderr.write(`pi-acp: deferred model/thinking change failed (${String(err)})
+`);
     }
     if (model || thinking) void this.pushConfigOptionUpdate();
   }

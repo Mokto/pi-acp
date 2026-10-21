@@ -881,12 +881,18 @@ export class PiAcpSession {
     this.deferredModel = null
     this.deferredThinkingLevel = null
 
-    if (model) {
-      await this.proc.setModel(model.provider, model.modelId)
-      void this.pushUsageUpdate()
-    }
-    if (thinking) {
-      await this.proc.setThinkingLevel(thinking as Parameters<PiRpcProcess['setThinkingLevel']>[0])
+    try {
+      if (model) {
+        await this.proc.setModel(model.provider, model.modelId)
+        void this.pushUsageUpdate()
+      }
+      if (thinking) {
+        await this.proc.setThinkingLevel(thinking as Parameters<PiRpcProcess['setThinkingLevel']>[0])
+      }
+    } catch (err) {
+      // Must not rethrow: the caller doesn't await this, so an escaping error is an unhandled
+      // rejection that exits the adapter. The refresh below puts the selectors back on what pi kept.
+      process.stderr.write(`pi-acp: deferred model/thinking change failed (${String(err)})\n`)
     }
     if (model || thinking) void this.pushConfigOptionUpdate()
   }

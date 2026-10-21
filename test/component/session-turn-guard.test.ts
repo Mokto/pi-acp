@@ -89,6 +89,31 @@ test('PiAcpSession: a selector refresh during the reply keeps the deferred model
   assert.equal(pushed.at(-1)?.configOptions[0]?.currentValue, 'test/model-b')
 })
 
+test('PiAcpSession: a held model switch that pi rejects still refreshes the selectors', async () => {
+  class RejectingProc extends FakePiRpcProcess {
+    override async setModel(): Promise<void> {
+      throw new Error('pi set_model failed: No API key for test/model-b')
+    }
+  }
+  const proc = new RejectingProc()
+  const session = makeSession(proc)
+  let refreshes = 0
+  session.setConfigOptionsRefresher(async () => {
+    refreshes++
+    return []
+  })
+
+  const pending = session.prompt('hello')
+  await session.setModelWhenIdle('test', 'model-b')
+  const refreshesBeforeEnd = refreshes
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await pending
+  await flushMicrotasks()
+
+  assert.ok(refreshes > refreshesBeforeEnd)
+})
+
 test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes after agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
