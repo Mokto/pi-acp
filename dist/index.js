@@ -1199,9 +1199,33 @@ function pauseStayAwake() {
   };
 }
 
+// src/acp/timeout.ts
+function withTimeout(promise, ms) {
+  return new Promise((resolve4, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve4(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+var TimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Timed out after ${ms}ms`);
+    this.name = "TimeoutError";
+  }
+};
+
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
+var CONTEXT_USAGE_TIMEOUT_MS = 2e3;
 var MAX_CURSOR_SDK_AUTH_RETRIES = 2;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
@@ -2096,7 +2120,8 @@ ${message}` }
     }
   }
   async readContextUsage() {
-    const raw = (await this.proc.getSessionStats())?.contextUsage;
+    const stats = await withTimeout(this.proc.getSessionStats(), CONTEXT_USAGE_TIMEOUT_MS);
+    const raw = stats?.contextUsage;
     const cu = raw && typeof raw === "object" ? raw : {};
     if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
     const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
@@ -2883,29 +2908,6 @@ function toToolKind(toolName) {
       return "other";
   }
 }
-
-// src/acp/timeout.ts
-function withTimeout(promise, ms) {
-  return new Promise((resolve4, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve4(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      }
-    );
-  });
-}
-var TimeoutError = class extends Error {
-  constructor(ms) {
-    super(`Timed out after ${ms}ms`);
-    this.name = "TimeoutError";
-  }
-};
 
 // src/acp/pi-sessions.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync5 } from "fs";

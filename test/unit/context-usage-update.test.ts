@@ -34,6 +34,24 @@ test('turn end sends a usage_update with tokens in context and the window size',
   )
 })
 
+test(
+  'a turn finishes, with its footer, when pi never answers the token stats request',
+  { timeout: 5_000 },
+  async () => {
+    const { conn, proc, session } = makeSession()
+    proc.getSessionStats = () => new Promise(() => {})
+
+    const turn = session.prompt('hello')
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
+
+    assert.equal(await turn, 'end_turn')
+    const text = conn.updates.map(u => u.update as any).filter(u => u.sessionUpdate === 'agent_message_chunk')
+    assert.match(text.at(-1)?.content.text ?? '', /^\n\n↳ \d\d:\d\d/)
+  }
+)
+
 test('sends no usage_update, instead of a 0% or empty ring, when pi has no context window or no count', async () => {
   const { proc, session, usageUpdates } = makeSession()
 
