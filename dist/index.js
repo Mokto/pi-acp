@@ -1783,10 +1783,11 @@ var PiAcpSession = class _PiAcpSession {
   }
   async handleTurnWatchdog() {
     if (!this.pendingTurn) return;
-    const timeoutMsg = this.inferenceStartup ? "Turn timed out waiting for pi to begin inference; aborting and recovering." : "Turn timed out due to pi inactivity (no output); aborting and recovering.";
+    const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs();
+    const duration = ms >= 6e4 ? `${Math.round(ms / 6e4)} min` : `${Math.ceil(ms / 1e3)} s`;
     this.emit({
       sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: timeoutMsg }
+      content: { type: "text", text: `Turn timed out: no output from pi for ${duration}.` }
     });
     try {
       await this.proc.abort();
