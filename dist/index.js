@@ -2884,6 +2884,29 @@ function toToolKind(toolName) {
   }
 }
 
+// src/acp/timeout.ts
+function withTimeout(promise, ms) {
+  return new Promise((resolve4, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve4(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+var TimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Timed out after ${ms}ms`);
+    this.name = "TimeoutError";
+  }
+};
+
 // src/acp/pi-sessions.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync5 } from "fs";
 import { homedir as homedir4 } from "os";
@@ -3637,27 +3660,6 @@ function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : 15e3;
 }
-function withTimeout(promise, ms) {
-  return new Promise((resolve4, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve4(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      }
-    );
-  });
-}
-var TimeoutError = class extends Error {
-  constructor(ms) {
-    super(`Timed out after ${ms}ms`);
-    this.name = "TimeoutError";
-  }
-};
 function buildSessionSummaryFromFile(sessionFile) {
   let raw;
   try {
