@@ -1,5 +1,4 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import * as readline from 'node:readline'
+import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -21,6 +20,31 @@ const ANSI_ESCAPE_REGEX = new RegExp(
   `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
   'g'
 )
+
+// First pi release that emits `agent_settled`; without it no turn ever completes.
+const MIN_PI_VERSION = [0, 80, 4]
+const supportedPiCommands = new Set<string>()
+
+function assertSupportedPiVersion(cmd: string): void {
+  if (supportedPiCommands.has(cmd)) return
+  const res = spawnSync(cmd, ['--version'], {
+    encoding: 'utf-8',
+    timeout: 5_000,
+    shell: shouldUseShellForPiCommand(cmd)
+  })
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${res.stdout ?? ''}${res.stderr ?? ''}`)
+  // Unknown version (not installed, odd output): let the real spawn report it.
+  if (!match) return
+
+  const found = match.slice(1, 4).map(Number)
+  const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i])
+  if (differsAt !== -1 && found[differsAt]! < MIN_PI_VERSION[differsAt]!) {
+    throw new PiRpcSpawnError(
+      `pi v${found.join('.')} is too old: pi-acp needs pi ${MIN_PI_VERSION.join('.')} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+    )
+  }
+  supportedPiCommands.add(cmd)
+}
 
 function stripAnsi(s: string): string {
   // Basic ANSI escape stripping (colors, cursor movement, etc.)
@@ -96,8 +120,7 @@ export class PiRpcProcess {
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', line => {
+    const onLine = (line: string) => {
       if (!line.trim()) return
       let msg: any
       try {
@@ -123,6 +146,24 @@ export class PiRpcProcess {
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+    }
+
+    // pi frames records with LF only. readline also splits on U+2028/U+2029, which
+    // JSON.stringify leaves raw inside strings (e.g. web pages in tool results).
+    let partial: string[] = []
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      let start = 0
+      for (let nl = chunk.indexOf('\n'); nl !== -1; nl = chunk.indexOf('\n', start)) {
+        partial.push(chunk.slice(start, nl))
+        onLine(partial.join('').replace(/\r$/, ''))
+        partial = []
+        start = nl + 1
+      }
+      if (start < chunk.length) partial.push(chunk.slice(start))
+    })
+    child.stdout.on('end', () => {
+      if (partial.length) onLine(partial.join(''))
     })
 
     child.on('exit', (code, signal) => {
@@ -142,6 +183,7 @@ export class PiRpcProcess {
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
+    assertSupportedPiVersion(cmd)
 
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.

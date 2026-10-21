@@ -355,7 +355,7 @@ export class PiAcpSession {
   private deferredThinkingLevel: string | null = null
 
   // Names of pi-contributed slash commands (e.g. extension commands) advertised
-  // to the client. pi runs these synchronously and emits NO agent loop / `agent_end`,
+  // to the client. pi runs these synchronously and emits NO agent loop / `agent_settled`,
   // so a turn carrying such a command is completed on the prompt response instead.
   private piExtensionCommandNames: Set<string> = new Set()
 
@@ -377,9 +377,12 @@ export class PiAcpSession {
   // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
   private turnTerminalFailureHandled = false
 
-  // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
-  // The overall agent loop completes when `agent_end` is emitted.
+  // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
+  // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
   private inAgentLoop = false
+  // Error from the current run's `agent_end`, reported on `agent_settled`. Cleared on
+  // `agent_start`, so a failed attempt that pi retried doesn't fail the turn.
+  private agentRunError = ''
 
   // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
   // dump and tip /compact instead — see translate/narrated-tool-calls.ts.
@@ -396,10 +399,10 @@ export class PiAcpSession {
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
-  // own real `agent_start`/`agent_end`. Those are not the command's own completion — the
+  // own real `agent_start`/`agent_settled`. Those are not the command's own completion — the
   // command's RPC `prompt` response only resolves once the whole handler returns (pi core
   // awaits `_tryExecuteExtensionCommand` before acking) — so while this flag is set,
-  // `agent_end`/error events must not complete the ACP turn early; only the `.then()` in
+  // `agent_settled`/error events must not complete the ACP turn early; only the `.then()` in
   // startTurn() does, once the command handler itself is done.
   private pendingTurnIsExtensionCommand = false
 
@@ -867,6 +870,7 @@ export class PiAcpSession {
     }
     this.turnTerminalFailureHandled = false
     this.inAgentLoop = false
+    this.agentRunError = ''
     this.inferenceStartup = true
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
     this.inFlightTurn = t
@@ -883,12 +887,11 @@ export class PiAcpSession {
     })
 
     // Kick off pi, but completion is determined by pi events, not the RPC response.
-    // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
-    // The full prompt is finished when we see `agent_end`.
+    // The full prompt is finished when we see `agent_settled`.
     this.proc.prompt(t.message, t.images, { streamingBehavior: opts?.streamingBehavior }).then(
       () => {
         // Recognised pi commands (e.g. extension slash commands) run synchronously and
-        // emit no agent loop, so pi never sends `agent_end`. Complete the turn on the
+        // emit no agent loop, so pi never sends `agent_settled`. Complete the turn on the
         // prompt response instead. Model turns answer the prompt request early (before
         // `agent_start`), so this only fires for known command messages.
         if (!this.isExtensionCommandMessage(t.message)) return
@@ -898,7 +901,7 @@ export class PiAcpSession {
         })
       },
       err => {
-        // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
+        // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
         void (async () => {
           await this.flushEmits()
           // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
@@ -1020,7 +1023,7 @@ export class PiAcpSession {
   }
 
   // Resolve the current turn and start the next queued one (if any). Shared by the
-  // `agent_end` event and synchronous command turns that produce no agent loop.
+  // `agent_settled` event and synchronous command turns that produce no agent loop.
   private completeTurn(reason: StopReason): void {
     this.finishLiveTurnIndicator()
     this.clearTurnWatchdog()
@@ -1668,6 +1671,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
+        this.agentRunError = ''
         this.resetNarratedToolCallGate()
         break
       }
@@ -1696,7 +1700,7 @@ export class PiAcpSession {
 
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
-        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
+        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_settled`.
         // Re-arm inference-startup mode: the model is about to receive tool results and
         // may take a while before it starts streaming the next response.
         this.inferenceStartup = true
@@ -1706,18 +1710,17 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
-        // pi fires `agent_end` for a failed LLM call it's about to auto-retry
-        // (willRetry: true), then keeps running — a real `agent_end` follows once
-        // the retry loop finishes. Resolving the ACP prompt here would make Zed
-        // think the turn is done (drops the loading spinner, fires a "ready" toast)
-        // while pi is still working, so only complete the turn when willRetry is falsy.
-        if ((ev as any).willRetry) break
-        if (this.turnTerminalFailureHandled) break
-
         // Non-retryable LLM failures (e.g. revoked OAuth) land here with an empty
         // assistant content[] and stopReason/errorMessage on the last message. Without
         // this, Zed sees a successful empty end_turn.
-        const turnError = this.cancelRequested ? '' : extractAgentEndTurnError(ev)
+        this.agentRunError = this.cancelRequested ? '' : extractAgentEndTurnError(ev)
+        this.flushNarratedToolCallGate()
+        break
+      }
+
+      case 'agent_settled': {
+        if (this.turnTerminalFailureHandled) break
+        const turnError = this.agentRunError
         if (this.tryRetryCursorSdkAuthFlake(turnError)) break
         if (turnError) {
           this.emit({
@@ -1736,7 +1739,7 @@ export class PiAcpSession {
           if (existsSync(getPlanUsageDir())) void this.pushConfigOptionUpdate()
           await this.flushEmits()
           // A nested turn inside a still-running extension command (see
-          // pendingTurnIsExtensionCommand above) — its own agent_end, not the command's.
+          // pendingTurnIsExtensionCommand above) — its own agent_settled, not the command's.
           if (this.pendingTurnIsExtensionCommand) return
           this.completeTurn(this.cancelRequested ? 'cancelled' : turnError ? 'error' : 'end_turn')
         })()

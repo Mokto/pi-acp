@@ -25,6 +25,7 @@ test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not',
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await zed, 'end_turn')
 
   const slack = session.prompt('from-slack', [], { showInClient: true })
@@ -43,6 +44,7 @@ test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not',
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await slack, 'end_turn')
   const cleared = conn.updates.find(
     u => (u as any).update?.sessionUpdate === 'plan' && (u as any).update?.entries?.length === 0
@@ -672,7 +674,7 @@ test('PiAcpSession: auto_retry_end success=false rejects the prompt with finalEr
   assert.equal((failureMsg!.update as any).content.text, '\n\nprovider overloaded: 529')
 })
 
-test('PiAcpSession: agent_end after terminal retry failure does not resolve the prompt', async () => {
+test('PiAcpSession: agent_settled after terminal retry failure does not resolve the prompt', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -688,6 +690,7 @@ test('PiAcpSession: agent_end after terminal retry failure does not resolve the 
   const pending = session.prompt('hello')
   proc.emit({ type: 'auto_retry_end', success: false, attempt: 3, finalError: 'still failing' } as any)
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   await assert.rejects(pending, /still failing/)
 })
@@ -935,7 +938,40 @@ test('PiAcpSession: omits edit tool line when oldText matches multiple times', a
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath }])
 })
 
-test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
+test('PiAcpSession: keeps the turn open past agent_end until agent_settled, not ending it before compaction continues', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  let resolved = false
+  void p.then(() => {
+    resolved = true
+  })
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'compaction_start', reason: 'overflow' })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(resolved, false, 'pi is still compacting and will run again')
+
+  proc.emit({ type: 'compaction_end', reason: 'overflow' })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await p, 'end_turn')
+})
+
+test('PiAcpSession: finishes the turn on agent_settled even when the agent_end record was lost', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -950,10 +986,34 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
 
   const p = session.prompt('hello')
   proc.emit({ type: 'agent_start' })
-  proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
-  const reason = await p
-  assert.equal(reason, 'end_turn')
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await p, 'end_turn')
+})
+
+test('PiAcpSession: a retried run does not inherit the failed attempt error when its own agent_end is lost', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({
+    type: 'agent_end',
+    willRetry: true,
+    messages: [{ role: 'assistant', content: [], stopReason: 'error', errorMessage: '529 overloaded' }]
+  })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_settled' })
+
+  assert.equal(await p, 'end_turn')
 })
 
 test('PiAcpSession: agent_end with assistant stopReason error surfaces text and resolves error', async () => {
@@ -983,6 +1043,7 @@ test('PiAcpSession: agent_end with assistant stopReason error surfaces text and 
       }
     ]
   })
+  proc.emit({ type: 'agent_settled' })
 
   assert.equal(await p, 'error')
   const errMsg = conn.updates.find(
@@ -1021,6 +1082,7 @@ test('PiAcpSession: agent_end with expired OAuth refresh surfaces a short re-log
       }
     ]
   })
+  proc.emit({ type: 'agent_settled' })
 
   assert.equal(await p, 'error')
   const errMsg = conn.updates.find(
@@ -1079,6 +1141,7 @@ test('PiAcpSession: agent_end willRetry with assistant error does not surface a 
   )
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await p, 'end_turn')
 })
 
@@ -1108,8 +1171,9 @@ test('PiAcpSession: agent_end with willRetry does not resolve the prompt (pi is 
   await new Promise(r => setTimeout(r, 10))
   assert.equal(settled, false)
 
-  // The real agent_end after the retry succeeds resolves the turn as normal.
+  // pi settles once the retry succeeds, which resolves the turn as normal.
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
   assert.equal(reason, 'end_turn')
 })
@@ -1152,6 +1216,7 @@ test('PiAcpSession: re-emits startup info as the first chunk of the first prompt
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
@@ -1175,13 +1240,14 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
 
   assert.equal(proc.abortCount, 1)
   assert.equal(reason, 'cancelled')
 })
 
-test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
+test('PiAcpSession: queues concurrent prompt and starts it after agent_settled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -1203,6 +1269,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   assert.equal(r1, 'end_turn')
@@ -1213,6 +1280,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r2 = await second
   assert.equal(r2, 'end_turn')
@@ -1236,6 +1304,7 @@ test('PiAcpSession: queued prompt uses streamingBehavior followUp', async () => 
   assert.equal(proc.prompts[0]!.streamingBehavior, undefined)
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await first, 'end_turn')
 
   assert.equal(proc.prompts.length, 2)
@@ -1243,6 +1312,7 @@ test('PiAcpSession: queued prompt uses streamingBehavior followUp', async () => 
   assert.equal(proc.prompts[1]!.streamingBehavior, 'followUp')
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await second, 'end_turn')
 })
 
@@ -1268,6 +1338,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   const r2 = await second
@@ -1303,6 +1374,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
@@ -1311,7 +1383,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
 const CURSOR_SDK_AUTH_FLAKE =
   'Cursor SDK request failed because the Cursor SDK API key may be invalid or unauthorized. Cursor Agent CLI/Desktop login is not reused. Run /login -> Use an API key -> Cursor, verify CURSOR_API_KEY, or pass --api-key, then retry.'
 
-function emitCursorSdkAuthAgentEnd(proc: FakePiRpcProcess): void {
+function emitCursorSdkAuthFailedRun(proc: FakePiRpcProcess): void {
   proc.emit({
     type: 'agent_end',
     messages: [
@@ -1323,6 +1395,7 @@ function emitCursorSdkAuthAgentEnd(proc: FakePiRpcProcess): void {
       }
     ]
   })
+  proc.emit({ type: 'agent_settled' })
 }
 
 test('PiAcpSession: retries transient Cursor SDK auth errors and completes on success', async () => {
@@ -1341,7 +1414,7 @@ test('PiAcpSession: retries transient Cursor SDK auth errors and completes on su
   const p = session.prompt('hello')
   assert.equal(proc.prompts.length, 1)
 
-  emitCursorSdkAuthAgentEnd(proc)
+  emitCursorSdkAuthFailedRun(proc)
   assert.equal(proc.prompts.length, 2)
   assert.equal(proc.prompts[1]!.message, 'hello')
 
@@ -1369,6 +1442,7 @@ test('PiAcpSession: retries transient Cursor SDK auth errors and completes on su
   )
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await p, 'end_turn')
 })
 
@@ -1386,11 +1460,11 @@ test('PiAcpSession: Cursor SDK auth flake is terminal after two retries', async 
   })
 
   const p = session.prompt('hello')
-  emitCursorSdkAuthAgentEnd(proc)
-  emitCursorSdkAuthAgentEnd(proc)
+  emitCursorSdkAuthFailedRun(proc)
+  emitCursorSdkAuthFailedRun(proc)
   assert.equal(proc.prompts.length, 3)
 
-  emitCursorSdkAuthAgentEnd(proc)
+  emitCursorSdkAuthFailedRun(proc)
   assert.equal(proc.prompts.length, 3)
   assert.equal(await p, 'error')
 
@@ -1430,6 +1504,7 @@ test('PiAcpSession: missing Cursor SDK API key is not retried', async () => {
       }
     ]
   })
+  proc.emit({ type: 'agent_settled' })
 
   assert.equal(await p, 'error')
   assert.equal(proc.prompts.length, 1)

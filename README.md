@@ -43,7 +43,7 @@ npm install -g @earendil-works/pi-coding-agent
 ```
 
 - Node.js 22+
-- `pi` installed and available on your `PATH` (the adapter runs the `pi` executable)
+- `pi` 0.80.4 or newer, installed and available on your `PATH` (the adapter runs the `pi` executable)
 - Configure `pi` separately for your model providers/API keys
 
 ## Install

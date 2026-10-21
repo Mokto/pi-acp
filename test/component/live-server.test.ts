@@ -26,6 +26,7 @@ function finishTurn(proc: FakePiRpcProcess) {
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 }
 
 class NdjsonClient {

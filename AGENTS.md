@@ -28,7 +28,7 @@ Use `@agentclientprotocol/sdk`:
 - `mcpServers` are accepted and stored in session state but not used.
 - Assistant text streams as `agent_message_chunk`, thinking as `agent_thought_chunk`.
 - Tool events map to ACP `tool_call` / `tool_call_update`, with structured diffs for `edit`/`write` and images for image reads where possible.
-- **Requests to pi (`PiRpcProcess.request`) have no timeout.** On the path that completes a turn (between `agent_end` and `completeTurn`), every awaited request is one a stuck pi can hang forever, leaving the client's spinner running. `maybeEmitTokenStats` already awaits `getSessionStats` there; don't add more. Fire-and-forget anything that isn't needed to finish the turn.
+- **Requests to pi (`PiRpcProcess.request`) have no timeout.** On the path that completes a turn (between `agent_settled` and `completeTurn`), every awaited request is one a stuck pi can hang forever, leaving the client's spinner running. `maybeEmitTokenStats` already awaits `getSessionStats` there; don't add more. Fire-and-forget anything that isn't needed to finish the turn.
 
 ## Dev workflow
 
