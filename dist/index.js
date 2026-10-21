@@ -235,6 +235,10 @@ function assertSupportedPiVersion(cmd) {
 function stripAnsi(s) {
   return s.replace(ANSI_ESCAPE_REGEX, "");
 }
+var THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+function isThinkingLevel(x) {
+  return THINKING_LEVELS.includes(x);
+}
 var PiRpcProcess = class _PiRpcProcess {
   child;
   pending = /* @__PURE__ */ new Map();
@@ -434,6 +438,14 @@ var PiRpcProcess = class _PiRpcProcess {
   async setThinkingLevel(level) {
     const res = await this.request({ type: "set_thinking_level", level });
     if (!res.success) throw new Error(`pi set_thinking_level failed: ${res.error ?? JSON.stringify(res.data)}`);
+  }
+  async getAvailableThinkingLevels() {
+    const res = await this.request({ type: "get_available_thinking_levels" });
+    if (!res.success) {
+      throw new Error(`pi get_available_thinking_levels failed: ${res.error ?? JSON.stringify(res.data)}`);
+    }
+    const levels = res.data?.levels;
+    return Array.isArray(levels) ? levels.filter(isThinkingLevel) : [];
   }
   async setFollowUpMode(mode) {
     const res = await this.request({ type: "set_follow_up_mode", mode });
@@ -1754,6 +1766,7 @@ var PiAcpSession = class _PiAcpSession {
     if (thinking) {
       await this.proc.setThinkingLevel(thinking);
     }
+    if (model || thinking) void this.pushConfigOptionUpdate();
   }
   startTurn(t, opts) {
     if (!opts?.retrying) {
@@ -3110,7 +3123,7 @@ function buildSessionConfigOptions(models, thinking, usage = null) {
       currentValue: thinking.currentModeId,
       options: thinking.availableModes.map((m) => ({
         value: m.id,
-        name: m.id,
+        name: m.name,
         description: m.description ?? null
       }))
     });
@@ -3205,14 +3218,6 @@ function toAvailableCommandsFromPiGetCommands(data, opts) {
 
 // src/acp/model-scope.ts
 import { minimatch } from "minimatch";
-var THINKING_LEVELS = {
-  off: true,
-  minimal: true,
-  low: true,
-  medium: true,
-  high: true,
-  xhigh: true
-};
 function isAlias(id) {
   if (id.endsWith("-latest")) return true;
   return !/-\d{8}$/.test(id);
@@ -3266,7 +3271,7 @@ function matchByDisplayName(pattern, models) {
   const direct = exact(pattern);
   if (direct.length > 0) return direct;
   const colonIdx = pattern.lastIndexOf(":");
-  if (colonIdx !== -1 && THINKING_LEVELS[pattern.slice(colonIdx + 1)]) {
+  if (colonIdx !== -1 && isThinkingLevel(pattern.slice(colonIdx + 1))) {
     return exact(pattern.slice(0, colonIdx));
   }
   return [];
@@ -3277,7 +3282,7 @@ function resolveEnabledModelIds(models, patterns) {
     if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
       const colonIdx = pattern.lastIndexOf(":");
       let globPattern = pattern;
-      if (colonIdx !== -1 && THINKING_LEVELS[pattern.slice(colonIdx + 1)]) {
+      if (colonIdx !== -1 && isThinkingLevel(pattern.slice(colonIdx + 1))) {
         globPattern = pattern.slice(0, colonIdx);
       }
       for (const m of models) {
@@ -4887,9 +4892,6 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     return {};
   }
 };
-function isThinkingLevel(x) {
-  return x === "off" || x === "minimal" || x === "low" || x === "medium" || x === "high" || x === "xhigh";
-}
 function findPiModelById(data, id) {
   if (!id || !data || typeof data !== "object") return void 0;
   const models = data.models;
@@ -4914,16 +4916,29 @@ async function getThinkingState(proc2, pre) {
   })();
   const tl = typeof state?.thinkingLevel === "string" ? state.thinkingLevel : null;
   if (tl && isThinkingLevel(tl)) current = tl;
-  const available = ["off", "minimal", "low", "medium", "high", "xhigh"];
+  let supported = [];
+  try {
+    supported = await proc2.getAvailableThinkingLevels();
+  } catch {
+  }
+  if (!supported.length) supported = ["off", "minimal", "low", "medium", "high", "xhigh"];
   return {
     currentModeId: current,
-    availableModes: available.map((id) => ({
+    availableModes: THINKING_LEVELS.filter((id) => id === current || supported.includes(id)).map((id) => ({
       id,
-      name: `Thinking: ${id}`,
-      description: null
+      ...THINKING_LEVEL_LABELS[id]
     }))
   };
 }
+var THINKING_LEVEL_LABELS = {
+  off: { name: "Off", description: "No reasoning" },
+  minimal: { name: "Minimal", description: "Very brief reasoning" },
+  low: { name: "Low", description: "Light reasoning" },
+  medium: { name: "Medium", description: "Moderate reasoning" },
+  high: { name: "High", description: "Deep reasoning" },
+  xhigh: { name: "Extra high", description: "Extra-high reasoning" },
+  max: { name: "Max", description: "Maximum reasoning" }
+};
 async function getModelState(proc2, pre) {
   let availableModels = [];
   const data = pre?.availableModels ?? await (async () => {

@@ -873,6 +873,7 @@ export class PiAcpSession {
     if (thinking) {
       await this.proc.setThinkingLevel(thinking as Parameters<PiRpcProcess['setThinkingLevel']>[0])
     }
+    if (model || thinking) void this.pushConfigOptionUpdate()
   }
 
   private startTurn(t: QueuedTurn, opts?: { streamingBehavior?: 'steer' | 'followUp'; retrying?: boolean }): void {

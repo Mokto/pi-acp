@@ -1,4 +1,5 @@
 import { minimatch } from 'minimatch'
+import { isThinkingLevel } from '../pi-rpc/process.js'
 
 /**
  * Resolve pi's `enabledModels` patterns to the set of concrete models they
@@ -16,15 +17,6 @@ import { minimatch } from 'minimatch'
  * returns the full registry), so we have to reproduce the matching here.
  */
 export type ScopeModel = { provider: string; id: string; name?: string }
-
-const THINKING_LEVELS: Record<string, true> = {
-  off: true,
-  minimal: true,
-  low: true,
-  medium: true,
-  high: true,
-  xhigh: true
-}
 
 /** A model id "looks like an alias" when it has no trailing -YYYYMMDD date (or ends with -latest). */
 function isAlias(id: string): boolean {
@@ -106,7 +98,7 @@ function matchByDisplayName(pattern: string, models: ScopeModel[]): ScopeModel[]
   if (direct.length > 0) return direct
 
   const colonIdx = pattern.lastIndexOf(':')
-  if (colonIdx !== -1 && THINKING_LEVELS[pattern.slice(colonIdx + 1)]) {
+  if (colonIdx !== -1 && isThinkingLevel(pattern.slice(colonIdx + 1))) {
     return exact(pattern.slice(0, colonIdx))
   }
 
@@ -126,7 +118,7 @@ export function resolveEnabledModelIds(models: ScopeModel[], patterns: string[])
       // Strip a trailing ":<thinking level>" before treating the rest as a glob.
       const colonIdx = pattern.lastIndexOf(':')
       let globPattern = pattern
-      if (colonIdx !== -1 && THINKING_LEVELS[pattern.slice(colonIdx + 1)]) {
+      if (colonIdx !== -1 && isThinkingLevel(pattern.slice(colonIdx + 1))) {
         globPattern = pattern.slice(0, colonIdx)
       }
 

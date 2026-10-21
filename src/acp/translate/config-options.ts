@@ -56,7 +56,7 @@ export function buildSessionConfigOptions(
       currentValue: thinking.currentModeId,
       options: thinking.availableModes.map(m => ({
         value: m.id,
-        name: m.id,
+        name: m.name,
         description: m.description ?? null
       }))
     })
