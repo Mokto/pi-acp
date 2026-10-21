@@ -6,11 +6,11 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 
 // Mirrors what /trip-plan (and /optimize, /dev-skills) actually do: the extension
 // command's handler runs one or more *independent* nested turns internally via
-// pi.sendUserMessage()+waitForIdle(), each firing its own real `agent_start`/`agent_end`,
+// pi.sendUserMessage()+waitForIdle(), each firing its own real `agent_start`/`agent_settled`,
 // before the command handler itself returns. pi core's RPC `prompt` only resolves once
 // the whole handler is done (`_tryExecuteExtensionCommand` is awaited before acking), so
 // this fake's `prompt()` only resolves when the test calls `resolvePrompt()` — letting it
-// emit `agent_end` for nested turns first, exactly like the real command would.
+// emit `agent_settled` for nested turns first, exactly like the real command would.
 class NestedTurnFakePiRpcProcess extends FakePiRpcProcess {
   private resolvers: Array<() => void> = []
 
@@ -41,12 +41,12 @@ function makeSession(proc: FakePiRpcProcess): PiAcpSession {
   })
 }
 
-test('PiAcpSession: a registered pi command turn completes on the prompt response (no agent_end)', async () => {
+test('PiAcpSession: a registered pi command turn completes on the prompt response (no agent_settled)', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
   session.setPiExtensionCommands(['cursor-fast'])
 
-  // FakePiRpcProcess.prompt resolves immediately and never emits `agent_end`.
+  // FakePiRpcProcess.prompt resolves immediately and never emits `agent_settled`.
   // The command turn must still complete; otherwise this await hangs and the test times out.
   const reason = await session.prompt('/cursor-fast')
 
@@ -57,22 +57,24 @@ test('PiAcpSession: a registered pi command turn completes on the prompt respons
   )
 })
 
-test('PiAcpSession: nested agent_end during a command does not end the ACP turn early', async () => {
+test('PiAcpSession: nested agent_settled during a command does not end the ACP turn early', async () => {
   const proc = new NestedTurnFakePiRpcProcess()
   const session = makeSession(proc)
   session.setPiExtensionCommands(['trip-plan'])
 
   const pending = session.prompt('/trip-plan do the thing')
 
-  // Round 1: internal writer turn finishes — a real agent_end, but not the command's own.
+  // Round 1: internal writer turn finishes — a real agent_settled, but not the command's own.
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(session.hasActiveTurn(), true, 'turn must still be active after a nested agent_end')
+  assert.equal(session.hasActiveTurn(), true, 'turn must still be active after a nested agent_settled')
 
-  // Round 2: reviewer requests changes, writer revises — another nested agent_end.
+  // Round 2: reviewer requests changes, writer revises — another nested agent_settled.
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(session.hasActiveTurn(), true, 'turn must still be active after a second nested agent_end')
+  assert.equal(session.hasActiveTurn(), true, 'turn must still be active after a second nested agent_settled')
 
   // The command handler itself now returns — this is what actually completes the turn.
   proc.resolvePrompt()
@@ -81,7 +83,7 @@ test('PiAcpSession: nested agent_end during a command does not end the ACP turn 
   assert.equal(session.hasActiveTurn(), false)
 })
 
-test('PiAcpSession: a non-command message still waits for agent_end', async () => {
+test('PiAcpSession: a non-command message still waits for agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
   session.setPiExtensionCommands(['cursor-fast'])
@@ -89,6 +91,7 @@ test('PiAcpSession: a non-command message still waits for agent_end', async () =
   const pending = session.prompt('not a command')
   // Resolution only happens once pi reports the agent loop finished.
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   assert.equal(await pending, 'end_turn')
 })

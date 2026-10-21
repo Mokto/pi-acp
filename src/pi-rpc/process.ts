@@ -1,5 +1,4 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -96,8 +95,7 @@ export class PiRpcProcess {
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', line => {
+    const onLine = (line: string) => {
       if (!line.trim()) return
       let msg: any
       try {
@@ -123,6 +121,24 @@ export class PiRpcProcess {
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+    }
+
+    // pi frames records with LF only. readline also splits on U+2028/U+2029, which
+    // JSON.stringify leaves raw inside strings (e.g. web pages in tool results).
+    let partial: string[] = []
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      let start = 0
+      for (let nl = chunk.indexOf('\n'); nl !== -1; nl = chunk.indexOf('\n', start)) {
+        partial.push(chunk.slice(start, nl))
+        onLine(partial.join('').replace(/\r$/, ''))
+        partial = []
+        start = nl + 1
+      }
+      if (start < chunk.length) partial.push(chunk.slice(start))
+    })
+    child.stdout.on('end', () => {
+      if (partial.length) onLine(partial.join(''))
     })
 
     child.on('exit', (code, signal) => {

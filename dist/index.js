@@ -196,7 +196,6 @@ import { promisify } from "util";
 
 // src/pi-rpc/process.ts
 import { execFileSync, spawn as spawn2 } from "child_process";
-import * as readline from "readline";
 var PiRpcSpawnError = class extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
   code;
@@ -229,8 +228,7 @@ var PiRpcProcess = class _PiRpcProcess {
   }
   constructor(child) {
     this.child = child;
-    const rl = readline.createInterface({ input: child.stdout });
-    rl.on("line", (line) => {
+    const onLine = (line) => {
       if (!line.trim()) return;
       let msg;
       try {
@@ -252,6 +250,21 @@ var PiRpcProcess = class _PiRpcProcess {
         }
       }
       for (const h of this.eventHandlers) h(msg);
+    };
+    let partial = [];
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      let start = 0;
+      for (let nl = chunk.indexOf("\n"); nl !== -1; nl = chunk.indexOf("\n", start)) {
+        partial.push(chunk.slice(start, nl));
+        onLine(partial.join("").replace(/\r$/, ""));
+        partial = [];
+        start = nl + 1;
+      }
+      if (start < chunk.length) partial.push(chunk.slice(start));
+    });
+    child.stdout.on("end", () => {
+      if (partial.length) onLine(partial.join(""));
     });
     child.on("exit", (code, signal) => {
       this.hasExited = true;
@@ -1341,7 +1354,7 @@ var PiAcpSession = class _PiAcpSession {
   deferredModel = null;
   deferredThinkingLevel = null;
   // Names of pi-contributed slash commands (e.g. extension commands) advertised
-  // to the client. pi runs these synchronously and emits NO agent loop / `agent_end`,
+  // to the client. pi runs these synchronously and emits NO agent loop / `agent_settled`,
   // so a turn carrying such a command is completed on the prompt response instead.
   piExtensionCommandNames = /* @__PURE__ */ new Set();
   // Rebuilds the full ACP config-option set (model + thinking) from current pi
@@ -1361,9 +1374,12 @@ var PiAcpSession = class _PiAcpSession {
   customTitledToolCallIds = /* @__PURE__ */ new Set();
   // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
   turnTerminalFailureHandled = false;
-  // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
-  // The overall agent loop completes when `agent_end` is emitted.
+  // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
+  // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
   inAgentLoop = false;
+  // Error from the latest `agent_end`, reported on `agent_settled`. A retry's own
+  // `agent_end` overwrites it, so an attempt pi recovered from doesn't fail the turn.
+  agentRunError = "";
   // Gate for model-narrated `Tool call(...)` text (no structured toolCall). Suppress the
   // dump and tip /compact instead — see translate/narrated-tool-calls.ts.
   assistantTextAccum = "";
@@ -1377,10 +1393,10 @@ var PiAcpSession = class _PiAcpSession {
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
-  // own real `agent_start`/`agent_end`. Those are not the command's own completion — the
+  // own real `agent_start`/`agent_settled`. Those are not the command's own completion — the
   // command's RPC `prompt` response only resolves once the whole handler returns (pi core
   // awaits `_tryExecuteExtensionCommand` before acking) — so while this flag is set,
-  // `agent_end`/error events must not complete the ACP turn early; only the `.then()` in
+  // `agent_settled`/error events must not complete the ACP turn early; only the `.then()` in
   // startTurn() does, once the command handler itself is done.
   pendingTurnIsExtensionCommand = false;
   // Context window size reported by pi (updated from getSessionStats).
@@ -1721,6 +1737,7 @@ var PiAcpSession = class _PiAcpSession {
     }
     this.turnTerminalFailureHandled = false;
     this.inAgentLoop = false;
+    this.agentRunError = "";
     this.inferenceStartup = true;
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.inFlightTurn = t;
@@ -1846,7 +1863,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     this.emit({ sessionUpdate: "plan", entries: [] });
   }
   // Resolve the current turn and start the next queued one (if any). Shared by the
-  // `agent_end` event and synchronous command turns that produce no agent loop.
+  // `agent_settled` event and synchronous command turns that produce no agent loop.
   completeTurn(reason) {
     this.finishLiveTurnIndicator();
     this.clearTurnWatchdog();
@@ -2411,9 +2428,13 @@ ${formatAutoRetryMessage(ev)}` }
         break;
       }
       case "agent_end": {
-        if (ev.willRetry) break;
+        this.agentRunError = this.cancelRequested ? "" : extractAgentEndTurnError(ev);
+        this.flushNarratedToolCallGate();
+        break;
+      }
+      case "agent_settled": {
         if (this.turnTerminalFailureHandled) break;
-        const turnError = this.cancelRequested ? "" : extractAgentEndTurnError(ev);
+        const turnError = this.agentRunError;
         if (this.tryRetryCursorSdkAuthFlake(turnError)) break;
         if (turnError) {
           this.emit({

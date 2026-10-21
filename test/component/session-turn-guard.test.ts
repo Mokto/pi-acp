@@ -19,7 +19,7 @@ function makeSession(proc: FakePiRpcProcess): PiAcpSession {
   })
 }
 
-test('PiAcpSession: defers setModel while a turn is active and flushes after agent_end', async () => {
+test('PiAcpSession: defers setModel while a turn is active and flushes after agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
 
@@ -30,13 +30,14 @@ test('PiAcpSession: defers setModel while a turn is active and flushes after age
   assert.deepEqual(proc.setModelCalls, [])
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await pending, 'end_turn')
   await flushMicrotasks()
 
   assert.deepEqual(proc.setModelCalls, [{ provider: 'test', modelId: 'model-b' }])
 })
 
-test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes after agent_end', async () => {
+test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes after agent_settled', async () => {
   const proc = new FakePiRpcProcess()
   const session = makeSession(proc)
 
@@ -45,6 +46,7 @@ test('PiAcpSession: defers setThinkingLevel while a turn is active and flushes a
   assert.deepEqual(proc.setThinkingCalls, [])
 
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await pending, 'end_turn')
   await flushMicrotasks()
 
@@ -64,6 +66,7 @@ test('PiAcpSession: pi activity resets the inactivity watchdog', async () => {
     proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
     await new Promise(resolve => setTimeout(resolve, 25))
     proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
 
     assert.equal(await pending, 'end_turn')
     assert.equal(proc.abortCount, 0)
@@ -102,6 +105,7 @@ test('PiAcpSession: turn watchdog aborts a stuck turn and drains the queue', asy
     assert.equal(proc.prompts.length, 2)
 
     proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
     assert.equal(await second, 'end_turn')
 
     const timeoutMsg = conn.updates.find(
@@ -147,6 +151,7 @@ test('PiAcpSession: watchdog does not fire while waiting for the user to answer 
     answer()
     await flushMicrotasks()
     proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
     assert.equal(await pending, 'end_turn')
     assert.equal(proc.abortCount, 0)
   } finally {
