@@ -34,6 +34,31 @@ test('turn end sends a usage_update with tokens in context and the window size',
   )
 })
 
+test('the ring grows after each model step, before the turn ends', async () => {
+  const { proc, session, usageUpdates } = makeSession()
+  proc.sessionStats = { contextUsage: { tokens: 30_000, contextWindow: 200_000, percent: 15 } }
+
+  const turn = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  await new Promise(r => setTimeout(r, 0))
+  await (session as any).flushEmits()
+
+  assert.deepEqual(
+    usageUpdates().map(u => [u.used, u.size]),
+    [[30_000, 200_000]]
+  )
+  assert.equal(session.hasActiveTurn(), true)
+
+  proc.sessionStats = { contextUsage: { tokens: 45_000, contextWindow: 200_000, percent: 23 } }
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await turn
+
+  assert.deepEqual(usageUpdates().at(-1), { sessionUpdate: 'usage_update', used: 45_000, size: 200_000 })
+})
+
 test(
   'a turn finishes, with its footer, when pi never answers the token stats request',
   { timeout: 5_000 },

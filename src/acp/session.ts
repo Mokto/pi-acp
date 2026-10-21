@@ -1209,7 +1209,7 @@ export class PiAcpSession {
     this.emit({ sessionUpdate: 'usage_update', used: tokens, size: contextWindow })
   }
 
-  /** Refreshes the context ring outside turn ends: on a reopened thread and after a model switch. */
+  /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
   async pushUsageUpdate(): Promise<void> {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === 'false') return
     try {
@@ -1769,6 +1769,7 @@ export class PiAcpSession {
         this.inferenceStartup = true
         // End of this model segment: tip /compact if it narrated tools, then reset for the next.
         this.flushNarratedToolCallGate()
+        void this.pushUsageUpdate()
         break
       }
 
