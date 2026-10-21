@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
@@ -32,6 +35,55 @@ test('turn end sends a usage_update with tokens in context and the window size',
     usageUpdates().map(u => [u.used, u.size]),
     [[84_000, 200_000]]
   )
+})
+
+test('the ring grows after each model step, before the turn ends', async () => {
+  const { proc, session, usageUpdates } = makeSession()
+  proc.sessionStats = { contextUsage: { tokens: 30_000, contextWindow: 200_000, percent: 15 } }
+
+  const turn = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  await new Promise(r => setTimeout(r, 0))
+  await (session as any).flushEmits()
+
+  assert.deepEqual(
+    usageUpdates().map(u => [u.used, u.size]),
+    [[30_000, 200_000]]
+  )
+  assert.equal(session.hasActiveTurn(), true)
+
+  proc.sessionStats = { contextUsage: { tokens: 45_000, contextWindow: 200_000, percent: 23 } }
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await turn
+
+  assert.deepEqual(usageUpdates().at(-1), { sessionUpdate: 'usage_update', used: 45_000, size: 200_000 })
+})
+
+test('the plan usage button refreshes after each model step, before the turn ends', async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), 'pi-acp-plan-usage-'))
+  mkdirSync(join(agentDir, 'plan-usage'))
+  const oldEnv = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = agentDir
+  try {
+    const { conn, proc, session } = makeSession()
+    session.setConfigOptionsRefresher(async () => [])
+
+    void session.prompt('hello')
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'turn_end' })
+    await new Promise(r => setTimeout(r, 0))
+    await (session as any).flushEmits()
+
+    assert.equal(conn.updates.filter(u => (u.update as any).sessionUpdate === 'config_option_update').length, 1)
+    assert.equal(session.hasActiveTurn(), true)
+  } finally {
+    if (oldEnv === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = oldEnv
+    rmSync(agentDir, { recursive: true, force: true })
+  }
 })
 
 test(
