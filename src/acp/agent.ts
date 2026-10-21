@@ -1567,8 +1567,11 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    // Advertise slash commands after the response so the client knows the session exists.
-    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0)
+    // Advertise slash commands and context usage after the response so the client knows the session exists.
+    setTimeout(() => {
+      void this.advertiseCommands(session, fileCommands)
+      void session.pushUsageUpdate()
+    }, 0)
 
     return response
   }

@@ -21,10 +21,9 @@ test('extension statuses appear only in the footer and can be replaced or cleare
     conn.updates.length = 0
     await (session as any).maybeEmitTokenStats()
     await (session as any).flushEmits()
-    assert.equal(conn.updates.length, 1)
-    const update = conn.updates[0]!.update
-    assert.equal(update.sessionUpdate, 'agent_message_chunk')
-    return (update as any).content.text as string
+    const chunks = conn.updates.filter(u => u.update.sessionUpdate === 'agent_message_chunk')
+    assert.equal(chunks.length, 1)
+    return (chunks[0]!.update as any).content.text as string
   }
 
   setStatus('sync-health', '/reload ⚠️')
