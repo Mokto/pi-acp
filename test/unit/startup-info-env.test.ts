@@ -55,7 +55,8 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
       },
       setConfigOptionsRefresher(_refresh: () => Promise<unknown>) {
         // no-op; selector refresh is not exercised here
-      }
+      },
+      replayEarlyEvents() {}
     }
 
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)

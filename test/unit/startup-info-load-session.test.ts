@@ -29,6 +29,7 @@ test('PiAcpAgent: does not emit startup info on loadSession', async () => {
   ;(PiRpcProcess as any).spawn = async () => {
     return {
       onEvent: () => () => {},
+      takeEarlyEvents: () => [],
       getMessages: async () => ({ messages: [] }),
       getAvailableModels: async () => ({ models: [] }),
       getState: async () => ({ thinkingLevel: 'medium' })
@@ -78,6 +79,7 @@ test('PiAcpAgent: loadSession writes summary file and sets startup info when get
   const originalSpawn = PiRpcProcess.spawn
   ;(PiRpcProcess as any).spawn = async () => ({
     onEvent: () => () => {},
+    takeEarlyEvents: () => [],
     // getMessages never resolves — simulates a hung pi process
     getMessages: () => new Promise(() => {}),
     getAvailableModels: async () => ({ models: [] }),

@@ -129,6 +129,7 @@ Manual fallback (if the workflow is broken), for version `X.Y.Z`:
   - Hovering an option shows its `description`; Zed also adds a "favorite" star to every row.
   - Zed saves a picked value to its settings (`default_config_options`) and replays it into new sessions via `session/set_config_option`, so handlers must accept stale or unknown values without throwing.
 - **Zed holds messages sent mid-turn in its own queue** for external agents and only sends them when the turn ends (or cancels the turn first, with "Send Now"), so pi-acp never sees them early. Steering can't be built here until ACP adds it (RFD `session/inject`).
+- Extension `ctx.ui.notify` warnings and errors that arrive outside a reply become Zed notices, split at the first ". " or line break into title and description (`src/acp/translate/notice.ts`). Ocean's `extensions` repo writes its notify text as "Title. Detail." for that split; change both sides together.
 - The `plan_usage` option reads `~/.pi/agent/plan-usage/<provider>.json`, written by the `plan-usage` extension in Ocean's `ocean-extensions` repo. That file format is a contract between the two repos (see the README); change both sides together.
 
 ## References

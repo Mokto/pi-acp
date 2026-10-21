@@ -95,6 +95,7 @@ function stubSpawn(proc: Record<string, unknown>) {
     getAvailableModels: async () => ({ models: [] }),
     getState: async () => ({ thinkingLevel: 'medium' }),
     getMessages: async () => ({ messages: [] }),
+    takeEarlyEvents: () => [],
     ...proc
   })
   return () => {

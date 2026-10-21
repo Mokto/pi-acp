@@ -77,3 +77,25 @@ test('PiRpcProcess: refuses a pi older than 0.80.4 instead of starting sessions 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test(
+  'PiRpcProcess: keeps events sent before anyone listens, and hands them over once',
+  { timeout: 5_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pi-acp-early-'))
+    const proc = await PiRpcProcess.spawn({ cwd: dir, piCommand: writeFakePi(dir, FAKE_PI) })
+    try {
+      await proc.getMessages()
+      const events: PiRpcEvent[] = []
+      proc.onEvent(ev => events.push(ev))
+      await proc.getMessages()
+
+      assert.deepEqual(proc.takeEarlyEvents(), [{ type: 'message_update', text: TEXT }])
+      assert.deepEqual(proc.takeEarlyEvents(), [])
+      assert.deepEqual(events, [{ type: 'message_update', text: TEXT }])
+    } finally {
+      proc.dispose()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+)

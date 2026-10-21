@@ -31,6 +31,7 @@ import {
 } from './translate/bash.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
 import { getPlanUsageDir } from './translate/plan-usage.js'
+import { noticeFromNotify } from './translate/notice.js'
 import { compactionStateFromPiEnd, compactionUpdate, type CompactionState } from './translate/compaction.js'
 import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -43,6 +44,8 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   /** The client advertised `session.compaction`, so compactions use the client's compaction entry. */
   compactionEntries?: boolean
+  /** The client advertised `session.notices`, so warnings outside a reply become notices. */
+  notices?: boolean
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
 }
@@ -296,7 +299,8 @@ export class SessionManager {
       fileCommands: params.fileCommands ?? [],
       store: this.store,
       onDead: () => this.forget(sessionId),
-      compactionEntries: params.compactionEntries
+      compactionEntries: params.compactionEntries,
+      notices: params.notices
     })
 
     this.sessions.set(sessionId, session)
@@ -327,7 +331,8 @@ export class SessionManager {
       fileCommands: params.fileCommands ?? [],
       store: this.store,
       onDead: () => this.forget(sessionId),
-      compactionEntries: params.compactionEntries
+      compactionEntries: params.compactionEntries,
+      notices: params.notices
     })
 
     this.sessions.set(sessionId, session)
@@ -355,6 +360,7 @@ export class PiAcpSession {
   private readonly fileCommands: FileSlashCommand[]
   private readonly onDead: (() => void) | null
   private readonly compactionEntries: boolean
+  private readonly notices: boolean
   private compactionId: string | null = null
   private compactionsFinishedCount = 0
 
@@ -488,6 +494,7 @@ export class PiAcpSession {
     /** Called once when the underlying pi process exits, so the owning SessionManager can evict this session. */
     onDead?: () => void
     compactionEntries?: boolean
+    notices?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -498,6 +505,7 @@ export class PiAcpSession {
     this.store = opts.store ?? null
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
+    this.notices = opts.notices ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.proc.onExit?.((code, signal) => {
@@ -722,6 +730,11 @@ export class PiAcpSession {
 
   get compactionsFinished(): number {
     return this.compactionsFinishedCount
+  }
+
+  /** Handles the events pi sent before this session listened; call once the client knows the session. */
+  replayEarlyEvents(): void {
+    for (const ev of this.proc.takeEarlyEvents()) this.handlePiEvent(ev)
   }
 
   finishCompaction(state: CompactionState): void {
@@ -1878,15 +1891,24 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
-      // Leading "\n\n", matching the token-footer convention (see the `\n\n\u21b3` emit
-      // above): each notify() call arrives as its own agent_message_chunk with no
-      // inherent separator, so back-to-back calls from something like /audit's
-      // multi-step pipeline ("Gathering diff…" → "Running 4 lenses…" → "lens done…")
-      // otherwise render as one run-on sentence instead of a readable progress list.
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: `\n\n${stringProp(ev, 'message') ?? 'Pi notification'}` } satisfies ContentBlock
-      })
+      const message = stringProp(ev, 'message') ?? 'Pi notification'
+      const severity = stringProp(ev, 'notifyType')
+      const warning = severity === 'warning' || severity === 'error'
+      // Outside a reply nobody asked for it: drop info ("… ready" at startup), and show
+      // warnings and errors as notices where the client has them.
+      if (!this.pendingTurn && warning && this.notices) {
+        this.emit(noticeFromNotify(message, severity))
+      } else if (this.pendingTurn || warning) {
+        // Leading "\n\n", matching the token-footer convention (see the `\n\n\u21b3` emit
+        // above): each notify() call arrives as its own agent_message_chunk with no
+        // inherent separator, so back-to-back calls from something like /audit's
+        // multi-step pipeline ("Gathering diff…" → "Running 4 lenses…" → "lens done…")
+        // otherwise render as one run-on sentence instead of a readable progress list.
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `\n\n${message}` } satisfies ContentBlock
+        })
+      }
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }

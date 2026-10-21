@@ -11,7 +11,7 @@ test('PiAcpSession: notify extension UI request is separated with a leading blan
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd: process.cwd(),
     mcpServers: [],
@@ -19,6 +19,8 @@ test('PiAcpSession: notify extension UI request is separated with a leading blan
     conn: asAgentConn(conn),
     fileCommands: []
   })
+  void session.prompt('/audit')
+  await new Promise(r => setTimeout(r, 0))
 
   proc.emit({
     type: 'extension_ui_request',
@@ -30,8 +32,9 @@ test('PiAcpSession: notify extension UI request is separated with a leading blan
 
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
+  const chunks = conn.updates.filter(u => (u.update as any).sessionUpdate === 'agent_message_chunk')
+  assert.equal(chunks.length, 1)
+  assert.deepEqual(chunks[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: '\n\nRunning 4 lenses in parallel…' }
   })
