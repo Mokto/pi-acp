@@ -44,6 +44,10 @@ class FakeProc {
     return () => {}
   }
 
+  takeEarlyEvents() {
+    return []
+  }
+
   async prompt() {}
 }
 

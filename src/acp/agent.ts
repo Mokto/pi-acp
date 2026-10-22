@@ -242,6 +242,7 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
   private clientSupportsCompaction = false
+  private clientSupportsNotices = false
 
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
@@ -284,8 +285,10 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
       proc,
       fileCommands,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     })
+    session.replayEarlyEvents()
     session.setConfigOptionsRefresher(async () =>
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
@@ -349,6 +352,7 @@ export class PiAcpAgent implements ACPAgent {
     const supportedVersion = 1
     const requested = params.protocolVersion
     this.clientSupportsCompaction = Boolean(params.clientCapabilities?.session?.compaction)
+    this.clientSupportsNotices = Boolean(params.clientCapabilities?.session?.notices)
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -397,7 +401,8 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -503,10 +508,13 @@ export class PiAcpAgent implements ACPAgent {
     // it will still be emitted as the first chunk of the first prompt.
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-    // Advertise slash commands (ACP: available_commands_update)
+    // Advertise slash commands (ACP: available_commands_update) and handle what pi sent at startup.
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
     // So we must send this *after* the session/new response has been delivered.
-    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0)
+    setTimeout(() => {
+      void this.advertiseCommands(session, fileCommands)
+      session.replayEarlyEvents()
+    }, 0)
 
     return response
   }
@@ -1374,7 +1382,8 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
       proc,
       fileCommands,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     })
 
     return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile })
@@ -1564,6 +1573,7 @@ export class PiAcpAgent implements ACPAgent {
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands)
       void session.pushUsageUpdate()
+      session.replayEarlyEvents()
     }, 0)
 
     return response

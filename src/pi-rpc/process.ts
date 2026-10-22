@@ -120,6 +120,9 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  // Extensions' session_start hooks run before pi answers the first request, so their
+  // events arrive before any session listens; kept until the session takes them.
+  private earlyEvents: PiRpcEvent[] | null = []
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   private readonly preludeLines: string[] = []
   private hasExited = false
@@ -157,6 +160,7 @@ export class PiRpcProcess {
         }
       }
 
+      if (this.earlyEvents && this.eventHandlers.length === 0) this.earlyEvents.push(msg as PiRpcEvent)
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
     }
 
@@ -270,6 +274,13 @@ export class PiRpcProcess {
     }
 
     return proc
+  }
+
+  /** Events pi sent while nothing listened; returns them once and stops keeping more. */
+  takeEarlyEvents(): PiRpcEvent[] {
+    const events = this.earlyEvents ?? []
+    this.earlyEvents = null
+    return events
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {

@@ -37,6 +37,14 @@ export class FakePiRpcProcess {
   abortCount = 0
   exited = false
 
+  earlyEvents: PiRpcEvent[] = []
+
+  takeEarlyEvents(): PiRpcEvent[] {
+    const events = this.earlyEvents
+    this.earlyEvents = []
+    return events
+  }
+
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
     return () => {
