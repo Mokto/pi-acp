@@ -1383,7 +1383,9 @@ function findUniqueLineNumber(text, needle) {
   }
   return line;
 }
-function getToolPath(args) {
+var FILE_TOOLS = /* @__PURE__ */ new Set(["read", "write", "edit", "grep", "find", "ls"]);
+function getToolPath(toolName, args) {
+  if (!FILE_TOOLS.has(toolName)) return void 0;
   const record = args;
   if (typeof record?.path === "string") return record.path;
   if (typeof record?.file_path === "string") return record.file_path;
@@ -1434,7 +1436,7 @@ function getEditOldTexts(args) {
   return oldTexts;
 }
 function getInitialFileDiffContent(toolName, args, cwd, snapshotOldText) {
-  const rawPath = getToolPath(args);
+  const rawPath = getToolPath(toolName, args);
   if (!rawPath) return void 0;
   const path = isAbsolute2(rawPath) ? rawPath : resolvePath(cwd, rawPath);
   if (toolName === "edit") return void 0;
@@ -1452,8 +1454,8 @@ function getInitialFileDiffContent(toolName, args, cwd, snapshotOldText) {
   }
   return void 0;
 }
-function toToolCallLocations(args, cwd, line) {
-  const path = getToolPath(args);
+function toToolCallLocations(toolName, args, cwd, line) {
+  const path = getToolPath(toolName, args);
   if (!path) return void 0;
   const resolvedPath = isAbsolute2(path) ? path : resolvePath(cwd, path);
   return [{ path: resolvedPath, ...typeof line === "number" ? { line } : {} }];
@@ -2420,7 +2422,7 @@ ${message}` }
                 return { partialArgs: s };
               }
             })();
-            const locations = toToolCallLocations(rawInput, this.cwd);
+            const locations = toToolCallLocations(toolName, rawInput, this.cwd);
             const existingStatus = this.currentToolCalls.get(toolCallId);
             const status = existingStatus ?? "pending";
             if (isBashTool(toolName)) {
@@ -2475,7 +2477,7 @@ ${message}` }
           break;
         }
         if (isBashTool(toolName)) {
-          const locations2 = toToolCallLocations(args, this.cwd);
+          const locations2 = toToolCallLocations(toolName, args, this.cwd);
           const existingStatus = this.currentToolCalls.get(toolCallId);
           this.currentToolCalls.set(toolCallId, "in_progress");
           this.emitBashToolCall({
@@ -2493,7 +2495,7 @@ ${message}` }
         let snapshotOldText;
         if (isFileMutation) {
           this.fileMutationToolCallIds.add(toolCallId);
-          const p = getToolPath(args);
+          const p = getToolPath(toolName, args);
           if (p) {
             try {
               const abs = isAbsolute2(p) ? p : resolvePath(this.cwd, p);
@@ -2512,7 +2514,7 @@ ${message}` }
             }
           }
         }
-        const locations = toToolCallLocations(args, this.cwd, line);
+        const locations = toToolCallLocations(toolName, args, this.cwd, line);
         const initialFileContent = isFileMutation ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText) : void 0;
         if (initialFileContent) this.fileMutationDiffsEmitted.add(toolCallId);
         if (toolName === "read" && locations) this.readToolCallPaths.set(toolCallId, locations[0].path);
@@ -3053,7 +3055,7 @@ function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
 }
 function toToolTitle(toolName, args, cwd) {
-  const p = getToolPath(args);
+  const p = getToolPath(toolName, args);
   if (p) {
     let display = p;
     if (cwd) {
@@ -3070,10 +3072,11 @@ function toToolTitle(toolName, args, cwd) {
     return `${verb} ${display}`;
   }
   const a = args;
-  const hint = typeof a?.query === "string" ? a.query : typeof a?.url === "string" ? a.url : typeof a?.command === "string" ? a.command : void 0;
+  const hint = ["query", "url", "command", "path"].map((k) => a?.[k]).find((v) => typeof v === "string");
   if (hint) return `${toolVerb(toolName)}: ${truncateTitle(hint)}`;
   return toolVerb(toolName);
 }
+var TITLE_ACRONYMS = /* @__PURE__ */ new Set(["ui", "pr", "cdn", "ssh", "url", "api", "id", "sql", "mcp"]);
 function toolVerb(toolName) {
   switch (toolName) {
     case "edit":
@@ -3085,7 +3088,7 @@ function toolVerb(toolName) {
     case "bash":
       return "Bash";
     default:
-      return toolName.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      return toolName.split("_").map((w) => TITLE_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
   }
 }
 function toToolKind(toolName) {
