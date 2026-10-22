@@ -52,6 +52,40 @@ test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not',
   assert.ok(cleared)
 })
 
+test('PiAcpSession: update_plan fills the plan panel, draws no card, and outlives the live-turn indicator', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const turn = session.prompt('from-slack', [], { showInClient: true })
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ type: 'agent_start' })
+  const args = { goal: 'Ship it', plan: [{ step: 'Build it', status: 'completed' }] }
+  proc.emit({ type: 'tool_execution_start', toolCallId: 'p1', toolName: 'update_plan', args })
+  proc.emit({ type: 'tool_execution_end', toolCallId: 'p1', toolName: 'update_plan', result: {} })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
+
+  const kinds = conn.updates.map(u => (u as any).update?.sessionUpdate)
+  assert.ok(!kinds.includes('tool_call') && !kinds.includes('tool_call_update'))
+  const plans = conn.updates
+    .filter(u => (u as any).update?.sessionUpdate === 'plan')
+    .map(u => (u as any).update.entries)
+  assert.deepEqual(plans.at(-1), [
+    { content: 'Goal: Ship it', priority: 'high', status: 'pending' },
+    { content: 'Build it', priority: 'medium', status: 'completed' }
+  ])
+})
+
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
