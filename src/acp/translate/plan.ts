@@ -1,6 +1,8 @@
 import type { PlanEntry } from '@agentclientprotocol/sdk'
 
 export const PLAN_TOOL = 'update_plan'
+// The extension re-sends the list after each compaction as a custom message carrying the tool's arguments.
+export const PLAN_CARRY_OVER = 'todo'
 
 const STATUSES = new Set<PlanEntry['status']>(['pending', 'in_progress', 'completed'])
 
@@ -21,7 +23,11 @@ export function planEntries(args: unknown): PlanEntry[] | null {
 
 export function latestPlanEntries(messages: unknown[]): PlanEntry[] | null {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as { role?: unknown; content?: unknown }
+    const m = messages[i] as { role?: unknown; content?: unknown; customType?: unknown; details?: unknown }
+    if (m?.role === 'custom' && m.customType === PLAN_CARRY_OVER) {
+      const entries = planEntries(m.details)
+      if (entries) return entries
+    }
     if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue
     for (let j = m.content.length - 1; j >= 0; j--) {
       const c = m.content[j] as { type?: unknown; name?: unknown; arguments?: unknown }
