@@ -1856,7 +1856,7 @@ var PiAcpSession = class _PiAcpSession {
     const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs();
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog();
-    }, ms);
+    }, ms).unref();
   }
   clearTurnWatchdog() {
     if (!this.turnWatchdog) return;
