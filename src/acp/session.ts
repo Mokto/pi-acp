@@ -747,6 +747,12 @@ export class PiAcpSession {
     this.compactionId = null
     this.compactionsFinishedCount += 1
     this.emit(compactionUpdate(id, state, this.compactionEntries))
+    if (state.status !== 'completed') return
+    // pi reports no context size until the next reply after a compaction, so the ring would
+    // keep the pre-compaction size; show pi's estimate (messages only, so it reads low) meanwhile.
+    this.peakContextTokens = 0
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== 'false')
+      this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow)
   }
 
   async flushEmits(): Promise<void> {
@@ -1779,9 +1785,6 @@ export class PiAcpSession {
 
       case 'compaction_end':
       case 'auto_compaction_end': {
-        // After compaction the context shrinks significantly; reset peak so the
-        // next turn shows the actual (smaller) post-compaction context size.
-        this.peakContextTokens = 0
         this.finishCompaction(compactionStateFromPiEnd(ev))
         break
       }
