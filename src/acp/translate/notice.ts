@@ -27,3 +27,12 @@ export function noticeFromNotify(message: string, severity: 'warning' | 'error')
   }
   return { sessionUpdate: 'notice', severity, title, ...(description ? { description } : {}) }
 }
+
+/** A readable name for the extension at `path`: its folder for an `index` entry point, else its file. */
+export function extensionName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  const file = (parts.pop() ?? '').replace(/\.[cm]?[jt]s$/, '')
+  if (file && file !== 'index') return file
+  while (['src', 'dist', 'lib'].includes(parts.at(-1) ?? '')) parts.pop()
+  return parts.at(-1) ?? 'an extension'
+}

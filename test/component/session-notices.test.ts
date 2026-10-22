@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiAcpSession } from '../../src/acp/session.js'
-import { noticeFromNotify } from '../../src/acp/translate/notice.js'
+import { extensionName, noticeFromNotify } from '../../src/acp/translate/notice.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
@@ -126,4 +126,53 @@ test('notices: a new thread shows warnings pi sent before the session listened, 
   } finally {
     PiRpcProcess.spawn = original
   }
+})
+
+test('notices: names an extension by its folder, or its file when that is not an index', () => {
+  assert.equal(extensionName('/Users/a/.pi/agent/extensions/auth-status/index.ts'), 'auth-status')
+  assert.equal(extensionName('/Users/a/.pi/agent/extensions/linear-tools/src/index.ts'), 'linear-tools')
+  assert.equal(extensionName('/Users/a/.pi/agent/npm/node_modules/pi-cursor-sdk/dist/index.js'), 'pi-cursor-sdk')
+  assert.equal(extensionName('/tmp/boom.ts'), 'boom')
+  assert.equal(extensionName(''), 'an extension')
+})
+
+test('notices: an extension crash outside a reply is a notice, inside a reply a line of text', async () => {
+  const { s, proc, updates } = session(true)
+  const crash: PiRpcEvent = {
+    type: 'extension_error',
+    extensionPath: '/x/extensions/auth-status/index.ts',
+    event: 'session_start',
+    error: 'Linear token file is unreadable'
+  }
+  proc.emit(crash)
+  void s.prompt('hi')
+  await new Promise(r => setTimeout(r, 0))
+  proc.emit({ ...crash, event: 'tool_call' })
+  const sent = await updates()
+  assert.deepEqual(
+    sent.find(u => u.sessionUpdate === 'notice'),
+    {
+      sessionUpdate: 'notice',
+      severity: 'error',
+      title: "Couldn't run auth-status",
+      description: 'Linear token file is unreadable'
+    }
+  )
+  assert.deepEqual(
+    sent.filter(u => u.sessionUpdate === 'agent_message_chunk').map(u => u.content.text),
+    ["\n\nCouldn't run auth-status. Linear token file is unreadable"]
+  )
+})
+
+test('notices: pi stopping while idle is a notice, not text glued to the last reply', async () => {
+  const { proc, updates } = session(true)
+  proc.emitExit(1)
+  assert.deepEqual(await updates(), [
+    {
+      sessionUpdate: 'notice',
+      severity: 'warning',
+      title: 'pi stopped unexpectedly',
+      description: 'It restarts with your next message (exit code 1).'
+    }
+  ])
 })
