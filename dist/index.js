@@ -1326,6 +1326,7 @@ var TimeoutError = class extends Error {
 
 // src/acp/translate/plan.ts
 var PLAN_TOOL = "update_plan";
+var PLAN_CARRY_OVER = "todo";
 var STATUSES = /* @__PURE__ */ new Set(["pending", "in_progress", "completed"]);
 function planEntries(args) {
   const { goal, plan } = args ?? {};
@@ -1343,6 +1344,10 @@ function planEntries(args) {
 function latestPlanEntries(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
+    if (m?.role === "custom" && m.customType === PLAN_CARRY_OVER) {
+      const entries = planEntries(m.details);
+      if (entries) return entries;
+    }
     if (m?.role !== "assistant" || !Array.isArray(m.content)) continue;
     for (let j = m.content.length - 1; j >= 0; j--) {
       const c = m.content[j];
