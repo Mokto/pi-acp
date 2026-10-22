@@ -89,7 +89,6 @@ type PiRpcCommand =
   | { type: 'set_steering_mode'; id?: string; mode: 'all' | 'one-at-a-time' }
   // Compaction
   | { type: 'compact'; id?: string; customInstructions?: string }
-  | { type: 'set_auto_compaction'; id?: string; enabled: boolean }
   // Session
   | { type: 'get_session_stats'; id?: string }
   | { type: 'set_session_name'; id?: string; name: string }
