@@ -825,7 +825,7 @@ export class PiAcpSession {
     const ms = this.inferenceStartup ? this.inferenceStartupMs() : this.turnInactivityMs()
     this.turnWatchdog = setTimeout(() => {
       void this.handleTurnWatchdog()
-    }, ms)
+    }, ms).unref()
   }
 
   private clearTurnWatchdog(): void {
