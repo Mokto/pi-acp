@@ -2258,6 +2258,8 @@ function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
   return toolVerb(toolName)
 }
 
+const TITLE_ACRONYMS = new Set(['ui', 'pr', 'cdn', 'ssh', 'url', 'api', 'id', 'sql', 'mcp'])
+
 function toolVerb(toolName: string): string {
   switch (toolName) {
     case 'edit':
@@ -2269,10 +2271,10 @@ function toolVerb(toolName: string): string {
     case 'bash':
       return 'Bash'
     default:
-      // Convert snake_case to Title Case (e.g. web_search → Web Search)
+      // Convert snake_case to Title Case (e.g. web_search → Web Search, create_pr → Create PR)
       return toolName
         .split('_')
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .map(w => (TITLE_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
         .join(' ')
   }
 }
