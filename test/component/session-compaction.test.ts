@@ -421,6 +421,31 @@ test('compaction: the summary is written in the background before the size, and 
   }
 })
 
+test("compaction: on Model limit, the summary is written in the background before pi's own compaction point", async () => {
+  const prev = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'pi-acp-agent-'))
+  const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
+  writeFileSync(sessionFile, '{"type":"session"}\n')
+  let writers = 0
+  const { proc, s } = session(true, async () => {
+    writers += 1
+    return { compact: () => new Promise(() => {}), dispose: () => {} }
+  })
+  proc.getState = async () => ({ sessionFile, sessionId: `bg-${Date.now()}` })
+  try {
+    await finishReply(s, proc, 950_000)
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(writers, 0, "more than 32k below pi's point (1M window minus its default 16,384 reserve)")
+    await finishReply(s, proc, 952_000)
+    await until(() => writers > 0)
+    assert.equal(proc.compactCalls, 0, 'pi compacts on its own; pi-acp only prepares the summary')
+  } finally {
+    s.markClosed()
+    if (prev == null) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = prev
+  }
+})
+
 test('compaction: Stop while the background summary is still being written skips the compaction', async () => {
   const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
   writeFileSync(sessionFile, '{"type":"session"}\n')

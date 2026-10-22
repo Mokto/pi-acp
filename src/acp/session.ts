@@ -38,6 +38,7 @@ import { compactAtTokens, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translat
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
+import { getAutoCompactionPoint } from './pi-settings.js'
 import { BackgroundCompaction, type SessionFileInfo, type SummaryWriter } from './background-compaction.js'
 import { PLAN_TOOL, planEntries } from './translate/plan.js'
 
@@ -1389,8 +1390,10 @@ export class PiAcpSession {
   }
 
   private maybeStartBackgroundCompaction(): void {
-    const limit = compactAtTokens()
-    if (!limit || this.compactAfterReplyFailed || this.compactionAfterReply) return
+    const picked = compactAtTokens()
+    const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null
+    const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity)
+    if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return
     if (this.background.shouldStart(this.peakContextTokens, limit))
       this.background.start(this.sessionFileInfo(), this.peakContextTokens, limit)
   }
