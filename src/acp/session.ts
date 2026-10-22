@@ -77,10 +77,8 @@ type DeferredModel = { provider: string; modelId: string }
 
 type ContextUsage = {
   raw: unknown
-  tokens: number | null
   displayTokens: number | null
   contextWindow: number | null
-  percent: number | null
 }
 
 const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
@@ -359,6 +357,11 @@ export class SessionManager {
     this.sessions.delete(sessionId)
     this.live?.remove(sessionId)
   }
+}
+
+/** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+function ringSize(contextWindow: number): number {
+  return Math.min(contextWindow, compactAtTokens() ?? contextWindow)
 }
 
 export class PiAcpSession {
@@ -1324,12 +1327,13 @@ export class PiAcpSession {
   // know the model's window or has no post-compaction count yet.
   private emitUsageUpdate(tokens: number | null, contextWindow: number | null): void {
     if (!tokens || !contextWindow) return
-    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: contextWindow })
+    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: ringSize(contextWindow) })
   }
 
-  /** A new pick re-arms after-reply compaction in a thread where it failed. */
+  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
   compactAtPicked(): void {
     this.compactAfterReplyFailed = false
+    void this.pushUsageUpdate()
   }
 
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
@@ -1356,10 +1360,8 @@ export class PiAcpSession {
 
     return {
       raw,
-      tokens,
       displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
-      contextWindow: this.contextWindow,
-      percent: typeof cu.percent === 'number' ? cu.percent : null
+      contextWindow: this.contextWindow
     }
   }
 
@@ -1378,10 +1380,8 @@ export class PiAcpSession {
         })
       usage = {
         raw: undefined,
-        tokens: null,
         displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : null,
-        contextWindow: this.contextWindow,
-        percent: null
+        contextWindow: this.contextWindow
       }
     }
 
@@ -1392,17 +1392,14 @@ export class PiAcpSession {
       })
     }
 
-    const { contextWindow, tokens: contextTokens, percent: contextPercent, displayTokens } = usage
+    const { contextWindow, displayTokens } = usage
     this.emitUsageUpdate(displayTokens, contextWindow)
     const parts: string[] = []
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const raw =
-          contextPercent !== null && displayTokens === contextTokens
-            ? contextPercent
-            : (displayTokens / contextWindow) * 100
-        parts.push(`${Math.round(raw * 10) / 10}%`)
+        const percent = (displayTokens / ringSize(contextWindow)) * 100
+        parts.push(`${Math.round(percent * 10) / 10}%`)
       }
     }
     const prLink = this.getPrLinkCached()

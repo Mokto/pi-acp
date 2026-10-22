@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
+import { pickCompactAt } from '../../src/acp/translate/config-options.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
 function makeSession() {
@@ -170,4 +171,26 @@ test('a model switch made mid-turn refreshes the ring once the turn ends and the
       [50_000, 300_000]
     ]
   )
+})
+
+test('a picked compaction size becomes the ring size and the stats line percent, on models whose window is larger', async t => {
+  t.after(() => pickCompactAt('model_limit'))
+  const { conn, proc, session, usageUpdates } = makeSession()
+  proc.sessionStats = { contextUsage: { tokens: 150_000, contextWindow: 1_000_000, percent: 15 } }
+  pickCompactAt('300000')
+
+  const turn = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await turn
+
+  assert.deepEqual(usageUpdates().at(-1), { sessionUpdate: 'usage_update', used: 150_000, size: 300_000 })
+  const text = conn.updates.map(u => (u.update as any).content?.text ?? '').join('')
+  assert.match(text, /150,000 tokens · 50%/)
+
+  proc.sessionStats = { contextUsage: { tokens: 150_000, contextWindow: 200_000, percent: 75 } }
+  await session.pushUsageUpdate()
+  await (session as any).flushEmits()
+  assert.deepEqual(usageUpdates().at(-1), { sessionUpdate: 'usage_update', used: 150_000, size: 200_000 })
 })
