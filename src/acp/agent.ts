@@ -158,11 +158,6 @@ function builtinAvailableCommands(): AvailableCommand[] {
       input: { hint: 'optional custom instructions' }
     },
     {
-      name: 'autocompact',
-      description: 'Toggle automatic context compaction',
-      input: { hint: 'on|off|toggle' }
-    },
-    {
       name: 'export',
       description: 'Export session to an HTML file in the session cwd'
     },
@@ -1240,35 +1235,6 @@ export class PiAcpAgent implements ACPAgent {
               uri,
               mimeType: 'text/html',
               title: 'Session exported'
-            }
-          }
-        })
-
-        return { stopReason: 'end_turn' }
-      }
-
-      if (cmd === 'autocompact') {
-        const mode = (args[0] ?? 'toggle').toLowerCase()
-        let enabled: boolean | null = null
-        if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') enabled = true
-        else if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') enabled = false
-
-        if (enabled === null) {
-          // toggle: read current state and invert.
-          const state = (await session.proc.getState()) as any
-          const current = Boolean(state?.autoCompactionEnabled)
-          enabled = !current
-        }
-
-        await session.proc.setAutoCompaction(enabled)
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: `Auto-compaction ${enabled ? 'enabled' : 'disabled'}.`
             }
           }
         })
