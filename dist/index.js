@@ -1324,6 +1324,37 @@ var TimeoutError = class extends Error {
   }
 };
 
+// src/acp/translate/plan.ts
+var PLAN_TOOL = "update_plan";
+var STATUSES = /* @__PURE__ */ new Set(["pending", "in_progress", "completed"]);
+function planEntries(args) {
+  const { goal, plan } = args ?? {};
+  if (!Array.isArray(plan)) return null;
+  const steps = plan.flatMap((s) => {
+    const content = typeof s?.step === "string" ? s.step.trim() : "";
+    if (!content) return [];
+    const status = STATUSES.has(s.status) ? s.status : "pending";
+    return [{ content, priority: "medium", status }];
+  });
+  const goalText = typeof goal === "string" ? goal.trim() : "";
+  const goalEntry = goalText ? [{ content: `Goal: ${goalText}`, priority: "high", status: "pending" }] : [];
+  return [...goalEntry, ...steps];
+}
+function latestPlanEntries(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (let j = m.content.length - 1; j >= 0; j--) {
+      const c = m.content[j];
+      if (c?.type === "toolCall" && c.name === PLAN_TOOL) {
+        const entries = planEntries(c.arguments);
+        if (entries) return entries;
+      }
+    }
+  }
+  return null;
+}
+
 // src/acp/session.ts
 var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
@@ -1593,8 +1624,10 @@ var PiAcpSession = class _PiAcpSession {
   sawStructuredToolCall = false;
   // Live-socket turns never go through Zed `session/prompt`, so the composer
   // stays Idle. An in-progress Plan is the spinner Zed still draws in that state
-  // (activity bar). Ceiling: overwrites a real agent plan; merge if we emit one.
+  // (activity bar). Skipped while the agent's own plan is showing, which it would overwrite.
   liveTurnPlanActive = false;
+  plan = null;
+  planToolCallIds = /* @__PURE__ */ new Set();
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
   // pi.sendUserMessage()+waitForIdle(), see trip/index.ts's deliver()), each firing its
@@ -2102,7 +2135,16 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     }
     this.resetNarratedToolCallGate();
   }
+  showPlan(entries) {
+    this.plan = entries;
+    this.liveTurnPlanActive = false;
+    this.emit({ sessionUpdate: "plan", entries });
+  }
+  get currentPlan() {
+    return this.plan;
+  }
   startLiveTurnIndicator() {
+    if (this.plan?.length) return;
     this.liveTurnPlanActive = true;
     this.emit({
       sessionUpdate: "plan",
@@ -2358,6 +2400,7 @@ ${message}` }
           );
           const toolCallId = String(toolCall?.id ?? "");
           const toolName = String(toolCall?.name ?? "tool");
+          if (toolName === PLAN_TOOL) break;
           if (toolCallId) {
             const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : (() => {
               const s = String(toolCall?.partialArgs ?? "");
@@ -2416,6 +2459,12 @@ ${message}` }
         const toolName = String(ev.toolName ?? "tool");
         const args = ev.args;
         let line;
+        if (toolName === PLAN_TOOL) {
+          this.planToolCallIds.add(toolCallId);
+          const entries = planEntries(args);
+          if (entries) this.showPlan(entries);
+          break;
+        }
         if (isBashTool(toolName)) {
           const locations2 = toToolCallLocations(args, this.cwd);
           const existingStatus = this.currentToolCalls.get(toolCallId);
@@ -2488,7 +2537,7 @@ ${message}` }
       }
       case "tool_execution_update": {
         const toolCallId = String(ev.toolCallId ?? "");
-        if (!toolCallId) break;
+        if (!toolCallId || this.planToolCallIds.has(toolCallId)) break;
         const partial = ev.partialResult;
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({ toolCallId, status: "in_progress", result: partial });
@@ -2550,6 +2599,10 @@ ${message}` }
       case "tool_execution_end": {
         const toolCallId = String(ev.toolCallId ?? "");
         if (!toolCallId) break;
+        if (this.planToolCallIds.has(toolCallId)) {
+          this.planToolCallIds.delete(toolCallId);
+          break;
+        }
         const result = ev.result;
         const isError = Boolean(ev.isError);
         if (this.bashToolCallIds.has(toolCallId)) {
@@ -4918,6 +4971,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         }
         if (role === "toolResult") {
           const toolName = String(m?.toolName ?? "tool");
+          if (toolName === PLAN_TOOL) continue;
           const toolCallId = String(m?.toolCallId ?? crypto.randomUUID());
           const isError = Boolean(m?.isError);
           const isBash = isBashTool(toolName);
@@ -4974,6 +5028,10 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
           });
         }
       }
+      const plan = latestPlanEntries(messages);
+      if (plan?.length) session.showPlan(plan);
+    } else if (session.currentPlan?.length) {
+      session.showPlan(session.currentPlan);
     }
     const models = await getModelState(proc2, { cwd: params.cwd });
     const thinking = await getThinkingState(proc2);
