@@ -41,6 +41,7 @@ import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
+import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
@@ -1484,6 +1485,7 @@ export class PiAcpAgent implements ACPAgent {
 
         if (role === 'toolResult') {
           const toolName = String((m as any)?.toolName ?? 'tool')
+          if (toolName === PLAN_TOOL) continue
           const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
           const isError = Boolean((m as any)?.isError)
           const isBash = isBashTool(toolName)
@@ -1545,6 +1547,11 @@ export class PiAcpAgent implements ACPAgent {
           })
         }
       }
+
+      const plan = latestPlanEntries(messages)
+      if (plan?.length) session.showPlan(plan)
+    } else if (session.currentPlan?.length) {
+      session.showPlan(session.currentPlan)
     }
 
     const models = await getModelState(proc, { cwd: params.cwd })

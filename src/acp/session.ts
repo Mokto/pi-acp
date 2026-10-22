@@ -3,6 +3,7 @@ import type {
   ContentBlock,
   McpServer,
   PermissionOption,
+  PlanEntry,
   SessionConfigOption,
   SessionUpdate,
   ToolCallContent,
@@ -37,6 +38,7 @@ import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
+import { PLAN_TOOL, planEntries } from './translate/plan.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -421,8 +423,11 @@ export class PiAcpSession {
 
   // Live-socket turns never go through Zed `session/prompt`, so the composer
   // stays Idle. An in-progress Plan is the spinner Zed still draws in that state
-  // (activity bar). Ceiling: overwrites a real agent plan; merge if we emit one.
+  // (activity bar). Skipped while the agent's own plan is showing, which it would overwrite.
   private liveTurnPlanActive = false
+
+  private plan: PlanEntry[] | null = null
+  private planToolCallIds = new Set<string>()
 
   // True while the in-flight turn is a recognised extension command (e.g. /trip-plan).
   // Such commands can drive several *independent* nested turns internally (via
@@ -1089,7 +1094,18 @@ export class PiAcpSession {
     this.resetNarratedToolCallGate()
   }
 
+  showPlan(entries: PlanEntry[]): void {
+    this.plan = entries
+    this.liveTurnPlanActive = false
+    this.emit({ sessionUpdate: 'plan', entries })
+  }
+
+  get currentPlan(): PlanEntry[] | null {
+    return this.plan
+  }
+
   private startLiveTurnIndicator(): void {
+    if (this.plan?.length) return
     this.liveTurnPlanActive = true
     this.emit({
       sessionUpdate: 'plan',
@@ -1389,6 +1405,7 @@ export class PiAcpSession {
 
           const toolCallId = String((toolCall as any)?.id ?? '')
           const toolName = String((toolCall as any)?.name ?? 'tool')
+          if (toolName === PLAN_TOOL) break
 
           if (toolCallId) {
             const rawInput =
@@ -1460,6 +1477,13 @@ export class PiAcpSession {
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
         let line: number | undefined
+
+        if (toolName === PLAN_TOOL) {
+          this.planToolCallIds.add(toolCallId)
+          const entries = planEntries(args)
+          if (entries) this.showPlan(entries)
+          break
+        }
 
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
@@ -1546,7 +1570,7 @@ export class PiAcpSession {
 
       case 'tool_execution_update': {
         const toolCallId = String((ev as any).toolCallId ?? '')
-        if (!toolCallId) break
+        if (!toolCallId || this.planToolCallIds.has(toolCallId)) break
 
         const partial = (ev as any).partialResult
         if (this.bashToolCallIds.has(toolCallId)) {
@@ -1624,6 +1648,10 @@ export class PiAcpSession {
       case 'tool_execution_end': {
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
+        if (this.planToolCallIds.has(toolCallId)) {
+          this.planToolCallIds.delete(toolCallId)
+          break
+        }
 
         const result = (ev as any).result
         const isError = Boolean((ev as any).isError)
