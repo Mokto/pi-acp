@@ -695,57 +695,6 @@ test('PiAcpSession: agent_settled after terminal retry failure does not resolve 
   await assert.rejects(pending, /still failing/)
 })
 
-test('PiAcpSession: emits agent_message_chunk for auto_compaction_start', async () => {
-  const conn = new FakeAgentSideConnection()
-  const proc = new FakePiRpcProcess()
-
-  new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
-
-  proc.emit({ type: 'auto_compaction_start' } as any)
-
-  await new Promise(r => setTimeout(r, 0))
-
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' }
-  })
-})
-
-test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async () => {
-  const conn = new FakeAgentSideConnection()
-  const proc = new FakePiRpcProcess()
-
-  new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
-
-  proc.emit({ type: 'auto_compaction_end' } as any)
-
-  await new Promise(r => setTimeout(r, 0))
-
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: {
-      type: 'text',
-      text: 'Automatic compaction finished; context was summarized to continue the session.'
-    }
-  })
-})
-
 test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with text_delta events', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

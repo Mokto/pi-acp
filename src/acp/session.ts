@@ -31,6 +31,7 @@ import {
 } from './translate/bash.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './translate/narrated-tool-calls.js'
 import { getPlanUsageDir } from './translate/plan-usage.js'
+import { compactionStateFromPiEnd, compactionUpdate, type CompactionState } from './translate/compaction.js'
 import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
@@ -40,6 +41,8 @@ type SessionCreateParams = {
   cwd: string
   mcpServers: McpServer[]
   conn: AgentSideConnection
+  /** The client advertised `session.compaction`, so compactions use the client's compaction entry. */
+  compactionEntries?: boolean
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
 }
@@ -292,7 +295,8 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.forget(sessionId)
+      onDead: () => this.forget(sessionId),
+      compactionEntries: params.compactionEntries
     })
 
     this.sessions.set(sessionId, session)
@@ -322,7 +326,8 @@ export class SessionManager {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.forget(sessionId)
+      onDead: () => this.forget(sessionId),
+      compactionEntries: params.compactionEntries
     })
 
     this.sessions.set(sessionId, session)
@@ -349,6 +354,9 @@ export class PiAcpSession {
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
   private readonly onDead: (() => void) | null
+  private readonly compactionEntries: boolean
+  private compactionId: string | null = null
+  private compactionsFinishedCount = 0
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -479,6 +487,7 @@ export class PiAcpSession {
     store?: SessionStore
     /** Called once when the underlying pi process exits, so the owning SessionManager can evict this session. */
     onDead?: () => void
+    compactionEntries?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -488,6 +497,7 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.store = opts.store ?? null
     this.onDead = opts.onDead ?? null
+    this.compactionEntries = opts.compactionEntries ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.proc.onExit?.((code, signal) => {
@@ -710,7 +720,18 @@ export class PiAcpSession {
       })
   }
 
-  private async flushEmits(): Promise<void> {
+  get compactionsFinished(): number {
+    return this.compactionsFinishedCount
+  }
+
+  finishCompaction(state: CompactionState): void {
+    const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`
+    this.compactionId = null
+    this.compactionsFinishedCount += 1
+    this.emit(compactionUpdate(id, state, this.compactionEntries))
+  }
+
+  async flushEmits(): Promise<void> {
     await this.lastEmit
   }
 
@@ -1701,16 +1722,8 @@ export class PiAcpSession {
       // fallbacks in case older pi versions still send them.
       case 'compaction_start':
       case 'auto_compaction_start': {
-        const isAuto = (ev as any).reason !== 'manual'
-        if (isAuto) {
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: 'Context nearing limit, running automatic compaction...'
-            } satisfies ContentBlock
-          })
-        }
+        this.compactionId = `compaction-${crypto.randomUUID()}`
+        this.emit(compactionUpdate(this.compactionId, { status: 'in_progress' }, this.compactionEntries))
         break
       }
 
@@ -1719,16 +1732,7 @@ export class PiAcpSession {
         // After compaction the context shrinks significantly; reset peak so the
         // next turn shows the actual (smaller) post-compaction context size.
         this.peakContextTokens = 0
-        const isAuto = (ev as any).reason !== 'manual'
-        if (isAuto) {
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: 'Automatic compaction finished; context was summarized to continue the session.'
-            } satisfies ContentBlock
-          })
-        }
+        this.finishCompaction(compactionStateFromPiEnd(ev))
         break
       }
 

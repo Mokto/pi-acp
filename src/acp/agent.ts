@@ -42,6 +42,7 @@ import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } fr
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
   bashCommand,
   bashExitCode,
@@ -240,6 +241,7 @@ export class PiAcpAgent implements ACPAgent {
 
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
+  private clientSupportsCompaction = false
 
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
@@ -281,7 +283,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: mcpServers ?? [],
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      compactionEntries: this.clientSupportsCompaction
     })
     session.setConfigOptionsRefresher(async () =>
       buildSessionConfigOptions(
@@ -345,6 +348,7 @@ export class PiAcpAgent implements ACPAgent {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
+    this.clientSupportsCompaction = Boolean(params.clientCapabilities?.session?.compaction)
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -392,7 +396,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      compactionEntries: this.clientSupportsCompaction
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -833,27 +838,20 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
-        const res = await session.proc.compact(customInstructions)
-
-        const r: any = res && typeof res === 'object' ? (res as any) : null
-        const tokensBefore = typeof r?.tokensBefore === 'number' ? r.tokensBefore : null
-        const summary = typeof r?.summary === 'string' ? r.summary : null
-
-        const headerLines = [
-          `Compaction completed.${customInstructions ? ' (custom instructions applied)' : ''}`,
-          tokensBefore !== null ? `Tokens before: ${tokensBefore}` : null
-        ].filter(Boolean)
-
-        const text = headerLines.join('\n') + (summary ? `\n\n${summary}` : '')
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text }
-          }
-        })
-
+        // pi reports the outcome in `compaction_end`, which the session draws as a
+        // compaction entry; handle here only a failure before compaction started, or a
+        // result that arrives without that event.
+        const finishedBefore = session.compactionsFinished
+        let result: unknown
+        try {
+          result = await session.proc.compact(customInstructions)
+        } catch (err) {
+          if (session.compactionsFinished === finishedBefore) throw err
+        }
+        if (session.compactionsFinished === finishedBefore) {
+          session.finishCompaction(compactionStateFromPiEnd({ result }))
+        }
+        await session.flushEmits()
         return { stopReason: 'end_turn' }
       }
 
@@ -1375,7 +1373,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc,
-      fileCommands
+      fileCommands,
+      compactionEntries: this.clientSupportsCompaction
     })
 
     return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile })
@@ -1451,6 +1450,27 @@ export class PiAcpAgent implements ACPAgent {
               }
             })
           }
+        }
+
+        // pi returns only the model's current context, so history before a compaction is
+        // replaced by its summary; mark where that history went.
+        if (role === 'compactionSummary') {
+          const { summary, tokensBefore, timestamp } = m
+          if (typeof summary === 'string') {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: compactionUpdate(
+                `compaction-${timestamp ?? randomUUID()}`,
+                {
+                  status: 'completed',
+                  summary,
+                  tokensBefore: typeof tokensBefore === 'number' ? tokensBefore : undefined
+                },
+                this.clientSupportsCompaction
+              )
+            })
+          }
+          continue
         }
 
         if (role === 'toolResult') {
