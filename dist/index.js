@@ -243,6 +243,9 @@ var PiRpcProcess = class _PiRpcProcess {
   child;
   pending = /* @__PURE__ */ new Map();
   eventHandlers = [];
+  // Extensions' session_start hooks run before pi answers the first request, so their
+  // events arrive before any session listens; kept until the session takes them.
+  earlyEvents = [];
   exitHandlers = [];
   preludeLines = [];
   hasExited = false;
@@ -273,6 +276,7 @@ var PiRpcProcess = class _PiRpcProcess {
           }
         }
       }
+      if (this.earlyEvents && this.eventHandlers.length === 0) this.earlyEvents.push(msg);
       for (const h of this.eventHandlers) h(msg);
     };
     let partial = [];
@@ -357,6 +361,12 @@ var PiRpcProcess = class _PiRpcProcess {
     } catch {
     }
     return proc2;
+  }
+  /** Events pi sent while nothing listened; returns them once and stops keeping more. */
+  takeEarlyEvents() {
+    const events = this.earlyEvents ?? [];
+    this.earlyEvents = null;
+    return events;
   }
   onEvent(handler) {
     this.eventHandlers.push(handler);
@@ -990,6 +1000,31 @@ function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ 
   };
 }
 
+// src/acp/translate/notice.ts
+var MAX_TITLE_LENGTH = 100;
+function noticeFromNotify(message, severity) {
+  const text = message.trim();
+  const split = /^(.*?)(?:\.\s|\n)(.*)$/s.exec(text);
+  const title = (split?.[1] ?? text).replace(/[.:]$/, "").trim();
+  const description = (split?.[2] ?? "").split("\n").map((line) => line.trim()).join("\n").trim();
+  if (!title || title.length > MAX_TITLE_LENGTH) {
+    return {
+      sessionUpdate: "notice",
+      severity,
+      title: severity === "error" ? "Extension error" : "Extension warning",
+      ...text ? { description: text } : {}
+    };
+  }
+  return { sessionUpdate: "notice", severity, title, ...description ? { description } : {} };
+}
+function extensionName(path) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  const file = (parts.pop() ?? "").replace(/\.[cm]?[jt]s$/, "");
+  if (file && file !== "index") return file;
+  while (["src", "dist", "lib"].includes(parts.at(-1) ?? "")) parts.pop();
+  return parts.at(-1) ?? "an extension";
+}
+
 // src/acp/translate/compaction.ts
 function compactionStateFromPiEnd(ev) {
   const e = ev ?? {};
@@ -1453,7 +1488,8 @@ var SessionManager = class {
       fileCommands: params.fileCommands ?? [],
       store: this.store,
       onDead: () => this.forget(sessionId),
-      compactionEntries: params.compactionEntries
+      compactionEntries: params.compactionEntries,
+      notices: params.notices
     });
     this.sessions.set(sessionId, session);
     this.live?.upsert(session, sessionFile ?? "");
@@ -1480,7 +1516,8 @@ var SessionManager = class {
       fileCommands: params.fileCommands ?? [],
       store: this.store,
       onDead: () => this.forget(sessionId),
-      compactionEntries: params.compactionEntries
+      compactionEntries: params.compactionEntries,
+      notices: params.notices
     });
     this.sessions.set(sessionId, session);
     this.live?.upsert(session, this.store.get(sessionId)?.sessionFile ?? "");
@@ -1503,6 +1540,7 @@ var PiAcpSession = class _PiAcpSession {
   fileCommands;
   onDead;
   compactionEntries;
+  notices;
   compactionId = null;
   compactionsFinishedCount = 0;
   // Used to map abort semantics to ACP stopReason.
@@ -1619,6 +1657,7 @@ var PiAcpSession = class _PiAcpSession {
     this.store = opts.store ?? null;
     this.onDead = opts.onDead ?? null;
     this.compactionEntries = opts.compactionEntries ?? false;
+    this.notices = opts.notices ?? false;
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
@@ -1782,6 +1821,10 @@ var PiAcpSession = class _PiAcpSession {
   get compactionsFinished() {
     return this.compactionsFinishedCount;
   }
+  /** Handles the events pi sent before this session listened; call once the client knows the session. */
+  replayEarlyEvents() {
+    for (const ev of this.proc.takeEarlyEvents()) this.handlePiEvent(ev);
+  }
   finishCompaction(state) {
     const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`;
     this.compactionId = null;
@@ -1893,13 +1936,20 @@ var PiAcpSession = class _PiAcpSession {
     }
     const detail = signal ? `signal ${signal}` : `code ${code}`;
     if (!this.pendingTurn) {
-      this.emit({
-        sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: `Error: pi process exited unexpectedly (${detail}); it will restart on your next message.`
+      this.emit(
+        this.notices ? {
+          sessionUpdate: "notice",
+          severity: "warning",
+          title: "pi stopped unexpectedly",
+          description: `It restarts with your next message (exit ${detail}).`
+        } : {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: `Error: pi process exited unexpectedly (${detail}); it will restart on your next message.`
+          }
         }
-      });
+      );
       await this.flushEmits();
       this.onDead?.();
       return;
@@ -2664,6 +2714,11 @@ ${formatAutoRetryMessage(ev)}` }
         })();
         break;
       }
+      case "extension_error": {
+        const name = extensionName(stringProp(ev, "extensionPath") ?? "");
+        this.showExtensionMessage(`Couldn't run ${name}. ${stringProp(ev, "error") ?? "Unknown error"}`, "error");
+        break;
+      }
       case "agent_error":
       case "error": {
         const message = String(ev.message ?? ev.error ?? "Unknown error");
@@ -2681,6 +2736,19 @@ ${formatAutoRetryMessage(ev)}` }
       }
       default:
         break;
+    }
+  }
+  showExtensionMessage(message, severity) {
+    const warning = severity === "warning" || severity === "error";
+    if (!this.pendingTurn && warning && this.notices) {
+      this.emit(noticeFromNotify(message, severity));
+    } else if (this.pendingTurn || warning) {
+      this.emit({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `
+
+${message}` }
+      });
     }
   }
   async handleExtensionUiRequest(ev) {
@@ -2717,12 +2785,7 @@ ${formatAutoRetryMessage(ev)}` }
       return;
     }
     if (method === "notify") {
-      this.emit({
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: `
-
-${stringProp(ev, "message") ?? "Pi notification"}` }
-      });
+      this.showExtensionMessage(stringProp(ev, "message") ?? "Pi notification", stringProp(ev, "notifyType"));
       await this.proc.sendExtensionUiResponse({ id, cancelled: true });
       return;
     }
@@ -3863,6 +3926,7 @@ var PiAcpAgent = class {
   // Remember recent session cwd and use it as the default filter.
   lastSessionCwd = null;
   clientSupportsCompaction = false;
+  clientSupportsNotices = false;
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
    * if pi-acp was restarted and the in-memory map no longer holds the session, or
@@ -3901,8 +3965,10 @@ var PiAcpAgent = class {
       conn: this.conn,
       proc: proc2,
       fileCommands,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     });
+    session.replayEarlyEvents();
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
@@ -3949,6 +4015,7 @@ var PiAcpAgent = class {
     const supportedVersion = 1;
     const requested = params.protocolVersion;
     this.clientSupportsCompaction = Boolean(params.clientCapabilities?.session?.compaction);
+    this.clientSupportsNotices = Boolean(params.clientCapabilities?.session?.notices);
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
@@ -3991,7 +4058,8 @@ var PiAcpAgent = class {
       conn: this.conn,
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     });
     let state = null;
     let availableModels = null;
@@ -4064,7 +4132,10 @@ var PiAcpAgent = class {
       }
     };
     if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0);
-    setTimeout(() => void this.advertiseCommands(session, fileCommands), 0);
+    setTimeout(() => {
+      void this.advertiseCommands(session, fileCommands);
+      session.replayEarlyEvents();
+    }, 0);
     return response;
   }
   async authenticate(params) {
@@ -4765,7 +4836,8 @@ ${JSON.stringify(stats, null, 2)}`;
       conn: this.conn,
       proc: proc2,
       fileCommands,
-      compactionEntries: this.clientSupportsCompaction
+      compactionEntries: this.clientSupportsCompaction,
+      notices: this.clientSupportsNotices
     });
     return this.finishLoadSession(session, proc2, params, { replayHistory: true, sessionFile });
   }
@@ -4925,6 +4997,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands);
       void session.pushUsageUpdate();
+      session.replayEarlyEvents();
     }, 0);
     return response;
   }
