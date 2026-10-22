@@ -19,7 +19,7 @@ const END_OK = {
 function session(compactionEntries: boolean) {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
-  new PiAcpSession({
+  const s = new PiAcpSession({
     sessionId: 's1',
     cwd: process.cwd(),
     mcpServers: [],
@@ -32,7 +32,7 @@ function session(compactionEntries: boolean) {
     await new Promise(r => setTimeout(r, 0))
     return conn.updates.map(u => u.update as any)
   }
-  return { proc, updates }
+  return { proc, updates, s }
 }
 
 test('compaction: a client with compaction entries gets one entry, started then completed', async () => {
@@ -49,6 +49,19 @@ test('compaction: a client with compaction entries gets one entry, started then 
     status: 'completed',
     summary: [{ type: 'text', text: SUMMARY }]
   })
+})
+
+test("compaction: the context ring drops to pi's estimate right away, not at the next reply", async () => {
+  const { proc, updates, s } = session(true)
+  proc.sessionStats = { contextUsage: { tokens: 150_000, contextWindow: 200_000 } }
+  await s.pushUsageUpdate()
+  proc.emit({ type: 'compaction_start', reason: 'threshold' })
+  proc.emit(END_OK)
+  proc.sessionStats = { contextUsage: { tokens: null, contextWindow: 200_000 } }
+  await s.pushUsageUpdate()
+
+  const rings = (await updates()).filter(u => u.sessionUpdate === 'usage_update').map(u => u.used)
+  assert.deepEqual(rings, [150_000, 32_000])
 })
 
 test('compaction: other clients get one collapsed tool card with the summary inside', async () => {
