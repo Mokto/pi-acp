@@ -22,8 +22,8 @@ function findSelect(options: SessionConfigOption[], id: string): Extract<Session
 const models: ConfigModelState = {
   currentModelId: 'anthropic/claude',
   availableModels: [
-    { modelId: 'anthropic/claude', name: 'anthropic/Claude', description: null },
-    { modelId: 'openai/gpt', name: 'openai/GPT', description: 'fast' }
+    { modelId: 'anthropic/claude', name: 'Anthropic / Claude', description: null },
+    { modelId: 'openai/gpt', name: 'OpenAI / GPT', description: 'fast' }
   ]
 }
 
@@ -44,8 +44,12 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
   assert.equal(model.category, 'model')
   assert.equal(model.currentValue, 'anthropic/claude')
   assert.deepEqual(model.options, [
-    { value: 'anthropic/claude', name: 'anthropic/Claude', description: null },
-    { value: 'openai/gpt', name: 'openai/GPT', description: 'fast' }
+    {
+      group: 'anthropic',
+      name: 'Anthropic',
+      options: [{ value: 'anthropic/claude', name: 'Claude', description: null }]
+    },
+    { group: 'openai', name: 'OpenAI', options: [{ value: 'openai/gpt', name: 'GPT', description: 'fast' }] }
   ])
 
   const think = findSelect(options, THINKING_CONFIG_ID)
@@ -60,7 +64,7 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
 
 test('buildSessionConfigOptions: currentValue is always one of the advertised model values', () => {
   const model = findSelect(buildSessionConfigOptions(models, thinking), MODEL_CONFIG_ID)
-  assert.ok(model.options.some(o => 'value' in o && o.value === model.currentValue))
+  assert.ok(model.options.flatMap(o => ('options' in o ? o.options : [o])).some(o => o.value === model.currentValue))
 })
 
 test('buildSessionConfigOptions: omits model select when no models are available', () => {

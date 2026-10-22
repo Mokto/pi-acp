@@ -1,5 +1,6 @@
-import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import type { SessionConfigOption, SessionConfigSelectGroup } from '@agentclientprotocol/sdk'
 import { buildPlanUsageOption, type PlanUsage } from './plan-usage.js'
+import { providerDisplayName } from './provider-name.js'
 
 // Config option ids the adapter advertises. These double as the `configId` the
 // client sends back via `session/set_config_option`.
@@ -81,6 +82,24 @@ export type ConfigThinkingState = {
   currentModeId: string
 }
 
+/** Puts the provider in a heading so the button shows only the model. Zed's search matches option names, not headings. */
+function groupByProvider(models: NonNullable<ConfigModelState>['availableModels']) {
+  const groups = new Map<string, SessionConfigSelectGroup>()
+  for (const m of models) {
+    const provider = m.modelId.split('/')[0] ?? ''
+    const heading = providerDisplayName(provider)
+    let group = groups.get(provider)
+    if (!group) groups.set(provider, (group = { group: provider, name: heading, options: [] }))
+    const prefix = `${heading} / `
+    group.options.push({
+      value: m.modelId,
+      name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
+      description: m.description ?? null
+    })
+  }
+  return [...groups.values()]
+}
+
 export function buildSessionConfigOptions(
   models: ConfigModelState,
   thinking: ConfigThinkingState,
@@ -100,11 +119,7 @@ export function buildSessionConfigOptions(
       name: 'Model',
       category: 'model',
       currentValue: models.currentModelId,
-      options: models.availableModels.map(m => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
+      options: groupByProvider(models.availableModels)
     })
   }
 
