@@ -39,7 +39,7 @@ Use `@agentclientprotocol/sdk`:
 - Lint: `npm run lint`
 - Test: `npm run test`
 
-**Several test files never exit**, so `npm run test` can hang after the last result even when everything passed (true on `main` too). Run files one at a time with a time limit and read them for `✖` lines instead of waiting for the process to end, e.g. `perl -e 'alarm 40; exec @ARGV' node --import tsx --test test/unit/<file>.test.ts`.
+`npm run test` runs every file in about 6 s. It clears `PI_ACP_LIVE`, which pi-acp running inside Zed may pass down to your shell; with it set, each test that creates the agent opens a real live socket in `~/.pi/pi-acp/live` and never exits. Run a single file the same way: `PI_ACP_LIVE= node --import tsx --test test/unit/<file>.test.ts`.
 
 ### Testing a change in Zed
 
