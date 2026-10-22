@@ -990,6 +990,71 @@ function buildPlanUsageOption(usage, currentProvider = null, now = /* @__PURE__ 
   };
 }
 
+// src/acp/translate/compaction.ts
+function compactionStateFromPiEnd(ev) {
+  const e = ev ?? {};
+  if (e.aborted === true) return { status: "cancelled" };
+  if (typeof e.result?.summary === "string") {
+    return {
+      status: "completed",
+      summary: e.result.summary,
+      tokensBefore: finiteNumber(e.result.tokensBefore),
+      tokensAfter: finiteNumber(e.result.estimatedTokensAfter)
+    };
+  }
+  const message = typeof e.errorMessage === "string" ? e.errorMessage.replace(/^Compaction failed:\s*/i, "") : "";
+  return { status: "failed", error: message || "Unknown error" };
+}
+function compactionUpdate(compactionId, state, entries) {
+  if (entries) {
+    if (state.status === "completed") {
+      return {
+        sessionUpdate: "compaction_update",
+        compactionId,
+        status: "completed",
+        summary: [{ type: "text", text: state.summary }]
+      };
+    }
+    if (state.status === "failed") {
+      return { sessionUpdate: "compaction_update", compactionId, status: "failed", error: state.error };
+    }
+    return { sessionUpdate: "compaction_update", compactionId, status: state.status };
+  }
+  const text = state.status === "completed" ? state.summary : state.status === "failed" ? state.error : "";
+  return {
+    sessionUpdate: "tool_call",
+    toolCallId: compactionId,
+    title: compactionTitle(state),
+    kind: "think",
+    status: state.status === "in_progress" ? "in_progress" : state.status === "completed" ? "completed" : "failed",
+    content: text ? [{ type: "content", content: { type: "text", text } }] : []
+  };
+}
+function compactionTitle(state) {
+  switch (state.status) {
+    case "in_progress":
+      return "Compacting context\u2026";
+    case "failed":
+      return "Compaction failed";
+    case "cancelled":
+      return "Compaction cancelled";
+    case "completed": {
+      const { tokensBefore: before, tokensAfter: after } = state;
+      if (before !== void 0 && after !== void 0) {
+        return `Context compacted \xB7 ${formatTokens(before)} \u2192 ${formatTokens(after)} tokens`;
+      }
+      if (before !== void 0) return `Context compacted \xB7 ${formatTokens(before)} tokens summarized`;
+      return "Context compacted";
+    }
+  }
+}
+function formatTokens(n) {
+  return n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+}
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+
 // src/acp/translate/config-options.ts
 var MODEL_CONFIG_ID = "model";
 var THINKING_CONFIG_ID = "thinking";
@@ -1387,7 +1452,8 @@ var SessionManager = class {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.forget(sessionId)
+      onDead: () => this.forget(sessionId),
+      compactionEntries: params.compactionEntries
     });
     this.sessions.set(sessionId, session);
     this.live?.upsert(session, sessionFile ?? "");
@@ -1413,7 +1479,8 @@ var SessionManager = class {
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
       store: this.store,
-      onDead: () => this.forget(sessionId)
+      onDead: () => this.forget(sessionId),
+      compactionEntries: params.compactionEntries
     });
     this.sessions.set(sessionId, session);
     this.live?.upsert(session, this.store.get(sessionId)?.sessionFile ?? "");
@@ -1435,6 +1502,9 @@ var PiAcpSession = class _PiAcpSession {
   conn;
   fileCommands;
   onDead;
+  compactionEntries;
+  compactionId = null;
+  compactionsFinishedCount = 0;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   cancelRequested = false;
@@ -1548,6 +1618,7 @@ var PiAcpSession = class _PiAcpSession {
     this.fileCommands = opts.fileCommands ?? [];
     this.store = opts.store ?? null;
     this.onDead = opts.onDead ?? null;
+    this.compactionEntries = opts.compactionEntries ?? false;
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
@@ -1707,6 +1778,15 @@ var PiAcpSession = class _PiAcpSession {
       })
     ).catch(() => {
     });
+  }
+  get compactionsFinished() {
+    return this.compactionsFinishedCount;
+  }
+  finishCompaction(state) {
+    const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`;
+    this.compactionId = null;
+    this.compactionsFinishedCount += 1;
+    this.emit(compactionUpdate(id, state, this.compactionEntries));
   }
   async flushEmits() {
     await this.lastEmit;
@@ -2519,31 +2599,14 @@ ${formatAutoRetryMessage(ev)}` }
       // fallbacks in case older pi versions still send them.
       case "compaction_start":
       case "auto_compaction_start": {
-        const isAuto = ev.reason !== "manual";
-        if (isAuto) {
-          this.emit({
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: "Context nearing limit, running automatic compaction..."
-            }
-          });
-        }
+        this.compactionId = `compaction-${crypto.randomUUID()}`;
+        this.emit(compactionUpdate(this.compactionId, { status: "in_progress" }, this.compactionEntries));
         break;
       }
       case "compaction_end":
       case "auto_compaction_end": {
         this.peakContextTokens = 0;
-        const isAuto = ev.reason !== "manual";
-        if (isAuto) {
-          this.emit({
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: "Automatic compaction finished; context was summarized to continue the session."
-            }
-          });
-        }
+        this.finishCompaction(compactionStateFromPiEnd(ev));
         break;
       }
       case "agent_start": {
@@ -3799,6 +3862,7 @@ var PiAcpAgent = class {
   }
   // Remember recent session cwd and use it as the default filter.
   lastSessionCwd = null;
+  clientSupportsCompaction = false;
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
    * if pi-acp was restarted and the in-memory map no longer holds the session, or
@@ -3836,7 +3900,8 @@ var PiAcpAgent = class {
       mcpServers: mcpServers ?? [],
       conn: this.conn,
       proc: proc2,
-      fileCommands
+      fileCommands,
+      compactionEntries: this.clientSupportsCompaction
     });
     session.setConfigOptionsRefresher(
       async () => buildSessionConfigOptions(
@@ -3883,6 +3948,7 @@ var PiAcpAgent = class {
   async initialize(params) {
     const supportedVersion = 1;
     const requested = params.protocolVersion;
+    this.clientSupportsCompaction = Boolean(params.clientCapabilities?.session?.compaction);
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
@@ -3924,7 +3990,8 @@ var PiAcpAgent = class {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      compactionEntries: this.clientSupportsCompaction
     });
     let state = null;
     let availableModels = null;
@@ -4259,24 +4326,17 @@ ${text}`;
       }
       if (cmd === "compact") {
         const customInstructions = args.join(" ").trim() || void 0;
-        const res = await session.proc.compact(customInstructions);
-        const r = res && typeof res === "object" ? res : null;
-        const tokensBefore = typeof r?.tokensBefore === "number" ? r.tokensBefore : null;
-        const summary = typeof r?.summary === "string" ? r.summary : null;
-        const headerLines = [
-          `Compaction completed.${customInstructions ? " (custom instructions applied)" : ""}`,
-          tokensBefore !== null ? `Tokens before: ${tokensBefore}` : null
-        ].filter(Boolean);
-        const text = headerLines.join("\n") + (summary ? `
-
-${summary}` : "");
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text }
-          }
-        });
+        const finishedBefore = session.compactionsFinished;
+        let result;
+        try {
+          result = await session.proc.compact(customInstructions);
+        } catch (err) {
+          if (session.compactionsFinished === finishedBefore) throw err;
+        }
+        if (session.compactionsFinished === finishedBefore) {
+          session.finishCompaction(compactionStateFromPiEnd({ result }));
+        }
+        await session.flushEmits();
         return { stopReason: "end_turn" };
       }
       if (cmd === "session") {
@@ -4704,7 +4764,8 @@ ${JSON.stringify(stats, null, 2)}`;
       mcpServers: params.mcpServers,
       conn: this.conn,
       proc: proc2,
-      fileCommands
+      fileCommands,
+      compactionEntries: this.clientSupportsCompaction
     });
     return this.finishLoadSession(session, proc2, params, { replayHistory: true, sessionFile });
   }
@@ -4764,6 +4825,24 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
               }
             });
           }
+        }
+        if (role === "compactionSummary") {
+          const { summary, tokensBefore, timestamp } = m;
+          if (typeof summary === "string") {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: compactionUpdate(
+                `compaction-${timestamp ?? randomUUID2()}`,
+                {
+                  status: "completed",
+                  summary,
+                  tokensBefore: typeof tokensBefore === "number" ? tokensBefore : void 0
+                },
+                this.clientSupportsCompaction
+              )
+            });
+          }
+          continue;
         }
         if (role === "toolResult") {
           const toolName = String(m?.toolName ?? "tool");
