@@ -242,6 +242,32 @@ test('PiAcpSession: replaces narrated Tool call(...) text with /compact tip', as
   assert.ok(!texts.some(t => t.includes('Tool call(')))
 })
 
+test('PiAcpSession: extension tool titles keep acronyms upper case and show a non-file path whole, not "Ui Screenshot context"', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'ui_screenshot', args: { path: '/context' } })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'create_pr', args: {} })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't3', toolName: 'web_search', args: {} })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(
+    conn.updates.map(u => (u.update as any).title),
+    ['UI Screenshot: /context', 'Create PR', 'Web Search']
+  )
+  assert.equal((conn.updates[0]!.update as any).locations, undefined)
+})
+
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
