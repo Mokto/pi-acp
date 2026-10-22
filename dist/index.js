@@ -1863,6 +1863,10 @@ var PiAcpSession = class _PiAcpSession {
     this.compactionId = null;
     this.compactionsFinishedCount += 1;
     this.emit(compactionUpdate(id, state, this.compactionEntries));
+    if (state.status !== "completed") return;
+    this.peakContextTokens = 0;
+    if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== "false")
+      this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow);
   }
   async flushEmits() {
     await this.lastEmit;
@@ -2708,7 +2712,6 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "compaction_end":
       case "auto_compaction_end": {
-        this.peakContextTokens = 0;
         this.finishCompaction(compactionStateFromPiEnd(ev));
         break;
       }
