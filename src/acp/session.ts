@@ -116,7 +116,11 @@ function findUniqueLineNumber(text: string, needle: string): number | undefined 
   return line
 }
 
-function getToolPath(args: unknown): string | undefined {
+// pi's built-in tools whose `path` is a file or folder; an extension tool's `path` can be anything (ui_screenshot: a URL path).
+const FILE_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls'])
+
+function getToolPath(toolName: string, args: unknown): string | undefined {
+  if (!FILE_TOOLS.has(toolName)) return undefined
   const record = args as { path?: unknown; file_path?: unknown } | null | undefined
   if (typeof record?.path === 'string') return record.path
   if (typeof record?.file_path === 'string') return record.file_path
@@ -186,7 +190,7 @@ function getInitialFileDiffContent(
   cwd: string,
   snapshotOldText?: string | null
 ): ToolCallContent[] | undefined {
-  const rawPath = getToolPath(args)
+  const rawPath = getToolPath(toolName, args)
   if (!rawPath) return undefined
   // Always use absolute paths so clients (e.g. Zed) can locate the file for
   // their "files changed" / "Review Changes" panels.
@@ -214,8 +218,13 @@ function getInitialFileDiffContent(
   return undefined
 }
 
-function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
-  const path = getToolPath(args)
+function toToolCallLocations(
+  toolName: string,
+  args: unknown,
+  cwd: string,
+  line?: number
+): ToolCallLocation[] | undefined {
+  const path = getToolPath(toolName, args)
   if (!path) return undefined
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
@@ -1421,7 +1430,7 @@ export class PiAcpSession {
                     }
                   })()
 
-            const locations = toToolCallLocations(rawInput, this.cwd)
+            const locations = toToolCallLocations(toolName, rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
@@ -1486,7 +1495,7 @@ export class PiAcpSession {
         }
 
         if (isBashTool(toolName)) {
-          const locations = toToolCallLocations(args, this.cwd)
+          const locations = toToolCallLocations(toolName, args, this.cwd)
           const existingStatus = this.currentToolCalls.get(toolCallId)
           this.currentToolCalls.set(toolCallId, 'in_progress')
 
@@ -1507,7 +1516,7 @@ export class PiAcpSession {
         let snapshotOldText: string | null | undefined
         if (isFileMutation) {
           this.fileMutationToolCallIds.add(toolCallId)
-          const p = getToolPath(args)
+          const p = getToolPath(toolName, args)
           if (p) {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
@@ -1530,7 +1539,7 @@ export class PiAcpSession {
           }
         }
 
-        const locations = toToolCallLocations(args, this.cwd, line)
+        const locations = toToolCallLocations(toolName, args, this.cwd, line)
         const initialFileContent = isFileMutation
           ? getInitialFileDiffContent(toolName, args, this.cwd, snapshotOldText)
           : undefined
@@ -2225,7 +2234,7 @@ function truncateTitle(s: string, max = 60): string {
 }
 
 function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
-  const p = getToolPath(args)
+  const p = getToolPath(toolName, args)
   if (p) {
     // Show a short relative path when possible; fall back to basename, then full path.
     let display = p
@@ -2243,16 +2252,9 @@ function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
     return `${verb} ${display}`
   }
 
-  // For tools with a query/url/command arg, append it for context.
+  // For tools with a query/url/command/path arg, append it for context.
   const a = args as Record<string, unknown> | null | undefined
-  const hint =
-    typeof a?.query === 'string'
-      ? a.query
-      : typeof a?.url === 'string'
-        ? a.url
-        : typeof a?.command === 'string'
-          ? a.command
-          : undefined
+  const hint = ['query', 'url', 'command', 'path'].map(k => a?.[k]).find((v): v is string => typeof v === 'string')
   if (hint) return `${toolVerb(toolName)}: ${truncateTitle(hint)}`
 
   return toolVerb(toolName)

@@ -242,7 +242,7 @@ test('PiAcpSession: replaces narrated Tool call(...) text with /compact tip', as
   assert.ok(!texts.some(t => t.includes('Tool call(')))
 })
 
-test('PiAcpSession: extension tool titles keep acronyms upper case, not "Ui" or "Pr"', async () => {
+test('PiAcpSession: extension tool titles keep acronyms upper case and show a non-file path whole, not "Ui Screenshot context"', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -255,7 +255,7 @@ test('PiAcpSession: extension tool titles keep acronyms upper case, not "Ui" or 
     fileCommands: []
   })
 
-  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'ui_screenshot', args: {} })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'ui_screenshot', args: { path: '/context' } })
   proc.emit({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'create_pr', args: {} })
   proc.emit({ type: 'tool_execution_start', toolCallId: 't3', toolName: 'web_search', args: {} })
 
@@ -263,8 +263,9 @@ test('PiAcpSession: extension tool titles keep acronyms upper case, not "Ui" or 
 
   assert.deepEqual(
     conn.updates.map(u => (u.update as any).title),
-    ['UI Screenshot', 'Create PR', 'Web Search']
+    ['UI Screenshot: /context', 'Create PR', 'Web Search']
   )
+  assert.equal((conn.updates[0]!.update as any).locations, undefined)
 })
 
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
