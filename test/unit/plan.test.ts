@@ -40,3 +40,17 @@ test('latestPlanEntries: newest update_plan call wins, other tools ignored', () 
   assert.deepEqual(latestPlanEntries(messages), [{ content: 'new', priority: 'medium', status: 'completed' }])
   assert.equal(latestPlanEntries([{ role: 'user', content: 'hi' }]), null)
 })
+
+test('latestPlanEntries: the list carried past a compaction counts, as pi returns it after one', () => {
+  const messages = [
+    { role: 'compactionSummary', summary: '...' },
+    { role: 'user', content: 'go on' },
+    {
+      role: 'custom',
+      customType: 'todo',
+      content: 'Your to-do list...',
+      details: { plan: [{ step: 'kept', status: 'in_progress' }] }
+    }
+  ]
+  assert.deepEqual(latestPlanEntries(messages), [{ content: 'kept', priority: 'medium', status: 'in_progress' }])
+})
