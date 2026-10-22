@@ -54,7 +54,13 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { buildSessionConfigOptions, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import {
+  buildSessionConfigOptions,
+  COMPACT_AT_CONFIG_ID,
+  MODEL_CONFIG_ID,
+  pickCompactAt,
+  THINKING_CONFIG_ID
+} from './translate/config-options.js'
 import { buildPlanUsageOption, PLAN_USAGE_CONFIG_ID, pickPlanUsageRow, readPlanUsage } from './translate/plan-usage.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { providerDisplayName } from './translate/provider-name.js'
@@ -1627,6 +1633,11 @@ export class PiAcpAgent implements ACPAgent {
         pickPlanUsageRow(String(params.value))
         this.sessions.pushConfigOptionUpdates()
         break
+      case COMPACT_AT_CONFIG_ID:
+        pickCompactAt(String(params.value))
+        this.sessions.pushConfigOptionUpdates()
+        this.sessions.compactAtPicked()
+        break
       default:
         throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
     }
@@ -1738,7 +1749,7 @@ const THINKING_LEVEL_LABELS: Record<ThinkingLevel, { name: string; description: 
 // The v1 SDK dropped the `ModelInfo`/`SessionModelState` types (model selection
 // moved to config options); we keep the shape locally for legacy clients that
 // still read the `models` field.
-type ModelInfo = { modelId: string; name: string; description: string | null }
+type ModelInfo = { modelId: string; name: string; description: string | null; contextWindow: number | null }
 
 async function getModelState(
   proc: PiRpcProcess,
@@ -1771,7 +1782,8 @@ async function getModelState(
       return {
         modelId: `${provider}/${id}`,
         name: `${providerDisplayName(provider)} / ${name}`,
-        description: null
+        description: null,
+        contextWindow: typeof m?.contextWindow === 'number' ? m.contextWindow : null
       } satisfies ModelInfo
     })
     .filter(Boolean) as ModelInfo[]

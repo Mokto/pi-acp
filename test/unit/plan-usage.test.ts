@@ -170,7 +170,7 @@ test('plan usage: a provider not updated for a week drops out; nothing left hide
   assert.equal(readPlanUsage(join(tmpdir(), 'does-not-exist')), null)
 })
 
-test('plan usage: one file per provider is read from disk and listed first among the config options', () => {
+test('plan usage: one file per provider is read from disk and listed right after the compaction size', () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'plan-usage-')), 'plan-usage')
   mkdirSync(dir)
   writeFileSync(join(dir, 'anthropic.json'), JSON.stringify(usage.anthropic))
@@ -178,7 +178,10 @@ test('plan usage: one file per provider is read from disk and listed first among
   const read = readPlanUsage(dir)
   assert.deepEqual(Object.keys(read ?? {}), ['anthropic'])
   const options = buildSessionConfigOptions(null, { availableModes: [], currentModeId: 'off' }, read)
-  assert.equal(options[0]?.id, 'plan_usage')
+  assert.deepEqual(
+    options.map(o => o.id),
+    ['compact_at', 'plan_usage']
+  )
 })
 
 test('plan usage: malformed windows and odd file names are dropped on read, repeated labels shown once', () => {
