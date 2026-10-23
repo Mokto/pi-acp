@@ -82,7 +82,12 @@ export type ConfigThinkingState = {
   currentModeId: string
 }
 
-/** Puts the provider in a heading so the button shows only the model. Zed's search matches option names, not headings. */
+const CONTEXT_SUFFIX = / @ \S+$/
+
+/**
+ * Puts the provider in a heading so the button shows only the model. Zed's search matches option names, not headings.
+ * The Compaction button shows the context window, so pi-cursor-sdk's " @ 256k" is dropped unless two rows would then match.
+ */
 function groupByProvider(models: NonNullable<ConfigModelState>['availableModels']) {
   const groups = new Map<string, SessionConfigSelectGroup>()
   for (const m of models) {
@@ -95,6 +100,12 @@ function groupByProvider(models: NonNullable<ConfigModelState>['availableModels'
       value: m.modelId,
       name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
       description: m.description ?? null
+    })
+  }
+  for (const group of groups.values()) {
+    const short = group.options.map(o => o.name.replace(CONTEXT_SUFFIX, ''))
+    group.options.forEach((o, i) => {
+      if (short.indexOf(short[i]) === short.lastIndexOf(short[i])) o.name = short[i]
     })
   }
   return [...groups.values()]

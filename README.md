@@ -28,7 +28,7 @@ Expect some minor breaking changes.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- Model picker lists models under one heading per provider, so the button shows only the model's name
+- Model picker lists models under one heading per provider, so the button shows only the model's name. A context size in the name (Cursor's "Grok 4.7 (fast) @ 256k") is left out, since the Compaction button shows it, unless two models would then share a name
 - Model picker respects pi's `enabledModels` setting
   - When `enabledModels` is set in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`), the ACP model picker is scoped to those models, matching pi's own resolution (exact ids, `provider/*` globs, and partial matches). Patterns that resolve to no model are ignored just like in pi — note these are model **ids** (e.g. `anthropic/claude-sonnet-4-6`), not display names (`Claude Sonnet 4.6`). The active model is always kept selectable.
 - Thinking picker lists only the levels the current model supports (`off` to `max`), refreshed when the model changes. Needs pi 0.81 or newer; older pi gets a fixed `off`–`xhigh` list.
