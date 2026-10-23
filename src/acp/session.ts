@@ -38,6 +38,7 @@ import { compactAtTokens, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translat
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
+import { BackgroundCompaction, type SessionFileInfo, type SummaryWriter } from './background-compaction.js'
 import { PLAN_TOOL, planEntries } from './translate/plan.js'
 
 type SessionCreateParams = {
@@ -383,6 +384,7 @@ export class PiAcpSession {
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
   private compactAfterReplyFailed = false
+  private readonly background: BackgroundCompaction
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -518,6 +520,8 @@ export class PiAcpSession {
     onDead?: () => void
     compactionEntries?: boolean
     notices?: boolean
+    /** Starts the pi that writes a summary in the background; tests swap in a fake. */
+    startSummaryWriter?: (sessionPath: string) => Promise<SummaryWriter>
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -529,6 +533,10 @@ export class PiAcpSession {
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
     this.notices = opts.notices ?? false
+    this.background = new BackgroundCompaction(
+      opts.startSummaryWriter ??
+        (sessionPath => PiRpcProcess.spawn({ cwd: this.cwd, sessionPath, summaryWriter: true }))
+    )
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.proc.onExit?.((code, signal) => {
@@ -676,6 +684,7 @@ export class PiAcpSession {
       })
     }
 
+    if (this.compactionAfterReply) void this.background.discard()
     // Abort the currently running turn (if any). If nothing is running, this is a no-op.
     await this.proc.abort()
   }
@@ -760,7 +769,14 @@ export class PiAcpSession {
     for (const ev of this.proc.takeEarlyEvents()) this.handlePiEvent(ev)
   }
 
+  private startCompaction(): void {
+    if (this.compactionId) return
+    this.compactionId = `compaction-${crypto.randomUUID()}`
+    this.emit(compactionUpdate(this.compactionId, { status: 'in_progress' }, this.compactionEntries))
+  }
+
   finishCompaction(state: CompactionState): void {
+    void this.background.discard()
     const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`
     this.compactionId = null
     this.compactionsFinishedCount += 1
@@ -906,10 +922,12 @@ export class PiAcpSession {
 
   markClosed(): void {
     this.closed = true
+    void this.background.discard()
   }
 
   private async handleProcessExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     this.clearTurnWatchdog()
+    void this.background.discard()
     if (this.closed) {
       if (this.pendingTurn) this.completeTurn('cancelled')
       return
@@ -1182,10 +1200,13 @@ export class PiAcpSession {
     const finishIfPiDidNot = (state: CompactionState) => {
       if (this.compactionsFinishedCount === finishedBefore) this.finishCompaction(state)
     }
-    this.compactionAfterReply = this.proc.compact().then(
-      result => finishIfPiDidNot(compactionStateFromPiEnd({ result })),
-      err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) })
-    )
+    // Shown now, not at pi's compaction_start: a summary still being written can take a while.
+    this.startCompaction()
+    this.compactionAfterReply = (async () => {
+      await this.background.wait()
+      if (this.cancelRequested) return finishIfPiDidNot({ status: 'cancelled' })
+      finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }))
+    })().catch(err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) }))
     try {
       await this.compactionAfterReply
     } catch {
@@ -1333,6 +1354,7 @@ export class PiAcpSession {
   /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
   compactAtPicked(): void {
     this.compactAfterReplyFailed = false
+    void this.background.discard()
     void this.pushUsageUpdate()
   }
 
@@ -1357,12 +1379,27 @@ export class PiAcpSession {
     // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
     // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
     if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens)
+    this.maybeStartBackgroundCompaction()
 
     return {
       raw,
       displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
       contextWindow: this.contextWindow
     }
+  }
+
+  private maybeStartBackgroundCompaction(): void {
+    const limit = compactAtTokens()
+    if (!limit || this.compactAfterReplyFailed || this.compactionAfterReply) return
+    if (this.background.shouldStart(this.peakContextTokens, limit))
+      this.background.start(this.sessionFileInfo(), this.peakContextTokens, limit)
+  }
+
+  private async sessionFileInfo(): Promise<SessionFileInfo> {
+    const state = (await this.proc.getState()) as { sessionFile?: unknown; sessionId?: unknown } | null
+    if (typeof state?.sessionFile !== 'string' || typeof state.sessionId !== 'string')
+      throw new Error('pi reported no session file')
+    return { file: state.sessionFile, id: state.sessionId }
   }
 
   private async maybeEmitTokenStats(): Promise<void> {
@@ -1833,8 +1870,7 @@ export class PiAcpSession {
       // fallbacks in case older pi versions still send them.
       case 'compaction_start':
       case 'auto_compaction_start': {
-        this.compactionId = `compaction-${crypto.randomUUID()}`
-        this.emit(compactionUpdate(this.compactionId, { status: 'in_progress' }, this.compactionEntries))
+        this.startCompaction()
         break
       }
 

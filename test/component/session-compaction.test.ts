@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiAcpSession } from '../../src/acp/session.js'
@@ -7,6 +10,8 @@ import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 import { pickCompactAt } from '../../src/acp/translate/config-options.js'
+import type { SummaryWriter } from '../../src/acp/background-compaction.js'
+import { until } from '../helpers/until.js'
 
 const SUMMARY = '## Goal\nShip the compaction entry.'
 const END_OK = {
@@ -17,7 +22,7 @@ const END_OK = {
   willRetry: false
 }
 
-function session(compactionEntries: boolean) {
+function session(compactionEntries: boolean, startSummaryWriter?: (sessionPath: string) => Promise<SummaryWriter>) {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
   const s = new PiAcpSession({
@@ -27,7 +32,8 @@ function session(compactionEntries: boolean) {
     proc: proc as any,
     conn: asAgentConn(conn),
     fileCommands: [],
-    compactionEntries
+    compactionEntries,
+    startSummaryWriter
   })
   const updates = async () => {
     await new Promise(r => setTimeout(r, 0))
@@ -362,6 +368,90 @@ test('compaction: a message that starts while a model switch from the last reply
     assert.deepEqual(
       proc.prompts.map(p => p.message),
       ['work', 'next']
+    )
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: the summary is written in the background before the size, and the compaction after the reply waits for it', async () => {
+  const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
+  writeFileSync(sessionFile, '{"type":"session"}\n')
+  let writing: (r: unknown) => void = () => {}
+  let writers = 0
+  const { proc, s, updates } = session(true, async () => {
+    writers += 1
+    return { compact: () => new Promise(r => (writing = r)), dispose: () => {} }
+  })
+  proc.getState = async () => ({ sessionFile, sessionId: `bg-${Date.now()}` })
+  pickCompactAt('300000')
+  try {
+    await finishReply(s, proc, 280_000)
+    await until(() => writers > 0)
+    assert.equal(writers, 1)
+    assert.equal(proc.compactCalls, 0)
+
+    await finishReply(s, proc, 305_000)
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(proc.compactCalls, 0, 'the compaction waits for the background summary')
+    const compactions = async () => (await updates()).filter(u => u.sessionUpdate === 'compaction_update')
+    assert.deepEqual(
+      (await compactions()).map(u => u.status),
+      ['in_progress'],
+      'the divider shows while the summary is still being written'
+    )
+
+    let piAnswers: (r: unknown) => void = () => {}
+    proc.compactResult = new Promise(r => (piAnswers = r))
+    writing({ summary: SUMMARY, firstKeptEntryId: 'k', estimatedTokensAfter: 20_000 })
+    await until(() => proc.compactCalls > 0)
+    proc.emit({ type: 'compaction_start', reason: 'manual' })
+    proc.emit({ ...END_OK, reason: 'manual' })
+    piAnswers(END_OK.result)
+    const shown = await compactions()
+    assert.deepEqual(
+      shown.map(u => u.status),
+      ['in_progress', 'completed']
+    )
+    assert.equal(new Set(shown.map(u => u.compactionId)).size, 1, "pi's own start reuses the divider")
+    assert.equal(proc.compactCalls, 1)
+    assert.equal(writers, 1)
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: Stop while the background summary is still being written skips the compaction', async () => {
+  const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
+  writeFileSync(sessionFile, '{"type":"session"}\n')
+  let stopWriter: (e: Error) => void = () => {}
+  let stopped = false
+  let writerStarted = false
+  const { proc, s, updates } = session(true, async () => ({
+    compact: () => {
+      writerStarted = true
+      return new Promise((_, reject) => (stopWriter = reject))
+    },
+    dispose: () => {
+      stopped = true
+      stopWriter(new Error('stopped'))
+    }
+  }))
+  proc.getState = async () => ({ sessionFile, sessionId: `bg-${Date.now()}` })
+  pickCompactAt('300000')
+  try {
+    await finishReply(s, proc, 280_000)
+    await until(() => writerStarted)
+    await finishReply(s, proc, 305_000)
+    const queued = s.prompt('next')
+    await s.cancel()
+    assert.equal(await queued, 'cancelled')
+    await until(() => stopped)
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(proc.compactCalls, 0)
+    assert.deepEqual(
+      (await updates()).filter(u => u.sessionUpdate === 'compaction_update').map(u => u.status),
+      ['in_progress', 'cancelled']
     )
   } finally {
     pickCompactAt('model_limit')

@@ -1,5 +1,13 @@
 import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { getPiAcpCompactionDir } from '../acp/paths.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+
+function compactionExtensionPath(): string {
+  const built = fileURLToPath(new URL('./compaction-extension.js', import.meta.url))
+  return existsSync(built) ? built : built.replace(/\.js$/, '.ts')
+}
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -113,6 +121,8 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** The pi that only writes a background summary: it skips the hand-over extension and everything a summary never reads. */
+  summaryWriter?: boolean
 }
 
 export class PiRpcProcess {
@@ -202,15 +212,20 @@ export class PiRpcProcess {
 
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
-    // Keep extensions + prompt templates enabled because ACP users may rely on them
-    // (e.g. MCP extensions, prompt templates for workflows).
+    // The live pi keeps extensions + prompt templates because ACP users may rely on them
+    // (e.g. MCP extensions, prompt templates for workflows). The summary writer skips what a
+    // summary never reads, but keeps extensions: some models (Cursor) come from one.
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    if (params.summaryWriter) args.push('--no-mcp', '--no-skills', '--no-prompt-templates', '--no-context-files')
+    else args.push('-e', compactionExtensionPath())
 
     const child = spawn(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env,
+      env: params.summaryWriter
+        ? process.env
+        : { ...process.env, PI_ACP_COMPACTION_HANDOFF_DIR: getPiAcpCompactionDir() },
       shell: shouldUseShellForPiCommand(cmd)
     })
 

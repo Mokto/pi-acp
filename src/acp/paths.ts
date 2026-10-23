@@ -14,6 +14,11 @@ export function getPiAcpSessionMapPath(): string {
   return join(getPiAcpDir(), 'session-map.json')
 }
 
+/** Background summaries waiting for pi's compaction, one `<pi session id>.json` each. */
+export function getPiAcpCompactionDir(): string {
+  return join(getPiAcpDir(), 'compaction')
+}
+
 /** Directory for opt-in live-attach sockets + per-pid registries (`PI_ACP_LIVE=1`). */
 export function getPiAcpLiveDir(): string {
   return join(getPiAcpDir(), 'live')

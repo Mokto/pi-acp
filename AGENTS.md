@@ -27,6 +27,7 @@ Use `@agentclientprotocol/sdk`:
 - No ACP client-side FS/terminal delegation. Pi already reads/writes and executes locally.
 - `mcpServers` are accepted and stored in session state but not used.
 - Assistant text streams as `agent_message_chunk`, thinking as `agent_thought_chunk`.
+- Every pi that pi-acp starts loads `src/pi-rpc/compaction-extension.ts` (built to `dist/compaction-extension.js`, passed with `-e`). pi loads it on its own, so it must not import pi-acp code. It hands pi the summary `BackgroundCompaction` wrote in a second pi; that second pi (`summaryWriter: true`) starts without it, and without MCP servers, skills, prompt templates and context files, which a summary never reads. It keeps the other extensions, since some models (Cursor) come from one.
 - Tool events map to ACP `tool_call` / `tool_call_update`, with structured diffs for `edit`/`write` and images for image reads where possible.
 - **Requests to pi (`PiRpcProcess.request`) have no timeout.** On the path that completes a turn (between `agent_settled` and `completeTurn`), every awaited request is one a stuck pi can hang until the turn watchdog fires (5 min). `maybeEmitTokenStats` awaits `getSessionStats` there, wrapped in `withTimeout` (`src/acp/timeout.ts`, 2 s) with a fallback; don't add more. Fire-and-forget anything that isn't needed to finish the turn. Wrap a request in `withTimeout` only when it has a fallback: a limit on one that must succeed turns a slow pi into an error.
 

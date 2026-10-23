@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: { index: 'src/index.ts', 'compaction-extension': 'src/pi-rpc/compaction-extension.ts' },
   format: ['esm'],
   platform: 'node',
   target: 'node22',
