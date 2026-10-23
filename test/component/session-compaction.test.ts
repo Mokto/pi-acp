@@ -300,6 +300,9 @@ test('compaction: each thread keeps its own size, and a reopened thread gets its
   b.setCompactAt('model_limit')
   assert.equal(open('b').compactAt, null)
   assert.equal(open('never-picked').compactAt, null)
+
+  store.setCompactAt('a', 123_000)
+  assert.equal(open('a').compactAt, null, 'a saved size the menu no longer lists falls back to Model limit')
 })
 
 test('compaction: a reply under the chosen size, or with no size chosen, leaves compaction to pi', async () => {

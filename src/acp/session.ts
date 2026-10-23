@@ -523,7 +523,8 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.store = opts.store ?? null
-    this.compactAtPick = this.store?.get(this.sessionId)?.compactAt ?? null
+    // A size a later release dropped from the menu would otherwise compact at a size the button can't show.
+    this.compactAtPick = parseCompactAt(String(this.store?.get(this.sessionId)?.compactAt))
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
     this.notices = opts.notices ?? false
