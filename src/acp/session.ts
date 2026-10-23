@@ -34,7 +34,7 @@ import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './tran
 import { getPlanUsageDir } from './translate/plan-usage.js'
 import { extensionName, noticeFromNotify } from './translate/notice.js'
 import { compactionStateFromPiEnd, compactionUpdate, type CompactionState } from './translate/compaction.js'
-import { compactAtTokens, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import { MODEL_CONFIG_ID, parseCompactAt, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
@@ -249,10 +249,6 @@ export class SessionManager {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate()
   }
 
-  compactAtPicked(): void {
-    for (const s of this.sessions.values()) s.compactAtPicked()
-  }
-
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId: string): PiAcpSession | undefined {
     return this.sessions.get(sessionId)
@@ -361,11 +357,6 @@ export class SessionManager {
   }
 }
 
-/** The ring fills toward the picked compaction size, since that is when the thread compacts. */
-function ringSize(contextWindow: number): number {
-  return Math.min(contextWindow, compactAtTokens() ?? contextWindow)
-}
-
 export class PiAcpSession {
   readonly sessionId: string
   readonly cwd: string
@@ -385,6 +376,7 @@ export class PiAcpSession {
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
   private compactAfterReplyFailed = false
+  private compactAtPick: number | null = null
   private readonly background: BackgroundCompaction
 
   // Used to map abort semantics to ACP stopReason.
@@ -531,6 +523,8 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.store = opts.store ?? null
+    // A size a later release dropped from the menu would otherwise compact at a size the button can't show.
+    this.compactAtPick = parseCompactAt(String(this.store?.get(this.sessionId)?.compactAt))
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
     this.notices = opts.notices ?? false
@@ -1184,7 +1178,7 @@ export class PiAcpSession {
   }
 
   private shouldCompactAfterReply(reason: StopReason): boolean {
-    const limit = compactAtTokens()
+    const limit = this.compactAtPick
     return (
       reason === 'end_turn' &&
       !this.pendingTurn &&
@@ -1349,14 +1343,26 @@ export class PiAcpSession {
   // know the model's window or has no post-compaction count yet.
   private emitUsageUpdate(tokens: number | null, contextWindow: number | null): void {
     if (!tokens || !contextWindow) return
-    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: ringSize(contextWindow) })
+    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: this.ringSize(contextWindow) })
   }
 
-  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
-  compactAtPicked(): void {
+  /** Context size at which a finished reply compacts this thread, or null to leave it to pi. */
+  get compactAt(): number | null {
+    return this.compactAtPick
+  }
+
+  /** A pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  setCompactAt(value: string): void {
+    this.compactAtPick = parseCompactAt(value)
+    this.store?.setCompactAt(this.sessionId, this.compactAtPick)
     this.compactAfterReplyFailed = false
     void this.background.discard()
     void this.pushUsageUpdate()
+  }
+
+  /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+  private ringSize(contextWindow: number): number {
+    return Math.min(contextWindow, this.compactAtPick ?? contextWindow)
   }
 
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
@@ -1390,7 +1396,7 @@ export class PiAcpSession {
   }
 
   private maybeStartBackgroundCompaction(): void {
-    const picked = compactAtTokens()
+    const picked = this.compactAtPick
     const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null
     const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity)
     if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return
@@ -1438,7 +1444,7 @@ export class PiAcpSession {
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const percent = (displayTokens / ringSize(contextWindow)) * 100
+        const percent = (displayTokens / this.ringSize(contextWindow)) * 100
         parts.push(`${Math.round(percent * 10) / 10}%`)
       }
     }
