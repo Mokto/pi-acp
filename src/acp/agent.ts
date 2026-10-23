@@ -40,7 +40,7 @@ import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
-import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
+import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
@@ -1370,6 +1370,8 @@ export class PiAcpAgent implements ACPAgent {
   ): Promise<LoadSessionResponse> {
     const fileCommands = loadSlashCommands(params.cwd)
 
+    // pi reports no context size after a compaction until the next reply.
+    let estimatedTokens: number | undefined
     if (opts.replayHistory) {
       let data: unknown
       let replayTimedOut = false
@@ -1522,6 +1524,7 @@ export class PiAcpAgent implements ACPAgent {
 
       const plan = latestPlanEntries(messages)
       if (plan?.length) session.showPlan(plan)
+      estimatedTokens = estimatePiContextTokens(messages)
     } else if (session.currentPlan?.length) {
       session.showPlan(session.currentPlan)
     }
@@ -1551,7 +1554,7 @@ export class PiAcpAgent implements ACPAgent {
     // Advertise slash commands and context usage after the response so the client knows the session exists.
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands)
-      void session.pushUsageUpdate()
+      void session.pushUsageUpdate(estimatedTokens)
       session.replayEarlyEvents()
     }, 0)
 

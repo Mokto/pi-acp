@@ -1360,11 +1360,11 @@ export class PiAcpSession {
   }
 
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
-  async pushUsageUpdate(): Promise<void> {
+  async pushUsageUpdate(estimatedTokens?: number): Promise<void> {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === 'false') return
     try {
       const usage = await this.readContextUsage()
-      this.emitUsageUpdate(usage.displayTokens, usage.contextWindow)
+      this.emitUsageUpdate(usage.displayTokens ?? estimatedTokens ?? null, usage.contextWindow)
     } catch {
       // Stats are cosmetic; the ring appears after the next turn instead.
     }
