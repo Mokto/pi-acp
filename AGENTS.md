@@ -45,7 +45,7 @@ Use `@agentclientprotocol/sdk`:
 ### Testing a change in Zed
 
 - `npm run build && npm install -g .` links the global `pi-acp` to this checkout, so Zed runs it.
-- Zed keeps a running pi-acp and reuses it for new threads, so a new thread is not enough after a rebuild. Pick **Reload Agent** in the Agent Panel's options menu (Zed 1.18+): it restarts pi-acp and every thread's pi, so use it when no reply is running. Quitting and reopening Zed also works.
+- Zed keeps a running pi-acp and reuses it for new threads, so a new thread is not enough after a rebuild. Pick **Reload Agent** in the Agent Panel's options menu (Zed 1.18+): it starts a fresh pi-acp for the open thread only, so use it in each thread you want on the new build, when no reply is running there. Other open threads stay on the old pi-acp (Zed's `retry_connection` replaces only that thread's connection), and new threads join the fresh one. Quitting and reopening Zed moves every thread to the new build.
 - The Ocean team's auto-sync reinstalls the pinned release whenever its version differs from the installed one, which replaces the link. Undo it yourself with `npm install -g https://github.com/Mokto/pi-acp/releases/download/vX.Y.Z/pi-acp-X.Y.Z.tgz`.
 
 ## Manual testing notes
