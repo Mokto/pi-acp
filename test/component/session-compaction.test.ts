@@ -162,6 +162,27 @@ test('compaction: reopening a compacted thread marks where the earlier history w
   }
 })
 
+test("compaction: a reopened compacted thread shows pi's estimate on the ring until the next reply", async () => {
+  const restore = stubSpawn({
+    onEvent: () => () => {},
+    getSessionStats: async () => ({ contextUsage: { tokens: null, contextWindow: 1_000_000, percent: null } }),
+    getMessages: async () => ({
+      messages: [
+        { role: 'compactionSummary', summary: 'x'.repeat(40_000), tokensBefore: 150_000, timestamp: 42 },
+        { role: 'user', content: 'y'.repeat(8_000) }
+      ]
+    })
+  })
+  try {
+    const { conn } = await loadedAgent(true)
+    const ring = () => conn.updates.map(u => u.update as any).find(u => u.sessionUpdate === 'usage_update')
+    for (let i = 0; i < 200 && !ring(); i++) await new Promise(r => setTimeout(r, 5))
+    assert.deepEqual([ring()?.used, ring()?.size], [12_000, 1_000_000])
+  } finally {
+    restore()
+  }
+})
+
 test('compaction: /compact shows the entry instead of pasting the summary into the reply', async () => {
   let handler: (ev: PiRpcEvent) => void = () => {}
   const restore = stubSpawn({
