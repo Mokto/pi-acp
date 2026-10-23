@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
-import { pickCompactAt } from '../../src/acp/translate/config-options.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
 function makeSession() {
@@ -173,11 +172,10 @@ test('a model switch made mid-turn refreshes the ring once the turn ends and the
   )
 })
 
-test('a picked compaction size becomes the ring size and the stats line percent, on models whose window is larger', async t => {
-  t.after(() => pickCompactAt('model_limit'))
+test('a picked compaction size becomes the ring size and the stats line percent, on models whose window is larger', async () => {
   const { conn, proc, session, usageUpdates } = makeSession()
   proc.sessionStats = { contextUsage: { tokens: 150_000, contextWindow: 1_000_000, percent: 15 } }
-  pickCompactAt('300000')
+  session.setCompactAt('300000')
 
   const turn = session.prompt('hello')
   proc.emit({ type: 'agent_start' })

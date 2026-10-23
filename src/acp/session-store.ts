@@ -14,6 +14,8 @@ export type StoredSession = {
   // Absent = not yet captured; null = captured but branch was undetectable
   // (e.g. detached HEAD).
   startBranch?: string | null
+  // Compaction size picked in this thread; null = Model limit. Absent = never picked.
+  compactAt?: number | null
 }
 
 type SessionMapFile = {
@@ -59,11 +61,11 @@ export class SessionStore {
     const db = loadFile(this.path)
     const existing = db.sessions[entry.sessionId]
     db.sessions[entry.sessionId] = {
+      ...existing,
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: new Date().toISOString(),
-      ...(existing && 'startBranch' in existing ? { startBranch: existing.startBranch } : {})
+      updatedAt: new Date().toISOString()
     }
     saveFile(this.path, db)
   }
@@ -81,6 +83,15 @@ export class SessionStore {
     const existing = db.sessions[sessionId]
     if (!existing) return
     existing.startBranch = branch
+    saveFile(this.path, db)
+  }
+
+  /** Record the compaction size picked in a session. No-op if the session isn't registered yet. */
+  setCompactAt(sessionId: string, tokens: number | null): void {
+    const db = loadFile(this.path)
+    const existing = db.sessions[sessionId]
+    if (!existing) return
+    existing.compactAt = tokens
     saveFile(this.path, db)
   }
 
