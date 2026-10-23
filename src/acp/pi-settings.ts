@@ -87,6 +87,19 @@ export function getEnabledModels(cwd: string): string[] | undefined {
 }
 
 /**
+ * Mirror where pi compacts a thread on its own: past the window minus `compaction.reserveTokens`.
+ * ponytail: ignores `compaction.modelOverrides`; for a model with its own reserve, the background
+ * summary starts early or late and pi summarizes as usual. Upgrade: read the model's override too.
+ */
+export function getAutoCompactionPoint(cwd: string, contextWindow: number): number | null {
+  const compaction = getMergedSettings(cwd).compaction
+  const settings = isObject(compaction) ? compaction : {}
+  if (settings.enabled === false) return null
+  const reserve = typeof settings.reserveTokens === 'number' ? settings.reserveTokens : 16_384
+  return contextWindow - reserve
+}
+
+/**
  * Mirror pi's quietStartup setting: if true, pi suppresses the verbose startup prelude.
  * We use it to decide whether to synthesize + emit our own "startup info" message.
  */
