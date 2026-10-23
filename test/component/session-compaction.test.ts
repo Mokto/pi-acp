@@ -6,6 +6,7 @@ import { PiAcpSession } from '../../src/acp/session.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+import { pickCompactAt } from '../../src/acp/translate/config-options.js'
 
 const SUMMARY = '## Goal\nShip the compaction entry.'
 const END_OK = {
@@ -215,5 +216,154 @@ test('compaction: /compact still surfaces an error pi raises before compaction s
     await assert.rejects(agent.prompt({ sessionId: 's1', prompt: [{ type: 'text', text: '/compact' }] } as any), /busy/)
   } finally {
     restore()
+  }
+})
+
+async function finishReply(s: PiAcpSession, proc: FakePiRpcProcess, tokens: number) {
+  proc.sessionStats = { contextUsage: { tokens, contextWindow: 1_000_000 } }
+  const reply = s.prompt('work')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await reply, 'end_turn')
+  await new Promise(r => setTimeout(r, 0))
+}
+
+test('compaction: at a chosen size, a reply that ends over it compacts, and a message sent meanwhile waits', async () => {
+  const { proc, s, updates } = session(true)
+  let finish: (result: unknown) => void = () => {}
+  proc.compactResult = new Promise(r => (finish = r))
+  pickCompactAt('400000')
+  try {
+    await finishReply(s, proc, 450_000)
+    assert.equal(proc.compactCalls, 1)
+
+    void s.prompt('next')
+    assert.equal(proc.prompts.length, 1)
+
+    finish({ summary: SUMMARY, tokensBefore: 450_000, estimatedTokensAfter: 40_000 })
+    await new Promise(r => setTimeout(r, 0))
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'next']
+    )
+    assert.ok((await updates()).some(u => u.sessionUpdate === 'compaction_update' && u.status === 'completed'))
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: a reply under the chosen size, or with no size chosen, leaves compaction to pi', async () => {
+  const { proc, s } = session(true)
+  pickCompactAt('400000')
+  try {
+    await finishReply(s, proc, 350_000)
+    pickCompactAt('model_limit')
+    await finishReply(s, proc, 900_000)
+    assert.equal(proc.compactCalls, 0)
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: Stop during the after-reply compaction aborts it, drops the waiting message, and later messages run', async () => {
+  const { proc, s } = session(true)
+  let fail: (err: Error) => void = () => {}
+  proc.compactResult = new Promise((_, r) => (fail = r))
+  pickCompactAt('400000')
+  try {
+    await finishReply(s, proc, 450_000)
+    const waiting = s.prompt('next')
+    await s.cancel()
+    assert.equal(await waiting, 'cancelled')
+    assert.equal(proc.abortCount, 1)
+
+    fail(new Error('Compaction cancelled'))
+    await new Promise(r => setTimeout(r, 0))
+    void s.prompt('after')
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'after']
+    )
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: an error while reporting the after-reply compaction still releases waiting messages', async () => {
+  const { proc, s } = session(true)
+  pickCompactAt('400000')
+  const finishCompaction = s.finishCompaction.bind(s)
+  s.finishCompaction = () => {
+    throw new Error('boom')
+  }
+  try {
+    await finishReply(s, proc, 450_000)
+    await new Promise(r => setTimeout(r, 0))
+    s.finishCompaction = finishCompaction
+    void s.prompt('after')
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'after']
+    )
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: after a failed after-reply compaction, replies stop retrying until the size is picked again or a compaction succeeds', async () => {
+  const { proc, s } = session(true)
+  const failed = Promise.reject(new Error('pi compact failed: overloaded'))
+  failed.catch(() => {})
+  proc.compactResult = failed
+  pickCompactAt('400000')
+  try {
+    await finishReply(s, proc, 450_000)
+    await finishReply(s, proc, 460_000)
+    assert.equal(proc.compactCalls, 1)
+
+    s.compactAtPicked()
+    await finishReply(s, proc, 465_000)
+    assert.equal(proc.compactCalls, 2)
+
+    proc.compactResult = Promise.resolve({ summary: SUMMARY, tokensBefore: 470_000, estimatedTokensAfter: 40_000 })
+    proc.emit({ type: 'compaction_start', reason: 'manual' })
+    proc.emit({ type: 'compaction_end', reason: 'manual', result: { summary: SUMMARY, tokensBefore: 470_000 } })
+    await finishReply(s, proc, 450_000)
+    assert.equal(proc.compactCalls, 3)
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
+test('compaction: a message that starts while a model switch from the last reply is applied is not compacted under', async () => {
+  const { proc, s } = session(true)
+  let applied: () => void = () => {}
+  const setModel = proc.setModel.bind(proc)
+  proc.setModel = async (provider, modelId) => {
+    await new Promise<void>(r => (applied = r))
+    return setModel(provider, modelId)
+  }
+  pickCompactAt('400000')
+  try {
+    proc.sessionStats = { contextUsage: { tokens: 450_000, contextWindow: 1_000_000 } }
+    const reply = s.prompt('work')
+    proc.emit({ type: 'agent_start' })
+    await s.setModelWhenIdle('anthropic', 'claude-sonnet-5-5')
+    proc.emit({ type: 'turn_end' })
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await reply, 'end_turn')
+    void s.prompt('next')
+    applied()
+    await new Promise(r => setTimeout(r, 0))
+    assert.equal(proc.compactCalls, 0)
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'next']
+    )
+  } finally {
+    pickCompactAt('model_limit')
   }
 })

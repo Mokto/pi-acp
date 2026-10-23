@@ -34,7 +34,7 @@ import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './tran
 import { getPlanUsageDir } from './translate/plan-usage.js'
 import { extensionName, noticeFromNotify } from './translate/notice.js'
 import { compactionStateFromPiEnd, compactionUpdate, type CompactionState } from './translate/compaction.js'
-import { MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import { compactAtTokens, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
@@ -77,10 +77,8 @@ type DeferredModel = { provider: string; modelId: string }
 
 type ContextUsage = {
   raw: unknown
-  tokens: number | null
   displayTokens: number | null
   contextWindow: number | null
-  percent: number | null
 }
 
 const DEFAULT_TURN_INACTIVITY_MS = 60 * 60_000
@@ -249,6 +247,10 @@ export class SessionManager {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate()
   }
 
+  compactAtPicked(): void {
+    for (const s of this.sessions.values()) s.compactAtPicked()
+  }
+
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId: string): PiAcpSession | undefined {
     return this.sessions.get(sessionId)
@@ -357,6 +359,11 @@ export class SessionManager {
   }
 }
 
+/** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+function ringSize(contextWindow: number): number {
+  return Math.min(contextWindow, compactAtTokens() ?? contextWindow)
+}
+
 export class PiAcpSession {
   readonly sessionId: string
   readonly cwd: string
@@ -374,6 +381,8 @@ export class PiAcpSession {
   private readonly notices: boolean
   private compactionId: string | null = null
   private compactionsFinishedCount = 0
+  private compactionAfterReply: Promise<void> | null = null
+  private compactAfterReplyFailed = false
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -618,7 +627,7 @@ export class PiAcpSession {
       // If a turn is running OR there are already-queued turns waiting to start (prevent
       // a new prompt from racing past the queue during the brief window between
       // completeTurn setting pendingTurn=null and startNextQueuedTurn firing).
-      if (this.pendingTurn || this.turnQueue.length > 0) {
+      if (this.pendingTurn || this.turnQueue.length > 0 || this.compactionAfterReply) {
         this.turnQueue.push(queued)
 
         // Best-effort: notify client that a prompt was queued.
@@ -756,7 +765,10 @@ export class PiAcpSession {
     this.compactionId = null
     this.compactionsFinishedCount += 1
     this.emit(compactionUpdate(id, state, this.compactionEntries))
+    // Retrying after every reply would make each next message wait; pi's own limit stays the fallback.
+    if (state.status === 'failed' && this.compactionAfterReply) this.compactAfterReplyFailed = true
     if (state.status !== 'completed') return
+    this.compactAfterReplyFailed = false
     // pi reports no context size until the next reply after a compaction, so the ring would
     // keep the pre-compaction size; show pi's estimate (messages only, so it reads low) meanwhile.
     this.peakContextTokens = 0
@@ -1146,7 +1158,42 @@ export class PiAcpSession {
     this.pendingTurnIsExtensionCommand = false
     this.inAgentLoop = false
 
-    void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn())
+    void this.flushDeferredConfig().finally(() => {
+      if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply()
+      else this.startNextQueuedTurn()
+    })
+  }
+
+  private shouldCompactAfterReply(reason: StopReason): boolean {
+    const limit = compactAtTokens()
+    return (
+      reason === 'end_turn' &&
+      !this.pendingTurn &&
+      !this.turnQueue.length &&
+      limit !== null &&
+      this.peakContextTokens >= limit &&
+      !this.compactAfterReplyFailed
+    )
+  }
+
+  /** Runs while the user reads the reply; a prompt sent meanwhile waits in the turn queue. */
+  private async compactAfterReply(): Promise<void> {
+    const finishedBefore = this.compactionsFinishedCount
+    const finishIfPiDidNot = (state: CompactionState) => {
+      if (this.compactionsFinishedCount === finishedBefore) this.finishCompaction(state)
+    }
+    this.compactionAfterReply = this.proc.compact().then(
+      result => finishIfPiDidNot(compactionStateFromPiEnd({ result })),
+      err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) })
+    )
+    try {
+      await this.compactionAfterReply
+    } catch {
+      // The compaction entry may stay unfinished; the waiting messages must still run.
+    } finally {
+      this.compactionAfterReply = null
+      this.startNextQueuedTurn()
+    }
   }
 
   private async handleTerminalFailure(message: string, opts?: { abort?: boolean }): Promise<void> {
@@ -1280,7 +1327,13 @@ export class PiAcpSession {
   // know the model's window or has no post-compaction count yet.
   private emitUsageUpdate(tokens: number | null, contextWindow: number | null): void {
     if (!tokens || !contextWindow) return
-    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: contextWindow })
+    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: ringSize(contextWindow) })
+  }
+
+  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  compactAtPicked(): void {
+    this.compactAfterReplyFailed = false
+    void this.pushUsageUpdate()
   }
 
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
@@ -1307,10 +1360,8 @@ export class PiAcpSession {
 
     return {
       raw,
-      tokens,
       displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
-      contextWindow: this.contextWindow,
-      percent: typeof cu.percent === 'number' ? cu.percent : null
+      contextWindow: this.contextWindow
     }
   }
 
@@ -1329,10 +1380,8 @@ export class PiAcpSession {
         })
       usage = {
         raw: undefined,
-        tokens: null,
         displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : null,
-        contextWindow: this.contextWindow,
-        percent: null
+        contextWindow: this.contextWindow
       }
     }
 
@@ -1343,17 +1392,14 @@ export class PiAcpSession {
       })
     }
 
-    const { contextWindow, tokens: contextTokens, percent: contextPercent, displayTokens } = usage
+    const { contextWindow, displayTokens } = usage
     this.emitUsageUpdate(displayTokens, contextWindow)
     const parts: string[] = []
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const raw =
-          contextPercent !== null && displayTokens === contextTokens
-            ? contextPercent
-            : (displayTokens / contextWindow) * 100
-        parts.push(`${Math.round(raw * 10) / 10}%`)
+        const percent = (displayTokens / ringSize(contextWindow)) * 100
+        parts.push(`${Math.round(percent * 10) / 10}%`)
       }
     }
     const prLink = this.getPrLinkCached()

@@ -54,7 +54,13 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { buildSessionConfigOptions, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import {
+  buildSessionConfigOptions,
+  COMPACT_AT_CONFIG_ID,
+  MODEL_CONFIG_ID,
+  pickCompactAt,
+  THINKING_CONFIG_ID
+} from './translate/config-options.js'
 import { buildPlanUsageOption, PLAN_USAGE_CONFIG_ID, pickPlanUsageRow, readPlanUsage } from './translate/plan-usage.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { providerDisplayName } from './translate/provider-name.js'
@@ -150,11 +156,6 @@ function builtinAvailableCommands(): AvailableCommand[] {
       name: 'compact',
       description: 'Manually compact the session context',
       input: { hint: 'optional custom instructions' }
-    },
-    {
-      name: 'autocompact',
-      description: 'Toggle automatic context compaction',
-      input: { hint: 'on|off|toggle' }
     },
     {
       name: 'export',
@@ -1240,35 +1241,6 @@ export class PiAcpAgent implements ACPAgent {
 
         return { stopReason: 'end_turn' }
       }
-
-      if (cmd === 'autocompact') {
-        const mode = (args[0] ?? 'toggle').toLowerCase()
-        let enabled: boolean | null = null
-        if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') enabled = true
-        else if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') enabled = false
-
-        if (enabled === null) {
-          // toggle: read current state and invert.
-          const state = (await session.proc.getState()) as any
-          const current = Boolean(state?.autoCompactionEnabled)
-          enabled = !current
-        }
-
-        await session.proc.setAutoCompaction(enabled)
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: `Auto-compaction ${enabled ? 'enabled' : 'disabled'}.`
-            }
-          }
-        })
-
-        return { stopReason: 'end_turn' }
-      }
     }
 
     const release = stayAwake()
@@ -1627,6 +1599,11 @@ export class PiAcpAgent implements ACPAgent {
         pickPlanUsageRow(String(params.value))
         this.sessions.pushConfigOptionUpdates()
         break
+      case COMPACT_AT_CONFIG_ID:
+        pickCompactAt(String(params.value))
+        this.sessions.pushConfigOptionUpdates()
+        this.sessions.compactAtPicked()
+        break
       default:
         throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
     }
@@ -1738,7 +1715,7 @@ const THINKING_LEVEL_LABELS: Record<ThinkingLevel, { name: string; description: 
 // The v1 SDK dropped the `ModelInfo`/`SessionModelState` types (model selection
 // moved to config options); we keep the shape locally for legacy clients that
 // still read the `models` field.
-type ModelInfo = { modelId: string; name: string; description: string | null }
+type ModelInfo = { modelId: string; name: string; description: string | null; contextWindow: number | null }
 
 async function getModelState(
   proc: PiRpcProcess,
@@ -1771,7 +1748,8 @@ async function getModelState(
       return {
         modelId: `${provider}/${id}`,
         name: `${providerDisplayName(provider)} / ${name}`,
-        description: null
+        description: null,
+        contextWindow: typeof m?.contextWindow === 'number' ? m.contextWindow : null
       } satisfies ModelInfo
     })
     .filter(Boolean) as ModelInfo[]

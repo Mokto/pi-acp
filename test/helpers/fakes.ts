@@ -112,6 +112,14 @@ export class FakePiRpcProcess {
     return { messages: [] }
   }
 
+  compactCalls = 0
+  compactResult: Promise<unknown> = Promise.resolve({ summary: 'S', tokensBefore: 0, estimatedTokensAfter: 0 })
+
+  async compact(): Promise<unknown> {
+    this.compactCalls += 1
+    return this.compactResult
+  }
+
   sessionStats: any = {}
 
   async getSessionStats(): Promise<any> {
