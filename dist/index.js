@@ -190,12 +190,42 @@ function terminalAuthLaunchSpec() {
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
 import { execFile } from "child_process";
-import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync6 } from "fs";
 import { basename as basename3, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
 import { execFileSync, spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
+import { existsSync as existsSync2 } from "fs";
+import { fileURLToPath } from "url";
+
+// src/acp/paths.ts
+import { homedir } from "os";
+import { join as join2 } from "path";
+function getPiAcpDir() {
+  return join2(homedir(), ".pi", "pi-acp");
+}
+function getPiAcpSessionMapPath() {
+  return join2(getPiAcpDir(), "session-map.json");
+}
+function getPiAcpCompactionDir() {
+  return join2(getPiAcpDir(), "compaction");
+}
+function getPiAcpLiveDir() {
+  return join2(getPiAcpDir(), "live");
+}
+function getPiAcpLiveSocketPath(pid) {
+  return join2(getPiAcpLiveDir(), `${pid}.sock`);
+}
+function getPiAcpLivePidRegistryPath(pid) {
+  return join2(getPiAcpLiveDir(), `${pid}.json`);
+}
+
+// src/pi-rpc/process.ts
+function compactionExtensionPath() {
+  const built = fileURLToPath(new URL("./compaction-extension.js", import.meta.url));
+  return existsSync2(built) ? built : built.replace(/\.js$/, ".ts");
+}
 var PiRpcSpawnError = class extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
   code;
@@ -311,10 +341,12 @@ var PiRpcProcess = class _PiRpcProcess {
     assertSupportedPiVersion(cmd);
     const args = ["--mode", "rpc", "--no-themes"];
     if (params.sessionPath) args.push("--session", params.sessionPath);
+    if (params.summaryWriter) args.push("--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files");
+    else args.push("-e", compactionExtensionPath());
     const child = spawn2(cmd, args, {
       cwd: params.cwd,
       stdio: "pipe",
-      env: process.env,
+      env: params.summaryWriter ? process.env : { ...process.env, PI_ACP_COMPACTION_HANDOFF_DIR: getPiAcpCompactionDir() },
       shell: shouldUseShellForPiCommand(cmd)
     });
     try {
@@ -472,10 +504,6 @@ var PiRpcProcess = class _PiRpcProcess {
     if (!res.success) throw new Error(`pi compact failed: ${res.error ?? JSON.stringify(res.data)}`);
     return res.data;
   }
-  async setAutoCompaction(enabled) {
-    const res = await this.request({ type: "set_auto_compaction", enabled });
-    if (!res.success) throw new Error(`pi set_auto_compaction failed: ${res.error ?? JSON.stringify(res.data)}`);
-  }
   async getSessionStats() {
     const res = await this.request({ type: "get_session_stats" });
     if (!res.success) throw new Error(`pi get_session_stats failed: ${res.error ?? JSON.stringify(res.data)}`);
@@ -574,27 +602,6 @@ function maybeAuthRequiredError(err) {
 // src/acp/session-store.ts
 import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "fs";
 import { dirname as dirname2 } from "path";
-
-// src/acp/paths.ts
-import { homedir } from "os";
-import { join as join2 } from "path";
-function getPiAcpDir() {
-  return join2(homedir(), ".pi", "pi-acp");
-}
-function getPiAcpSessionMapPath() {
-  return join2(getPiAcpDir(), "session-map.json");
-}
-function getPiAcpLiveDir() {
-  return join2(getPiAcpDir(), "live");
-}
-function getPiAcpLiveSocketPath(pid) {
-  return join2(getPiAcpLiveDir(), `${pid}.sock`);
-}
-function getPiAcpLivePidRegistryPath(pid) {
-  return join2(getPiAcpLiveDir(), `${pid}.json`);
-}
-
-// src/acp/session-store.ts
 function ensureParentDir(path) {
   mkdirSync(dirname2(path), { recursive: true });
 }
@@ -795,7 +802,7 @@ import { readdirSync, readFileSync as readFileSync4 } from "fs";
 import { basename as basename2, join as join5 } from "path";
 
 // src/acp/pi-settings.ts
-import { existsSync as existsSync2, readFileSync as readFileSync3 } from "fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
 import { join as join4, resolve } from "path";
 function isObject(x) {
@@ -812,7 +819,7 @@ function deepMerge(a, b) {
 }
 function readJsonFile(path) {
   try {
-    if (!existsSync2(path)) return {};
+    if (!existsSync3(path)) return {};
     const raw = readFileSync3(path, "utf-8");
     const data = JSON.parse(raw);
     return isObject(data) ? data : {};
@@ -850,6 +857,13 @@ function getEnabledModels(cwd) {
   if (!Array.isArray(value)) return void 0;
   const patterns = value.filter((v) => typeof v === "string" && v.trim().length > 0);
   return patterns.length > 0 ? patterns : void 0;
+}
+function getAutoCompactionPoint(cwd, contextWindow) {
+  const compaction = getMergedSettings(cwd).compaction;
+  const settings = isObject(compaction) ? compaction : {};
+  if (settings.enabled === false) return null;
+  const reserve = typeof settings.reserveTokens === "number" ? settings.reserveTokens : 16384;
+  return contextWindow - reserve;
 }
 function getQuietStartup(cwd) {
   const merged = getMergedSettings(cwd);
@@ -1093,8 +1107,58 @@ function finiteNumber(value) {
 // src/acp/translate/config-options.ts
 var MODEL_CONFIG_ID = "model";
 var THINKING_CONFIG_ID = "thinking";
+var COMPACT_AT_CONFIG_ID = "compact_at";
+var MODEL_LIMIT = "model_limit";
+var COMPACT_AT_SIZES = [2e5, 3e5, 4e5, 5e5];
+var compactAt = null;
+function pickCompactAt(value) {
+  const tokens = Number(value);
+  compactAt = COMPACT_AT_SIZES.includes(tokens) ? tokens : null;
+}
+function compactAtTokens() {
+  return compactAt;
+}
+function formatTokens2(tokens) {
+  return tokens >= 1e6 ? `${Number((tokens / 1e6).toFixed(2))}M` : `${Math.round(tokens / 1e3)}k`;
+}
+function buildCompactAtOption(contextWindow) {
+  const sizes = COMPACT_AT_SIZES.filter((tokens) => !contextWindow || tokens < contextWindow);
+  return {
+    type: "select",
+    id: COMPACT_AT_CONFIG_ID,
+    name: "Compaction",
+    description: "When to summarize a long thread so the agent stays fast and cheap. Applies to every thread.",
+    currentValue: compactAt && sizes.includes(compactAt) ? String(compactAt) : MODEL_LIMIT,
+    options: [
+      ...sizes.length ? [
+        {
+          group: "compact_at",
+          name: "Compact at",
+          options: sizes.map((tokens) => ({
+            value: String(tokens),
+            name: formatTokens2(tokens),
+            description: `Once a reply finishes and the thread is over ${formatTokens2(tokens)} tokens, compacts it while you read. Never interrupts a task.`
+          }))
+        }
+      ] : [],
+      {
+        group: "model_limit",
+        name: "Model limit",
+        options: [
+          {
+            value: MODEL_LIMIT,
+            name: contextWindow ? formatTokens2(contextWindow) : "Model limit",
+            description: "This model's limit, so it follows the model you pick. Pi compacts when the thread is nearly full, which can pause a task midway."
+          }
+        ]
+      }
+    ]
+  };
+}
 function buildSessionConfigOptions(models, thinking, usage = null) {
   const options = [];
+  const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null));
   const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
   if (usageOption) options.push(usageOption);
   if (models && models.availableModels.length) {
@@ -1129,7 +1193,7 @@ function buildSessionConfigOptions(models, thinking, usage = null) {
 }
 
 // src/acp/slash-commands.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir3 } from "os";
 import { join as join6, resolve as resolve2 } from "path";
 function parseFrontmatter(content) {
@@ -1147,7 +1211,7 @@ function parseFrontmatter(content) {
 }
 function loadCommandsFromDir(dir, source, subdir = "") {
   const commands = [];
-  if (!existsSync3(dir)) return commands;
+  if (!existsSync4(dir)) return commands;
   try {
     const entries = readdirSync2(dir, { withFileTypes: true });
     for (const entry of entries) {
@@ -1324,6 +1388,89 @@ var TimeoutError = class extends Error {
   }
 };
 
+// src/acp/background-compaction.ts
+import { randomUUID as randomUUID2 } from "crypto";
+import { chmod, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { join as join7 } from "path";
+function backgroundLead(limit) {
+  return Math.min(32e3, Math.max(8e3, Math.round(limit * 0.125)));
+}
+var BackgroundCompaction = class {
+  constructor(startWriter) {
+    this.startWriter = startWriter;
+  }
+  running = null;
+  stopRunning = null;
+  ready = null;
+  generation = 0;
+  failed = false;
+  shouldStart(tokens, limit) {
+    if (this.running || this.failed || tokens < limit - backgroundLead(limit)) return false;
+    return !this.ready || tokens >= this.ready.maxTokensBefore;
+  }
+  start(session, tokens, limit) {
+    const generation = ++this.generation;
+    this.running = this.write(session, tokens, limit, generation).catch(() => {
+      if (this.generation === generation) this.failed = true;
+    }).finally(() => {
+      if (this.generation === generation) {
+        this.running = null;
+        this.stopRunning = null;
+      }
+    });
+  }
+  async wait() {
+    await this.running;
+  }
+  async discard() {
+    this.generation += 1;
+    this.failed = false;
+    this.stopRunning?.();
+    this.running = null;
+    this.stopRunning = null;
+    const file = this.ready?.file;
+    this.ready = null;
+    if (file) await rm(file, { force: true });
+  }
+  async write(session, tokens, limit, generation) {
+    const { file, id } = await session;
+    const dir = getPiAcpCompactionDir();
+    await mkdir(dir, { recursive: true, mode: 448 });
+    await chmod(dir, 448);
+    const copy = join7(dir, `${randomUUID2()}.jsonl`);
+    const text = await readFile(file, "utf8");
+    try {
+      await writeFile(copy, text.slice(0, text.lastIndexOf("\n") + 1), { mode: 384 });
+      if (this.generation !== generation) return;
+      const writer = await this.startWriter(copy);
+      if (this.generation !== generation) return writer.dispose();
+      this.stopRunning = () => writer.dispose();
+      let result;
+      try {
+        result = await writer.compact();
+      } finally {
+        writer.dispose();
+      }
+      if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string")
+        throw new Error("pi returned no summary");
+      const handoff = join7(dir, `${id}.json`);
+      const { summary, firstKeptEntryId, details, usage } = result;
+      const tokensAfter = typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : 0;
+      const maxTokensBefore = tokens + limit / 4 - tokensAfter;
+      await writeFile(handoff, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
+        mode: 384
+      });
+      if (this.generation !== generation) {
+        await rm(handoff, { force: true });
+        return;
+      }
+      this.ready = { maxTokensBefore, file: handoff };
+    } finally {
+      await rm(copy, { force: true });
+    }
+  }
+};
+
 // src/acp/translate/plan.ts
 var PLAN_TOOL = "update_plan";
 var PLAN_CARRY_OVER = "todo";
@@ -1474,6 +1621,9 @@ var SessionManager = class {
   pushConfigOptionUpdates() {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate();
   }
+  compactAtPicked() {
+    for (const s of this.sessions.values()) s.compactAtPicked();
+  }
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId) {
     return this.sessions.get(sessionId);
@@ -1566,6 +1716,9 @@ var SessionManager = class {
     this.live?.remove(sessionId);
   }
 };
+function ringSize(contextWindow) {
+  return Math.min(contextWindow, compactAtTokens() ?? contextWindow);
+}
 var PiAcpSession = class _PiAcpSession {
   sessionId;
   cwd;
@@ -1581,6 +1734,9 @@ var PiAcpSession = class _PiAcpSession {
   notices;
   compactionId = null;
   compactionsFinishedCount = 0;
+  compactionAfterReply = null;
+  compactAfterReplyFailed = false;
+  background;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   cancelRequested = false;
@@ -1698,6 +1854,9 @@ var PiAcpSession = class _PiAcpSession {
     this.onDead = opts.onDead ?? null;
     this.compactionEntries = opts.compactionEntries ?? false;
     this.notices = opts.notices ?? false;
+    this.background = new BackgroundCompaction(
+      opts.startSummaryWriter ?? ((sessionPath) => PiRpcProcess.spawn({ cwd: this.cwd, sessionPath, summaryWriter: true }))
+    );
     this.proc.onEvent((ev) => this.handlePiEvent(ev));
     this.proc.onExit?.((code, signal) => {
       void this.handleProcessExit(code, signal);
@@ -1764,7 +1923,7 @@ var PiAcpSession = class _PiAcpSession {
         resolve: resolve4,
         reject
       };
-      if (this.pendingTurn || this.turnQueue.length > 0) {
+      if (this.pendingTurn || this.turnQueue.length > 0 || this.compactionAfterReply) {
         this.turnQueue.push(queued);
         this.emit({
           sessionUpdate: "agent_message_chunk",
@@ -1798,6 +1957,7 @@ var PiAcpSession = class _PiAcpSession {
         _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
       });
     }
+    if (this.compactionAfterReply) void this.background.discard();
     await this.proc.abort();
   }
   wasCancelRequested() {
@@ -1865,12 +2025,20 @@ var PiAcpSession = class _PiAcpSession {
   replayEarlyEvents() {
     for (const ev of this.proc.takeEarlyEvents()) this.handlePiEvent(ev);
   }
+  startCompaction() {
+    if (this.compactionId) return;
+    this.compactionId = `compaction-${crypto.randomUUID()}`;
+    this.emit(compactionUpdate(this.compactionId, { status: "in_progress" }, this.compactionEntries));
+  }
   finishCompaction(state) {
+    void this.background.discard();
     const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`;
     this.compactionId = null;
     this.compactionsFinishedCount += 1;
     this.emit(compactionUpdate(id, state, this.compactionEntries));
+    if (state.status === "failed" && this.compactionAfterReply) this.compactAfterReplyFailed = true;
     if (state.status !== "completed") return;
+    this.compactAfterReplyFailed = false;
     this.peakContextTokens = 0;
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== "false")
       this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow);
@@ -1971,9 +2139,11 @@ var PiAcpSession = class _PiAcpSession {
   closed = false;
   markClosed() {
     this.closed = true;
+    void this.background.discard();
   }
   async handleProcessExit(code, signal) {
     this.clearTurnWatchdog();
+    void this.background.discard();
     if (this.closed) {
       if (this.pendingTurn) this.completeTurn("cancelled");
       return;
@@ -2178,7 +2348,34 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     this.cursorSdkAuthRetries = 0;
     this.pendingTurnIsExtensionCommand = false;
     this.inAgentLoop = false;
-    void this.flushDeferredConfig().finally(() => this.startNextQueuedTurn());
+    void this.flushDeferredConfig().finally(() => {
+      if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply();
+      else this.startNextQueuedTurn();
+    });
+  }
+  shouldCompactAfterReply(reason) {
+    const limit = compactAtTokens();
+    return reason === "end_turn" && !this.pendingTurn && !this.turnQueue.length && limit !== null && this.peakContextTokens >= limit && !this.compactAfterReplyFailed;
+  }
+  /** Runs while the user reads the reply; a prompt sent meanwhile waits in the turn queue. */
+  async compactAfterReply() {
+    const finishedBefore = this.compactionsFinishedCount;
+    const finishIfPiDidNot = (state) => {
+      if (this.compactionsFinishedCount === finishedBefore) this.finishCompaction(state);
+    };
+    this.startCompaction();
+    this.compactionAfterReply = (async () => {
+      await this.background.wait();
+      if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
+      finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }));
+    })().catch((err) => finishIfPiDidNot({ status: "failed", error: err instanceof Error ? err.message : String(err) }));
+    try {
+      await this.compactionAfterReply;
+    } catch {
+    } finally {
+      this.compactionAfterReply = null;
+      this.startNextQueuedTurn();
+    }
   }
   async handleTerminalFailure(message, opts) {
     if (this.turnTerminalFailureHandled) return;
@@ -2295,14 +2492,20 @@ ${message}` }
   // know the model's window or has no post-compaction count yet.
   emitUsageUpdate(tokens, contextWindow) {
     if (!tokens || !contextWindow) return;
-    this.emit({ sessionUpdate: "usage_update", used: tokens, size: contextWindow });
+    this.emit({ sessionUpdate: "usage_update", used: tokens, size: ringSize(contextWindow) });
+  }
+  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  compactAtPicked() {
+    this.compactAfterReplyFailed = false;
+    void this.background.discard();
+    void this.pushUsageUpdate();
   }
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
-  async pushUsageUpdate() {
+  async pushUsageUpdate(estimatedTokens) {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
     try {
       const usage = await this.readContextUsage();
-      this.emitUsageUpdate(usage.displayTokens, usage.contextWindow);
+      this.emitUsageUpdate(usage.displayTokens ?? estimatedTokens ?? null, usage.contextWindow);
     } catch {
     }
   }
@@ -2313,13 +2516,26 @@ ${message}` }
     if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
     const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
     if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens);
+    this.maybeStartBackgroundCompaction();
     return {
       raw,
-      tokens,
       displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : tokens,
-      contextWindow: this.contextWindow,
-      percent: typeof cu.percent === "number" ? cu.percent : null
+      contextWindow: this.contextWindow
     };
+  }
+  maybeStartBackgroundCompaction() {
+    const picked = compactAtTokens();
+    const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null;
+    const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity);
+    if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return;
+    if (this.background.shouldStart(this.peakContextTokens, limit))
+      this.background.start(this.sessionFileInfo(), this.peakContextTokens, limit);
+  }
+  async sessionFileInfo() {
+    const state = await this.proc.getState();
+    if (typeof state?.sessionFile !== "string" || typeof state.sessionId !== "string")
+      throw new Error("pi reported no session file");
+    return { file: state.sessionFile, id: state.sessionId };
   }
   async maybeEmitTokenStats() {
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE === "false") return;
@@ -2335,10 +2551,8 @@ ${message}` }
         });
       usage = {
         raw: void 0,
-        tokens: null,
         displayTokens: this.peakContextTokens > 0 ? this.peakContextTokens : null,
-        contextWindow: this.contextWindow,
-        percent: null
+        contextWindow: this.contextWindow
       };
     }
     if (debug) {
@@ -2348,14 +2562,14 @@ ${message}` }
 [token debug] contextUsage=${JSON.stringify(usage.raw)}` }
       });
     }
-    const { contextWindow, tokens: contextTokens, percent: contextPercent, displayTokens } = usage;
+    const { contextWindow, displayTokens } = usage;
     this.emitUsageUpdate(displayTokens, contextWindow);
     const parts = [];
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`);
       if (contextWindow) {
-        const raw = contextPercent !== null && displayTokens === contextTokens ? contextPercent : displayTokens / contextWindow * 100;
-        parts.push(`${Math.round(raw * 10) / 10}%`);
+        const percent = displayTokens / ringSize(contextWindow) * 100;
+        parts.push(`${Math.round(percent * 10) / 10}%`);
       }
     }
     const prLink = this.getPrLinkCached();
@@ -2713,8 +2927,7 @@ ${formatAutoRetryMessage(ev)}` }
       // fallbacks in case older pi versions still send them.
       case "compaction_start":
       case "auto_compaction_start": {
-        this.compactionId = `compaction-${crypto.randomUUID()}`;
-        this.emit(compactionUpdate(this.compactionId, { status: "in_progress" }, this.compactionEntries));
+        this.startCompaction();
         break;
       }
       case "compaction_end":
@@ -2748,7 +2961,7 @@ ${formatAutoRetryMessage(ev)}` }
         this.inferenceStartup = true;
         this.flushNarratedToolCallGate();
         void this.pushUsageUpdate();
-        if (existsSync4(getPlanUsageDir())) void this.pushConfigOptionUpdate();
+        if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
         break;
       }
       case "agent_end": {
@@ -2770,7 +2983,7 @@ ${formatAutoRetryMessage(ev)}` }
         void (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
-          if (existsSync4(getPlanUsageDir())) void this.pushConfigOptionUpdate();
+          if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
           await this.flushEmits();
           if (this.pendingTurnIsExtensionCommand) return;
           this.completeTurn(this.cancelRequested ? "cancelled" : turnError ? "error" : "end_turn");
@@ -3106,18 +3319,18 @@ function toToolKind(toolName) {
 }
 
 // src/acp/pi-sessions.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync5 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { join as join7, resolve as resolve3, isAbsolute as isAbsolute3 } from "path";
+import { join as join8, resolve as resolve3, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join7(homedir4(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join8(homedir4(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
-  const settingsPath = join7(agentDir, "settings.json");
+  const settingsPath = join8(agentDir, "settings.json");
   try {
-    if (!existsSync5(settingsPath)) return null;
+    if (!existsSync6(settingsPath)) return null;
     const raw = readFileSync7(settingsPath, "utf8");
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
@@ -3130,7 +3343,7 @@ function readSessionDirFromSettings(agentDir) {
 }
 function getPiSessionsDir() {
   const agentDir = getPiAgentDir();
-  return readSessionDirFromSettings(agentDir) ?? join7(agentDir, "sessions");
+  return readSessionDirFromSettings(agentDir) ?? join8(agentDir, "sessions");
 }
 function walkJsonlFiles(dir, out) {
   let entries;
@@ -3141,7 +3354,7 @@ function walkJsonlFiles(dir, out) {
   }
   for (const e of entries) {
     const name = typeof e.name === "string" ? e.name : String(e.name);
-    const p = join7(dir, name);
+    const p = join8(dir, name);
     if (e.isDirectory()) walkJsonlFiles(p, out);
     else if (e.isFile() && name.endsWith(".jsonl")) out.push(p);
   }
@@ -3369,6 +3582,46 @@ function normalizePiAssistantText(content) {
   if (!Array.isArray(content)) return "";
   return content.map((c) => c?.type === "text" && typeof c.text === "string" ? c.text : "").filter(Boolean).join("");
 }
+function contentChars(content) {
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  return content.reduce((n, c) => {
+    if (c?.type === "text" && typeof c.text === "string") return n + c.text.length;
+    return c?.type === "image" ? n + 4800 : n;
+  }, 0);
+}
+function estimatePiContextTokens(messages) {
+  return messages.reduce((total, m) => {
+    let chars = 0;
+    switch (m?.role) {
+      case "system":
+        chars = contentChars(m.content) + Object.values(m.sections ?? {}).reduce((n, s) => n + (typeof s === "string" ? s.length : 0), 0);
+        if (m.toolsAdded) chars += JSON.stringify(m.toolsAdded).length;
+        break;
+      case "user":
+      case "custom":
+      case "toolResult":
+        chars = contentChars(m.content);
+        break;
+      case "assistant":
+        for (const c of Array.isArray(m.content) ? m.content : []) {
+          if (c?.type === "text") chars += String(c.text ?? "").length;
+          else if (c?.type === "thinking") chars += String(c.thinking ?? "").length;
+          else if (c?.type === "toolCall")
+            chars += String(c.name ?? "").length + JSON.stringify(c.arguments ?? {}).length;
+        }
+        break;
+      case "bashExecution":
+        chars = String(m.command ?? "").length + String(m.output ?? "").length;
+        break;
+      case "branchSummary":
+      case "compactionSummary":
+        chars = String(m.summary ?? "").length;
+        break;
+    }
+    return total + Math.ceil(chars / 4);
+  }, 0);
+}
 
 // src/acp/translate/prompt.ts
 function promptToPiMessage(blocks) {
@@ -3543,7 +3796,7 @@ function resolveEnabledModelIds(models, patterns) {
 import { createServer } from "net";
 import {
   chmodSync,
-  existsSync as existsSync6,
+  existsSync as existsSync7,
   mkdirSync as mkdirSync3,
   readdirSync as readdirSync4,
   readFileSync as readFileSync8,
@@ -3551,7 +3804,7 @@ import {
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
-import { join as join8 } from "path";
+import { join as join9 } from "path";
 function isLiveEnabled(env = process.env) {
   const v = env.PI_ACP_LIVE;
   if (v == null || v === "") return false;
@@ -3571,7 +3824,7 @@ function isObject2(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
 function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
-  if (!existsSync6(liveDir)) return;
+  if (!existsSync7(liveDir)) return;
   let names = [];
   try {
     names = readdirSync4(liveDir);
@@ -3588,9 +3841,9 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
     if (pid === process.pid) continue;
     if (isPidAlive(pid)) continue;
     for (const ext of ["json", "sock"]) {
-      const path = join8(liveDir, `${pid}.${ext}`);
+      const path = join9(liveDir, `${pid}.${ext}`);
       try {
-        if (existsSync6(path)) unlinkSync(path);
+        if (existsSync7(path)) unlinkSync(path);
       } catch {
       }
     }
@@ -3609,8 +3862,8 @@ var LiveServer = class {
   constructor(opts = {}) {
     this.pid = opts.pid ?? process.pid;
     this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
-    this.sockPath = opts.liveDir ? join8(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
-    this.registryPath = opts.liveDir ? join8(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+    this.sockPath = opts.liveDir ? join9(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join9(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
   }
   get socketPath() {
     return this.sockPath;
@@ -3713,7 +3966,7 @@ var LiveServer = class {
       chmodSync(this.registryPath, 384);
     } catch {
       try {
-        if (existsSync6(tmp)) unlinkSync(tmp);
+        if (existsSync7(tmp)) unlinkSync(tmp);
       } catch {
       }
     }
@@ -3841,7 +4094,7 @@ var LiveServer = class {
   }
   unlinkIfExists(path) {
     try {
-      if (existsSync6(path)) unlinkSync(path);
+      if (existsSync7(path)) unlinkSync(path);
     } catch {
     }
   }
@@ -3849,11 +4102,11 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync9, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
-import { join as join9, dirname as dirname4, basename as basename4 } from "path";
+import { existsSync as existsSync8, readFileSync as readFileSync9, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
+import { join as join10, dirname as dirname4, basename as basename4 } from "path";
 import { spawnSync as spawnSync3 } from "child_process";
-import { randomUUID as randomUUID2 } from "crypto";
-import { fileURLToPath } from "url";
+import { randomUUID as randomUUID3 } from "crypto";
+import { fileURLToPath as fileURLToPath2 } from "url";
 function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : 15e3;
@@ -3907,11 +4160,6 @@ function builtinAvailableCommands() {
       name: "compact",
       description: "Manually compact the session context",
       input: { hint: "optional custom instructions" }
-    },
-    {
-      name: "autocompact",
-      description: "Toggle automatic context compaction",
-      input: { hint: "on|off|toggle" }
     },
     {
       name: "export",
@@ -4069,7 +4317,7 @@ var PiAcpAgent = class {
     const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile : this.store.get(sessionId)?.sessionFile;
     if (typeof sessionFile === "string" && sessionFile.trim()) {
       try {
-        if (existsSync7(sessionFile)) unlinkSync2(sessionFile);
+        if (existsSync8(sessionFile)) unlinkSync2(sessionFile);
       } catch {
       }
     }
@@ -4358,7 +4606,7 @@ ${text}`;
     if (!options.length) return null;
     const res = await this.conn.requestPermission({
       sessionId,
-      toolCall: { toolCallId: `pi-auth-${randomUUID2()}`, title, kind: "other", status: "pending" },
+      toolCall: { toolCallId: `pi-auth-${randomUUID3()}`, title, kind: "other", status: "pending" },
       options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
     });
     if (res.outcome.outcome !== "selected") return null;
@@ -4634,8 +4882,8 @@ ${JSON.stringify(stats, null, 2)}`;
             if (piPath) {
               const resolved = realpathSync2(piPath);
               const pkgRoot = dirname4(dirname4(resolved));
-              const p = join9(pkgRoot, "CHANGELOG.md");
-              if (existsSync7(p)) return p;
+              const p = join10(pkgRoot, "CHANGELOG.md");
+              if (existsSync8(p)) return p;
             }
           } catch {
           }
@@ -4643,8 +4891,8 @@ ${JSON.stringify(stats, null, 2)}`;
             const npmRoot = spawnSync3("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join9(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
-              if (existsSync7(p)) return p;
+              const p = join10(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              if (existsSync8(p)) return p;
             }
           } catch {
           }
@@ -4689,7 +4937,7 @@ ${JSON.stringify(stats, null, 2)}`;
         const state = await session.proc.getState();
         const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
         const messageCount = typeof state?.messageCount === "number" ? state.messageCount : 0;
-        if (!sessionFile || messageCount === 0 || !existsSync7(sessionFile)) {
+        if (!sessionFile || messageCount === 0 || !existsSync8(sessionFile)) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -4731,7 +4979,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join9(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join10(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -4783,29 +5031,6 @@ ${JSON.stringify(stats, null, 2)}`;
               uri,
               mimeType: "text/html",
               title: "Session exported"
-            }
-          }
-        });
-        return { stopReason: "end_turn" };
-      }
-      if (cmd === "autocompact") {
-        const mode = (args[0] ?? "toggle").toLowerCase();
-        let enabled = null;
-        if (mode === "on" || mode === "true" || mode === "enable" || mode === "enabled") enabled = true;
-        else if (mode === "off" || mode === "false" || mode === "disable" || mode === "disabled") enabled = false;
-        if (enabled === null) {
-          const state = await session.proc.getState();
-          const current = Boolean(state?.autoCompactionEnabled);
-          enabled = !current;
-        }
-        await session.proc.setAutoCompaction(enabled);
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: `Auto-compaction ${enabled ? "enabled" : "disabled"}.`
             }
           }
         });
@@ -4907,6 +5132,7 @@ ${JSON.stringify(stats, null, 2)}`;
   }
   async finishLoadSession(session, proc2, params, opts) {
     const fileCommands = loadSlashCommands(params.cwd);
+    let estimatedTokens;
     if (opts.replayHistory) {
       let data;
       let replayTimedOut = false;
@@ -4922,7 +5148,7 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join9(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join10(params.cwd, ".pi-history-summary.md");
           try {
             writeFileSync4(summaryPath, summary, "utf-8");
           } catch {
@@ -4968,7 +5194,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
               update: compactionUpdate(
-                `compaction-${timestamp ?? randomUUID2()}`,
+                `compaction-${timestamp ?? randomUUID3()}`,
                 {
                   status: "completed",
                   summary,
@@ -5041,6 +5267,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
       }
       const plan = latestPlanEntries(messages);
       if (plan?.length) session.showPlan(plan);
+      estimatedTokens = estimatePiContextTokens(messages);
     } else if (session.currentPlan?.length) {
       session.showPlan(session.currentPlan);
     }
@@ -5065,7 +5292,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
     };
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands);
-      void session.pushUsageUpdate();
+      void session.pushUsageUpdate(estimatedTokens);
       session.replayEarlyEvents();
     }, 0);
     return response;
@@ -5104,6 +5331,11 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
       case PLAN_USAGE_CONFIG_ID:
         pickPlanUsageRow(String(params.value));
         this.sessions.pushConfigOptionUpdates();
+        break;
+      case COMPACT_AT_CONFIG_ID:
+        pickCompactAt(String(params.value));
+        this.sessions.pushConfigOptionUpdates();
+        this.sessions.compactAtPicked();
         break;
       default:
         throw RequestError3.invalidParams(`Unknown configId: ${params.configId}`);
@@ -5194,7 +5426,8 @@ async function getModelState(proc2, pre) {
     return {
       modelId: `${provider}/${id}`,
       name: `${providerDisplayName(provider)} / ${name}`,
-      description: null
+      description: null,
+      contextWindow: typeof m?.contextWindow === "number" ? m.contextWindow : null
     };
   }).filter(Boolean);
   let currentModelId = null;
@@ -5301,14 +5534,14 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join9(opts.cwd, "AGENTS.md");
-  if (existsSync7(contextPath)) contextItems.push(contextPath);
+  const contextPath = join10(opts.cwd, "AGENTS.md");
+  if (existsSync8(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
       for (const e of readdirSync5(root)) {
-        const p = join9(root, e);
+        const p = join10(root, e);
         try {
           const st = statSync2(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
@@ -5328,7 +5561,7 @@ function buildStartupInfo(opts) {
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join9(dir, name);
+          const p = join10(dir, name);
           let st;
           try {
             st = statSync2(p);
@@ -5345,15 +5578,15 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join9(getAgentDir(), "skills");
+  const globalSkillsDir = join10(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join9(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join10(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join9(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join10(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join9(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join10(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
     const prompts = readdirSync5(promptsDir).filter((f) => f.endsWith(".md"));
     for (const f of prompts) promptsItems.push(`/${basename4(f, ".md")}`);
@@ -5361,14 +5594,14 @@ function buildStartupInfo(opts) {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join9(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join10(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
     const exts = readdirSync5(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join9(extDir, f));
+    for (const f of exts) extItems.push(join10(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join9(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settingsPath = join10(process.env.HOME ?? "", ".pi", "agent", "settings.json");
     const settings = JSON.parse(readFileSync9(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
@@ -5392,10 +5625,10 @@ function buildStartupInfo(opts) {
 }
 function readNearestPackageJson(metaUrl) {
   try {
-    let dir = dirname4(fileURLToPath(metaUrl));
+    let dir = dirname4(fileURLToPath2(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join9(dir, "package.json");
-      if (existsSync7(p)) {
+      const p = join10(dir, "package.json");
+      if (existsSync8(p)) {
         const json = JSON.parse(readFileSync9(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
