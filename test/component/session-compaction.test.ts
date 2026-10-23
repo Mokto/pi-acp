@@ -364,6 +364,39 @@ test('compaction: after a failed after-reply compaction, replies stop retrying u
   }
 })
 
+test('compaction: a size pi measured before its own compaction finished does not compact the thread again', async () => {
+  const { proc, s, updates } = session(true)
+  pickCompactAt('300000')
+  try {
+    const stale = { contextUsage: { tokens: 320_000, contextWindow: 1_000_000 } }
+    proc.sessionStats = stale
+    const reply = s.prompt('work')
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'turn_end' })
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'compaction_start', reason: 'threshold' })
+    proc.getSessionStats = async () => {
+      proc.emit(END_OK)
+      return stale
+    }
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await reply, 'end_turn')
+    await new Promise(r => setTimeout(r, 0))
+
+    assert.equal(proc.compactCalls, 0)
+    assert.deepEqual(
+      (await updates()).filter(u => u.sessionUpdate === 'compaction_update').map(u => u.status),
+      ['in_progress', 'completed']
+    )
+
+    proc.getSessionStats = async () => stale
+    await finishReply(s, proc, 320_000)
+    assert.equal(proc.compactCalls, 1)
+  } finally {
+    pickCompactAt('model_limit')
+  }
+})
+
 test('compaction: a message that starts while a model switch from the last reply is applied is not compacted under', async () => {
   const { proc, s } = session(true)
   let applied: () => void = () => {}

@@ -385,6 +385,8 @@ export class PiAcpSession {
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
   private compactAfterReplyFailed = false
+  // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
+  private compactedSinceLastStep = false
   private readonly background: BackgroundCompaction
 
   // Used to map abort semantics to ACP stopReason.
@@ -786,6 +788,7 @@ export class PiAcpSession {
     if (state.status === 'failed' && this.compactionAfterReply) this.compactAfterReplyFailed = true
     if (state.status !== 'completed') return
     this.compactAfterReplyFailed = false
+    this.compactedSinceLastStep = true
     // pi reports no context size until the next reply after a compaction, so the ring would
     // keep the pre-compaction size; show pi's estimate (messages only, so it reads low) meanwhile.
     this.peakContextTokens = 0
@@ -1375,7 +1378,7 @@ export class PiAcpSession {
     const raw = (stats as { contextUsage?: unknown } | null)?.contextUsage
     const cu = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
     if (typeof cu.contextWindow === 'number') this.contextWindow = cu.contextWindow
-    const tokens = typeof cu.tokens === 'number' ? cu.tokens : null
+    const tokens = typeof cu.tokens === 'number' && !this.compactedSinceLastStep ? cu.tokens : null
 
     // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
     // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
@@ -1918,6 +1921,7 @@ export class PiAcpSession {
         // Re-arm inference-startup mode: the model is about to receive tool results and
         // may take a while before it starts streaming the next response.
         this.inferenceStartup = true
+        this.compactedSinceLastStep = false
         // End of this model segment: tip /compact if it narrated tools, then reset for the next.
         this.flushNarratedToolCallGate()
         void this.pushUsageUpdate()
