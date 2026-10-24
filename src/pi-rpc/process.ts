@@ -203,6 +203,10 @@ export class PiRpcProcess {
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
+
+    // A write that is in flight when pi exits fails with EPIPE. Its callback already rejects the
+    // request; without a listener Node also throws the error and exits pi-acp with every thread.
+    child.stdin.on('error', () => {})
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
