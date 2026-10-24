@@ -269,9 +269,8 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
+    // Zed writes each line to Zed.log as "agent stderr: …", so pi's crash traces land there.
+    child.stderr.pipe(process.stderr, { end: false })
 
     const proc = new PiRpcProcess(child)
 
