@@ -203,6 +203,10 @@ export class PiRpcProcess {
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
+
+    // A write that is in flight when pi exits fails with EPIPE. Its callback already rejects the
+    // request; without a listener Node also throws the error and exits pi-acp with every thread.
+    child.stdin.on('error', () => {})
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
@@ -265,9 +269,8 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
+    // Zed writes each line to Zed.log as "agent stderr: …", so pi's crash traces land there.
+    child.stderr.pipe(process.stderr, { end: false })
 
     const proc = new PiRpcProcess(child)
 
