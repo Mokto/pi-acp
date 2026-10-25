@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getPiAcpCompactionDir } from './paths.js'
 
@@ -27,7 +27,7 @@ export function backgroundLead(limit: number): number {
 export class BackgroundCompaction {
   private running: Promise<void> | null = null
   private stopRunning: (() => void) | null = null
-  private ready: { maxTokensBefore: number; file: string } | null = null
+  private ready: { refreshAt: number; maxTokensBefore: number; file: string } | null = null
   private generation = 0
   private failed = false
 
@@ -35,7 +35,10 @@ export class BackgroundCompaction {
 
   shouldStart(tokens: number, limit: number): boolean {
     if (this.running || this.failed || tokens < limit - backgroundLead(limit)) return false
-    return !this.ready || tokens >= this.ready.maxTokensBefore
+    if (!this.ready) return true
+    // Past the limit the reply ends in a compaction, which would wait for a rewrite; the ready summary still works.
+    if (tokens >= limit) return tokens >= this.ready.maxTokensBefore
+    return tokens >= this.ready.refreshAt
   }
 
   start(session: Promise<SessionFileInfo>, tokens: number, limit: number): void {
@@ -53,7 +56,9 @@ export class BackgroundCompaction {
       })
   }
 
-  async wait(): Promise<void> {
+  /** Resolves at once if the ready summary still works for a thread of `tokens`, else when the summary being written is done. */
+  async untilUsable(tokens: number): Promise<void> {
+    if (this.ready && tokens < this.ready.maxTokensBefore) return
     await this.running
   }
 
@@ -80,6 +85,8 @@ export class BackgroundCompaction {
     // mkdir's mode only applies when it creates the folder; it holds copies of whole threads.
     await chmod(dir, 0o700)
     const copy = join(dir, `${randomUUID()}.jsonl`)
+    // pi may compact with the older summary while this one is saved, so it must never see a half-written file.
+    const partial = join(dir, `${randomUUID()}.json.tmp`)
     const text = await readFile(file, 'utf8')
     try {
       // pi may be appending a line right now; a cut-off last line would not parse.
@@ -99,18 +106,23 @@ export class BackgroundCompaction {
       const handoff = join(dir, `${id}.json`)
       const { summary, firstKeptEntryId, details, usage } = result
       const tokensAfter = typeof result.estimatedTokensAfter === 'number' ? result.estimatedTokensAfter : 0
-      // Everything written after the snapshot stays in the thread, so past a quarter of `limit` the swap saves too little.
-      const maxTokensBefore = tokens + limit / 4 - tokensAfter
-      await writeFile(handoff, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
+      // Everything written after the snapshot stays in the thread. Past a quarter of `limit` after the swap a
+      // rewrite pays off; past half, the swap saves too little to use at all.
+      const refreshAt = tokens + limit / 4 - tokensAfter
+      const maxTokensBefore = tokens + limit / 2 - tokensAfter
+      await writeFile(partial, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
         mode: 0o600
       })
+      if (this.generation !== generation) return
+      await rename(partial, handoff)
       if (this.generation !== generation) {
         await rm(handoff, { force: true })
         return
       }
-      this.ready = { maxTokensBefore, file: handoff }
+      this.ready = { refreshAt, maxTokensBefore, file: handoff }
     } finally {
       await rm(copy, { force: true })
+      await rm(partial, { force: true })
     }
   }
 }
