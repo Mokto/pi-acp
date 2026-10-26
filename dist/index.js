@@ -1860,6 +1860,8 @@ var PiAcpSession = class _PiAcpSession {
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   subagentToolCalls = /* @__PURE__ */ new Map();
+  // Tool calls the model is still writing, by content index: pi sends only their id and name, then argument text in pieces.
+  streamingToolCalls = /* @__PURE__ */ new Map();
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   lastEmit = Promise.resolve();
@@ -2642,24 +2644,31 @@ ${message}` }
           this.markStructuredToolCall();
         }
         if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
-          const toolCall = (
-            // pi sometimes includes the tool call directly on the event
-            ame?.toolCall ?? // ...and always includes it in the partial assistant message at contentIndex
-            ame?.partial?.content?.[ame?.contentIndex ?? 0]
-          );
-          const toolCallId = String(toolCall?.id ?? "");
-          const toolName = String(toolCall?.name ?? "tool");
+          const index = Number(ame.contentIndex ?? 0);
+          const toolCall = ame.toolCall ?? ame.partial?.content?.[index];
+          if (!toolCall && ame.type === "toolcall_start") {
+            this.streamingToolCalls.set(index, {
+              id: String(ame.id ?? ""),
+              name: String(ame.toolName ?? "tool"),
+              args: "",
+              titleArgs: null
+            });
+          }
+          const streaming = this.streamingToolCalls.get(index);
+          if (ame.type === "toolcall_end") this.streamingToolCalls.delete(index);
+          const toolCallId = String(toolCall?.id ?? streaming?.id ?? "");
+          const toolName = String(toolCall?.name ?? streaming?.name ?? "tool");
           if (toolName === PLAN_TOOL) break;
+          let titleArgs;
+          if (!toolCall && streaming && ame.type === "toolcall_delta") {
+            if (streaming.titleArgs || streaming.args.length > 8192) break;
+            streaming.args += String(ame.delta ?? "");
+            const found = streamedTitleArgs(streaming.args);
+            if (!found) break;
+            streaming.titleArgs = titleArgs = found;
+          }
           if (toolCallId) {
-            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : (() => {
-              const s = String(toolCall?.partialArgs ?? "");
-              if (!s) return void 0;
-              try {
-                return JSON.parse(s);
-              } catch {
-                return { partialArgs: s };
-              }
-            })();
+            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : titleArgs ?? streaming?.titleArgs ?? void 0;
             const locations = toToolCallLocations(toolName, rawInput, this.cwd);
             const existingStatus = this.currentToolCalls.get(toolCallId);
             const status = existingStatus ?? "pending";
@@ -2688,10 +2697,12 @@ ${message}` }
                 rawInput
               });
             } else {
+              const title = toToolTitle(toolName, rawInput, this.cwd);
+              this.originalToolTitles.set(toolCallId, title);
               this.emit({
                 sessionUpdate: "tool_call_update",
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 status,
                 locations,
                 rawInput
@@ -2962,6 +2973,7 @@ ${formatAutoRetryMessage(ev)}` }
       case "agent_start": {
         this.inAgentLoop = true;
         this.agentRunError = "";
+        this.streamingToolCalls.clear();
         this.resetNarratedToolCallGate();
         break;
       }
@@ -3288,6 +3300,18 @@ function formatAutoRetryMessage(ev) {
   const reason = isNetworkError || !facing ? isNetworkError ? "Network error" : null : truncateTitle(facing, 150);
   const prefix = reason ? `${reason} \u2014 r` : "R";
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
+}
+var TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+function streamedTitleArgs(json) {
+  const args = {};
+  for (const [, key, raw] of json.matchAll(TITLE_ARG_PATTERN)) {
+    if (key in args) continue;
+    try {
+      args[key] = JSON.parse(`"${raw}"`);
+    } catch {
+    }
+  }
+  return Object.keys(args).length ? args : null;
 }
 function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
