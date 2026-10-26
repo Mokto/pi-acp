@@ -99,3 +99,62 @@ test(
     }
   }
 )
+
+test("PiRpcProcess: passes pi's stderr on to pi-acp's, so a crash trace reaches Zed's log", async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-stderr-'))
+  const fakePi = writeFakePi(
+    dir,
+    `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('1.3.0'); process.exit(0) }
+process.stdin.once('data', () => { process.stderr.write('TypeError: boom\\n'); process.exit(1) })
+`
+  )
+  const written: string[] = []
+  t.mock.method(process.stderr, 'write', (chunk: string | Uint8Array) => {
+    written.push(String(chunk))
+    return true
+  })
+  const proc = await PiRpcProcess.spawn({ cwd: dir, piCommand: fakePi })
+  try {
+    await assert.rejects(() => proc.getCommands())
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.ok(written.join('').includes('TypeError: boom'), `stderr got: ${JSON.stringify(written)}`)
+  } finally {
+    proc.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('PiRpcProcess: pi exiting while a request is still being written fails that request, not pi-acp', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-epipe-'))
+  const fakePi = writeFakePi(
+    dir,
+    `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('1.3.0'); process.exit(0) }
+let buf = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', chunk => {
+  buf += chunk
+  let nl
+  while ((nl = buf.indexOf('\\n')) !== -1) {
+    const cmd = JSON.parse(buf.slice(0, nl))
+    buf = buf.slice(nl + 1)
+    if (cmd.type === 'get_commands') process.exit(1)
+    process.stdout.write(JSON.stringify({ id: cmd.id, type: 'response', command: cmd.type, success: true, data: {} }) + '\\n')
+  }
+})
+`
+  )
+  const proc = await PiRpcProcess.spawn({ cwd: dir, piCommand: fakePi })
+  try {
+    const results = await Promise.allSettled([proc.getCommands(), proc.prompt('x'.repeat(8 << 20))])
+    assert.deepEqual(
+      results.map(r => r.status),
+      ['rejected', 'rejected']
+    )
+    await new Promise(resolve => setTimeout(resolve, 100))
+  } finally {
+    proc.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
