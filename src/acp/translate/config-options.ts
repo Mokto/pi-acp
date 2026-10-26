@@ -10,17 +10,14 @@ export const COMPACT_AT_CONFIG_ID = 'compact_at'
 
 const MODEL_LIMIT = 'model_limit'
 const COMPACT_AT_SIZES = [200_000, 300_000, 400_000, 500_000]
-let compactAt: number | null = null
 
-/** Zed replays saved picks into new sessions, so an unknown or stale value falls back to pi's default. */
-export function pickCompactAt(value: string): void {
+/**
+ * Context size at which a finished reply triggers a compaction, or null to leave it to pi.
+ * Zed replays saved picks into new sessions, so an unknown or stale value falls back to pi's default.
+ */
+export function parseCompactAt(value: string): number | null {
   const tokens = Number(value)
-  compactAt = COMPACT_AT_SIZES.includes(tokens) ? tokens : null
-}
-
-/** Context size at which a finished reply triggers a compaction, or null to leave it to pi. */
-export function compactAtTokens(): number | null {
-  return compactAt
+  return COMPACT_AT_SIZES.includes(tokens) ? tokens : null
 }
 
 function formatTokens(tokens: number): string {
@@ -28,13 +25,14 @@ function formatTokens(tokens: number): string {
 }
 
 /** Sizes the current model can't reach are left out, and the button then shows what happens instead: the model's limit. */
-function buildCompactAtOption(contextWindow: number | null): SessionConfigOption {
+function buildCompactAtOption(contextWindow: number | null, compactAt: number | null): SessionConfigOption {
   const sizes = COMPACT_AT_SIZES.filter(tokens => !contextWindow || tokens < contextWindow)
   return {
     type: 'select',
     id: COMPACT_AT_CONFIG_ID,
     name: 'Compaction',
-    description: 'When to summarize a long thread so the agent stays fast and cheap. Applies to every thread.',
+    description:
+      'When to summarize a long thread so the agent stays fast and cheap. New threads start with your last pick.',
     currentValue: compactAt && sizes.includes(compactAt) ? String(compactAt) : MODEL_LIMIT,
     options: [
       ...(sizes.length
@@ -114,12 +112,13 @@ function groupByProvider(models: NonNullable<ConfigModelState>['availableModels'
 export function buildSessionConfigOptions(
   models: ConfigModelState,
   thinking: ConfigThinkingState,
-  usage: PlanUsage | null = null
+  usage: PlanUsage | null = null,
+  compactAt: number | null = null
 ): SessionConfigOption[] {
   const options: SessionConfigOption[] = []
 
   const currentModel = models?.availableModels.find(m => m.modelId === models.currentModelId)
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null))
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt))
   const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split('/')[0] ?? null)
   if (usageOption) options.push(usageOption)
 

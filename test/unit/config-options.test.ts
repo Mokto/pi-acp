@@ -4,9 +4,8 @@ import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import {
   buildSessionConfigOptions,
   COMPACT_AT_CONFIG_ID,
-  compactAtTokens,
   MODEL_CONFIG_ID,
-  pickCompactAt,
+  parseCompactAt,
   THINKING_CONFIG_ID,
   type ConfigModelState,
   type ConfigThinkingState
@@ -111,30 +110,30 @@ test('buildSessionConfigOptions: omits thinking select when no modes are availab
 })
 
 test('compaction option: the button names the pick, and a stale saved value falls back to the model limit', () => {
-  const current = () => {
-    const o = findSelect(buildSessionConfigOptions(models, thinking), COMPACT_AT_CONFIG_ID)
+  const current = (compactAt: number | null) => {
+    const o = findSelect(buildSessionConfigOptions(models, thinking, null, compactAt), COMPACT_AT_CONFIG_ID)
     const all = o.options.flatMap(x => ('options' in x ? x.options : [x]))
     return all.find(x => x.value === o.currentValue)?.name
   }
-  assert.equal(current(), 'Model limit')
+  assert.equal(current(null), 'Model limit')
 
-  pickCompactAt('400000')
-  assert.equal(compactAtTokens(), 400_000)
-  assert.equal(current(), '400k')
+  assert.equal(parseCompactAt('400000'), 400_000)
+  assert.equal(current(400_000), '400k')
 
-  pickCompactAt('123')
-  assert.equal(compactAtTokens(), null)
-  assert.equal(current(), 'Model limit')
+  assert.equal(parseCompactAt('123'), null)
+  assert.equal(parseCompactAt('model_limit'), null)
 })
 
-test('compaction option: sizes that reach the current model window are hidden, and a pick that no longer fits shows the model limit, named by the window size', t => {
-  t.after(() => pickCompactAt('model_limit'))
+test('compaction option: sizes that reach the current model window are hidden, and a pick that no longer fits shows the model limit, named by the window size', () => {
   const withWindow = (contextWindow: number): ConfigModelState => ({
     currentModelId: 'xai/grok',
     availableModels: [{ modelId: 'xai/grok', name: 'Grok', description: null, contextWindow }]
   })
   const menu = (contextWindow: number) => {
-    const o = findSelect(buildSessionConfigOptions(withWindow(contextWindow), thinking), COMPACT_AT_CONFIG_ID)
+    const o = findSelect(
+      buildSessionConfigOptions(withWindow(contextWindow), thinking, null, 300_000),
+      COMPACT_AT_CONFIG_ID
+    )
     const rows = o.options.flatMap(x => ('options' in x ? x.options : [x]))
     return {
       headings: o.options.map(x => ('group' in x ? x.name : null)),
@@ -142,13 +141,10 @@ test('compaction option: sizes that reach the current model window are hidden, a
       current: rows.find(x => x.value === o.currentValue)?.name
     }
   }
-  pickCompactAt('300000')
-
   assert.deepEqual(menu(256_000), { headings: ['Compact at', 'Model limit'], rows: ['200k', '256k'], current: '256k' })
   assert.deepEqual(menu(200_000).headings, ['Model limit'])
   assert.deepEqual(menu(300_000).rows, ['200k', '300k'])
   assert.deepEqual(menu(1_000_000).rows, ['200k', '300k', '400k', '500k', '1M'])
   assert.equal(menu(1_000_000).current, '300k')
   assert.equal(menu(1_050_000).rows.at(-1), '1.05M')
-  assert.equal(compactAtTokens(), 300_000)
 })
