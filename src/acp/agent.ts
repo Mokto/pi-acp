@@ -39,7 +39,7 @@ import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } fr
 import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
-import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
+import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -261,7 +261,7 @@ export class PiAcpAgent implements ACPAgent {
     if (existing && !existing.proc.exited) return existing
     if (existing) this.sessions.close(sessionId)
 
-    const stored = this.store.get(sessionId)
+    const stored = this.store.get(sessionId) ?? findPiSession(sessionId)
     if (!stored?.sessionFile) {
       throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
     }

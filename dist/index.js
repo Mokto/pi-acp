@@ -600,7 +600,7 @@ function maybeAuthRequiredError(err) {
 }
 
 // src/acp/session-store.ts
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "fs";
+import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "fs";
 import { dirname as dirname2 } from "path";
 function ensureParentDir(path) {
   mkdirSync(dirname2(path), { recursive: true });
@@ -619,7 +619,9 @@ function loadFile(path) {
 }
 function saveFile(path, data) {
   ensureParentDir(path);
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  renameSync(tmp, path);
 }
 var SessionStore = class {
   path;
@@ -1155,6 +1157,29 @@ function buildCompactAtOption(contextWindow) {
     ]
   };
 }
+var CONTEXT_SUFFIX = / @ \S+$/;
+function groupByProvider(models) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const m of models) {
+    const provider = m.modelId.split("/")[0] ?? "";
+    const heading = providerDisplayName(provider);
+    let group = groups.get(provider);
+    if (!group) groups.set(provider, group = { group: provider, name: heading, options: [] });
+    const prefix = `${heading} / `;
+    group.options.push({
+      value: m.modelId,
+      name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
+      description: m.description ?? null
+    });
+  }
+  for (const group of groups.values()) {
+    const short = group.options.map((o) => o.name.replace(CONTEXT_SUFFIX, ""));
+    group.options.forEach((o, i) => {
+      if (short.indexOf(short[i]) === short.lastIndexOf(short[i])) o.name = short[i];
+    });
+  }
+  return [...groups.values()];
+}
 function buildSessionConfigOptions(models, thinking, usage = null) {
   const options = [];
   const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
@@ -1168,11 +1193,7 @@ function buildSessionConfigOptions(models, thinking, usage = null) {
       name: "Model",
       category: "model",
       currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
+      options: groupByProvider(models.availableModels)
     });
   }
   if (thinking.availableModes.length) {
@@ -1736,6 +1757,8 @@ var PiAcpSession = class _PiAcpSession {
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
   compactAfterReplyFailed = false;
+  // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
+  compactedSinceLastStep = false;
   background;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -1837,6 +1860,8 @@ var PiAcpSession = class _PiAcpSession {
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   subagentToolCalls = /* @__PURE__ */ new Map();
+  // Tool calls the model is still writing, by content index: pi sends only their id and name, then argument text in pieces.
+  streamingToolCalls = /* @__PURE__ */ new Map();
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   lastEmit = Promise.resolve();
@@ -2039,6 +2064,7 @@ var PiAcpSession = class _PiAcpSession {
     if (state.status === "failed" && this.compactionAfterReply) this.compactAfterReplyFailed = true;
     if (state.status !== "completed") return;
     this.compactAfterReplyFailed = false;
+    this.compactedSinceLastStep = true;
     this.peakContextTokens = 0;
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== "false")
       this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow);
@@ -2514,7 +2540,7 @@ ${message}` }
     const raw = stats?.contextUsage;
     const cu = raw && typeof raw === "object" ? raw : {};
     if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
-    const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
+    const tokens = typeof cu.tokens === "number" && !this.compactedSinceLastStep ? cu.tokens : null;
     if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens);
     this.maybeStartBackgroundCompaction();
     return {
@@ -2618,24 +2644,31 @@ ${message}` }
           this.markStructuredToolCall();
         }
         if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
-          const toolCall = (
-            // pi sometimes includes the tool call directly on the event
-            ame?.toolCall ?? // ...and always includes it in the partial assistant message at contentIndex
-            ame?.partial?.content?.[ame?.contentIndex ?? 0]
-          );
-          const toolCallId = String(toolCall?.id ?? "");
-          const toolName = String(toolCall?.name ?? "tool");
+          const index = Number(ame.contentIndex ?? 0);
+          const toolCall = ame.toolCall ?? ame.partial?.content?.[index];
+          if (!toolCall && ame.type === "toolcall_start") {
+            this.streamingToolCalls.set(index, {
+              id: String(ame.id ?? ""),
+              name: String(ame.toolName ?? "tool"),
+              args: "",
+              titleArgs: null
+            });
+          }
+          const streaming = this.streamingToolCalls.get(index);
+          if (ame.type === "toolcall_end") this.streamingToolCalls.delete(index);
+          const toolCallId = String(toolCall?.id ?? streaming?.id ?? "");
+          const toolName = String(toolCall?.name ?? streaming?.name ?? "tool");
           if (toolName === PLAN_TOOL) break;
+          let titleArgs;
+          if (!toolCall && streaming && ame.type === "toolcall_delta") {
+            if (streaming.titleArgs || streaming.args.length > 8192) break;
+            streaming.args += String(ame.delta ?? "");
+            const found = streamedTitleArgs(streaming.args);
+            if (!found) break;
+            streaming.titleArgs = titleArgs = found;
+          }
           if (toolCallId) {
-            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : (() => {
-              const s = String(toolCall?.partialArgs ?? "");
-              if (!s) return void 0;
-              try {
-                return JSON.parse(s);
-              } catch {
-                return { partialArgs: s };
-              }
-            })();
+            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : titleArgs ?? streaming?.titleArgs ?? void 0;
             const locations = toToolCallLocations(toolName, rawInput, this.cwd);
             const existingStatus = this.currentToolCalls.get(toolCallId);
             const status = existingStatus ?? "pending";
@@ -2664,10 +2697,12 @@ ${message}` }
                 rawInput
               });
             } else {
+              const title = toToolTitle(toolName, rawInput, this.cwd);
+              this.originalToolTitles.set(toolCallId, title);
               this.emit({
                 sessionUpdate: "tool_call_update",
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 status,
                 locations,
                 rawInput
@@ -2938,6 +2973,7 @@ ${formatAutoRetryMessage(ev)}` }
       case "agent_start": {
         this.inAgentLoop = true;
         this.agentRunError = "";
+        this.streamingToolCalls.clear();
         this.resetNarratedToolCallGate();
         break;
       }
@@ -2959,6 +2995,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "turn_end": {
         this.inferenceStartup = true;
+        this.compactedSinceLastStep = false;
         this.flushNarratedToolCallGate();
         void this.pushUsageUpdate();
         if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
@@ -3264,6 +3301,18 @@ function formatAutoRetryMessage(ev) {
   const prefix = reason ? `${reason} \u2014 r` : "R";
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
+var TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+function streamedTitleArgs(json) {
+  const args = {};
+  for (const [, key, raw] of json.matchAll(TITLE_ARG_PATTERN)) {
+    if (key in args) continue;
+    try {
+      args[key] = JSON.parse(`"${raw}"`);
+    } catch {
+    }
+  }
+  return Object.keys(args).length ? args : null;
+}
 function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
 }
@@ -3566,10 +3615,18 @@ function listPiSessions() {
   });
   return items;
 }
+function findPiSession(sessionId) {
+  const files = [];
+  walkJsonlFiles(getPiSessionsDir(), files);
+  for (const file of files) {
+    const first = readFirstLine(file);
+    const header = first ? parseSessionHeader(first) : null;
+    if (header?.sessionId === sessionId) return { sessionFile: file, cwd: header.cwd };
+  }
+  return null;
+}
 function findPiSessionFile(sessionId) {
-  const all = listPiSessions();
-  const found = all.find((s) => s.sessionId === sessionId);
-  return found?.sessionFile ?? null;
+  return findPiSession(sessionId)?.sessionFile ?? null;
 }
 
 // src/acp/translate/pi-messages.ts
@@ -3800,7 +3857,7 @@ import {
   mkdirSync as mkdirSync3,
   readdirSync as readdirSync4,
   readFileSync as readFileSync8,
-  renameSync,
+  renameSync as renameSync2,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
@@ -3962,7 +4019,7 @@ var LiveServer = class {
     const tmp = `${this.registryPath}.tmp`;
     try {
       writeFileSync3(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
-      renameSync(tmp, this.registryPath);
+      renameSync2(tmp, this.registryPath);
       chmodSync(this.registryPath, 384);
     } catch {
       try {
@@ -4254,7 +4311,7 @@ var PiAcpAgent = class {
     const existing = this.sessions.maybeGet(sessionId);
     if (existing && !existing.proc.exited) return existing;
     if (existing) this.sessions.close(sessionId);
-    const stored = this.store.get(sessionId);
+    const stored = this.store.get(sessionId) ?? findPiSession(sessionId);
     if (!stored?.sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${sessionId}`);
     }

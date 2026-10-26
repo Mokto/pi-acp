@@ -21,8 +21,8 @@ function findSelect(options: SessionConfigOption[], id: string): Extract<Session
 const models: ConfigModelState = {
   currentModelId: 'anthropic/claude',
   availableModels: [
-    { modelId: 'anthropic/claude', name: 'anthropic/Claude', description: null },
-    { modelId: 'openai/gpt', name: 'openai/GPT', description: 'fast' }
+    { modelId: 'anthropic/claude', name: 'Anthropic / Claude', description: null },
+    { modelId: 'openai/gpt', name: 'OpenAI / GPT', description: 'fast' }
   ]
 }
 
@@ -43,8 +43,12 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
   assert.equal(model.category, 'model')
   assert.equal(model.currentValue, 'anthropic/claude')
   assert.deepEqual(model.options, [
-    { value: 'anthropic/claude', name: 'anthropic/Claude', description: null },
-    { value: 'openai/gpt', name: 'openai/GPT', description: 'fast' }
+    {
+      group: 'anthropic',
+      name: 'Anthropic',
+      options: [{ value: 'anthropic/claude', name: 'Claude', description: null }]
+    },
+    { group: 'openai', name: 'OpenAI', options: [{ value: 'openai/gpt', name: 'GPT', description: 'fast' }] }
   ])
 
   const think = findSelect(options, THINKING_CONFIG_ID)
@@ -57,9 +61,36 @@ test('buildSessionConfigOptions: advertises model + thinking selects with catego
   ])
 })
 
+test('buildSessionConfigOptions: drops the context size from model names unless two rows would match', () => {
+  const cursor = (id: string, name: string) => ({
+    modelId: `cursor/${id}`,
+    name: `Cursor / ${name}`,
+    description: null
+  })
+  const model = findSelect(
+    buildSessionConfigOptions(
+      {
+        currentModelId: 'cursor/grok@256k:fast',
+        availableModels: [
+          cursor('grok@256k:fast', 'Grok 4.7 (fast) @ 256k'),
+          cursor('grok@256k:slow', 'Grok 4.7 (slow) @ 256k'),
+          cursor('fable@300k', 'Claude Fable 5 @ 300k'),
+          cursor('fable@1m', 'Claude Fable 5 @ 1m')
+        ]
+      },
+      thinking
+    ),
+    MODEL_CONFIG_ID
+  )
+  assert.deepEqual(
+    model.options.flatMap(o => ('options' in o ? o.options.map(x => x.name) : [])),
+    ['Grok 4.7 (fast)', 'Grok 4.7 (slow)', 'Claude Fable 5 @ 300k', 'Claude Fable 5 @ 1m']
+  )
+})
+
 test('buildSessionConfigOptions: currentValue is always one of the advertised model values', () => {
   const model = findSelect(buildSessionConfigOptions(models, thinking), MODEL_CONFIG_ID)
-  assert.ok(model.options.some(o => 'value' in o && o.value === model.currentValue))
+  assert.ok(model.options.flatMap(o => ('options' in o ? o.options : [o])).some(o => o.value === model.currentValue))
 })
 
 test('buildSessionConfigOptions: omits model select when no models are available', () => {
