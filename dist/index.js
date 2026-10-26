@@ -600,7 +600,7 @@ function maybeAuthRequiredError(err) {
 }
 
 // src/acp/session-store.ts
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "fs";
+import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "fs";
 import { dirname as dirname2 } from "path";
 function ensureParentDir(path) {
   mkdirSync(dirname2(path), { recursive: true });
@@ -619,7 +619,9 @@ function loadFile(path) {
 }
 function saveFile(path, data) {
   ensureParentDir(path);
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  renameSync(tmp, path);
 }
 var SessionStore = class {
   path;
@@ -3585,10 +3587,18 @@ function listPiSessions() {
   });
   return items;
 }
+function findPiSession(sessionId) {
+  const files = [];
+  walkJsonlFiles(getPiSessionsDir(), files);
+  for (const file of files) {
+    const first = readFirstLine(file);
+    const header = first ? parseSessionHeader(first) : null;
+    if (header?.sessionId === sessionId) return { sessionFile: file, cwd: header.cwd };
+  }
+  return null;
+}
 function findPiSessionFile(sessionId) {
-  const all = listPiSessions();
-  const found = all.find((s) => s.sessionId === sessionId);
-  return found?.sessionFile ?? null;
+  return findPiSession(sessionId)?.sessionFile ?? null;
 }
 
 // src/acp/translate/pi-messages.ts
@@ -3819,7 +3829,7 @@ import {
   mkdirSync as mkdirSync3,
   readdirSync as readdirSync4,
   readFileSync as readFileSync8,
-  renameSync,
+  renameSync as renameSync2,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
@@ -3981,7 +3991,7 @@ var LiveServer = class {
     const tmp = `${this.registryPath}.tmp`;
     try {
       writeFileSync3(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
-      renameSync(tmp, this.registryPath);
+      renameSync2(tmp, this.registryPath);
       chmodSync(this.registryPath, 384);
     } catch {
       try {
@@ -4273,7 +4283,7 @@ var PiAcpAgent = class {
     const existing = this.sessions.maybeGet(sessionId);
     if (existing && !existing.proc.exited) return existing;
     if (existing) this.sessions.close(sessionId);
-    const stored = this.store.get(sessionId);
+    const stored = this.store.get(sessionId) ?? findPiSession(sessionId);
     if (!stored?.sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${sessionId}`);
     }
