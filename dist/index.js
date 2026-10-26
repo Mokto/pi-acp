@@ -1155,6 +1155,29 @@ function buildCompactAtOption(contextWindow) {
     ]
   };
 }
+var CONTEXT_SUFFIX = / @ \S+$/;
+function groupByProvider(models) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const m of models) {
+    const provider = m.modelId.split("/")[0] ?? "";
+    const heading = providerDisplayName(provider);
+    let group = groups.get(provider);
+    if (!group) groups.set(provider, group = { group: provider, name: heading, options: [] });
+    const prefix = `${heading} / `;
+    group.options.push({
+      value: m.modelId,
+      name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
+      description: m.description ?? null
+    });
+  }
+  for (const group of groups.values()) {
+    const short = group.options.map((o) => o.name.replace(CONTEXT_SUFFIX, ""));
+    group.options.forEach((o, i) => {
+      if (short.indexOf(short[i]) === short.lastIndexOf(short[i])) o.name = short[i];
+    });
+  }
+  return [...groups.values()];
+}
 function buildSessionConfigOptions(models, thinking, usage = null) {
   const options = [];
   const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
@@ -1168,11 +1191,7 @@ function buildSessionConfigOptions(models, thinking, usage = null) {
       name: "Model",
       category: "model",
       currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
+      options: groupByProvider(models.availableModels)
     });
   }
   if (thinking.availableModes.length) {
