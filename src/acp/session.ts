@@ -502,6 +502,11 @@ export class PiAcpSession {
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   private subagentToolCalls = new Map<string, string>()
+  // Tool calls the model is still writing, by content index: pi sends only their id and name, then argument text in pieces.
+  private streamingToolCalls = new Map<
+    number,
+    { id: string; name: string; args: string; titleArgs: Record<string, string> | null }
+  >()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -1501,29 +1506,41 @@ export class PiAcpSession {
         // Surface tool calls ASAP so clients (e.g. Zed) can show a tool-in-use/loading UI
         // while the model is still streaming tool call args.
         if (ame?.type === 'toolcall_start' || ame?.type === 'toolcall_delta' || ame?.type === 'toolcall_end') {
-          const toolCall =
-            // pi sometimes includes the tool call directly on the event
-            (ame as any)?.toolCall ??
-            // ...and always includes it in the partial assistant message at contentIndex
-            (ame as any)?.partial?.content?.[(ame as any)?.contentIndex ?? 0]
+          const index = Number(ame.contentIndex ?? 0)
+          // pi 0.84+ sends the whole call only on `toolcall_end`; older pi sends it as `partial` on every event.
+          const toolCall = ame.toolCall ?? ame.partial?.content?.[index]
+          if (!toolCall && ame.type === 'toolcall_start') {
+            this.streamingToolCalls.set(index, {
+              id: String(ame.id ?? ''),
+              name: String(ame.toolName ?? 'tool'),
+              args: '',
+              titleArgs: null
+            })
+          }
+          const streaming = this.streamingToolCalls.get(index)
+          if (ame.type === 'toolcall_end') this.streamingToolCalls.delete(index)
 
-          const toolCallId = String((toolCall as any)?.id ?? '')
-          const toolName = String((toolCall as any)?.name ?? 'tool')
+          const toolCallId = String(toolCall?.id ?? streaming?.id ?? '')
+          const toolName = String(toolCall?.name ?? streaming?.name ?? 'tool')
           if (toolName === PLAN_TOOL) break
+
+          let titleArgs: Record<string, string> | undefined
+          if (!toolCall && streaming && ame.type === 'toolcall_delta') {
+            // One update when the file name or command arrives, not one per piece.
+            // ponytail: stops looking after 8 KB of arguments, so a path the model sends after a long
+            // `content` shows only when the call ends. Upgrade: a streaming JSON parser.
+            if (streaming.titleArgs || streaming.args.length > 8192) break
+            streaming.args += String(ame.delta ?? '')
+            const found = streamedTitleArgs(streaming.args)
+            if (!found) break
+            streaming.titleArgs = titleArgs = found
+          }
 
           if (toolCallId) {
             const rawInput =
-              (toolCall as any)?.arguments && typeof (toolCall as any).arguments === 'object'
-                ? (toolCall as any).arguments
-                : (() => {
-                    const s = String((toolCall as any)?.partialArgs ?? '')
-                    if (!s) return undefined
-                    try {
-                      return JSON.parse(s)
-                    } catch {
-                      return { partialArgs: s }
-                    }
-                  })()
+              toolCall?.arguments && typeof toolCall.arguments === 'object'
+                ? toolCall.arguments
+                : (titleArgs ?? streaming?.titleArgs ?? undefined)
 
             const locations = toToolCallLocations(toolName, rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
@@ -1555,12 +1572,13 @@ export class PiAcpSession {
                 rawInput
               })
             } else {
-              // Best-effort: keep rawInput updated while args are streaming.
               // Keep the existing status (pending or in_progress).
+              const title = toToolTitle(toolName, rawInput, this.cwd)
+              this.originalToolTitles.set(toolCallId, title)
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 status,
                 locations,
                 rawInput
@@ -1889,6 +1907,7 @@ export class PiAcpSession {
       case 'agent_start': {
         this.inAgentLoop = true
         this.agentRunError = ''
+        this.streamingToolCalls.clear()
         this.resetNarratedToolCallGate()
         break
       }
@@ -2318,6 +2337,22 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const reason = isNetworkError || !facing ? (isNetworkError ? 'Network error' : null) : truncateTitle(facing, 150)
   const prefix = reason ? `${reason} — r` : 'R'
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+}
+
+const TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g
+
+/** The arguments a tool card's title is made from, once the model has finished sending them, or null before that. */
+function streamedTitleArgs(json: string): Record<string, string> | null {
+  const args: Record<string, string> = {}
+  for (const [, key, raw] of json.matchAll(TITLE_ARG_PATTERN)) {
+    if (key in args) continue
+    try {
+      args[key] = JSON.parse(`"${raw}"`) as string
+    } catch {
+      // ignore
+    }
+  }
+  return Object.keys(args).length ? args : null
 }
 
 /** Truncate a string for display in tool titles. */
