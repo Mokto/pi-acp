@@ -1416,7 +1416,7 @@ var TimeoutError = class extends Error {
 
 // src/acp/background-compaction.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { join as join7 } from "path";
 function backgroundLead(limit) {
   return Math.min(32e3, Math.max(8e3, Math.round(limit * 0.125)));
@@ -1432,7 +1432,9 @@ var BackgroundCompaction = class {
   failed = false;
   shouldStart(tokens, limit) {
     if (this.running || this.failed || tokens < limit - backgroundLead(limit)) return false;
-    return !this.ready || tokens >= this.ready.maxTokensBefore;
+    if (!this.ready) return true;
+    if (tokens >= limit) return tokens >= this.ready.maxTokensBefore;
+    return tokens >= this.ready.refreshAt;
   }
   start(session, tokens, limit) {
     const generation = ++this.generation;
@@ -1445,7 +1447,9 @@ var BackgroundCompaction = class {
       }
     });
   }
-  async wait() {
+  /** Resolves at once if the ready summary still works for a thread of `tokens`, else when the summary being written is done. */
+  async untilUsable(tokens) {
+    if (this.ready && tokens < this.ready.maxTokensBefore) return;
     await this.running;
   }
   async discard() {
@@ -1464,6 +1468,7 @@ var BackgroundCompaction = class {
     await mkdir(dir, { recursive: true, mode: 448 });
     await chmod(dir, 448);
     const copy = join7(dir, `${randomUUID2()}.jsonl`);
+    const partial = join7(dir, `${randomUUID2()}.json.tmp`);
     const text = await readFile(file, "utf8");
     try {
       await writeFile(copy, text.slice(0, text.lastIndexOf("\n") + 1), { mode: 384 });
@@ -1482,17 +1487,21 @@ var BackgroundCompaction = class {
       const handoff = join7(dir, `${id}.json`);
       const { summary, firstKeptEntryId, details, usage } = result;
       const tokensAfter = typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : 0;
-      const maxTokensBefore = tokens + limit / 4 - tokensAfter;
-      await writeFile(handoff, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
+      const refreshAt = tokens + limit / 4 - tokensAfter;
+      const maxTokensBefore = tokens + limit / 2 - tokensAfter;
+      await writeFile(partial, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
         mode: 384
       });
+      if (this.generation !== generation) return;
+      await rename(partial, handoff);
       if (this.generation !== generation) {
         await rm(handoff, { force: true });
         return;
       }
-      this.ready = { maxTokensBefore, file: handoff };
+      this.ready = { refreshAt, maxTokensBefore, file: handoff };
     } finally {
       await rm(copy, { force: true });
+      await rm(partial, { force: true });
     }
   }
 };
@@ -2392,7 +2401,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     };
     this.startCompaction();
     this.compactionAfterReply = (async () => {
-      await this.background.wait();
+      await this.background.untilUsable(this.peakContextTokens);
       if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }));
     })().catch((err) => finishIfPiDidNot({ status: "failed", error: err instanceof Error ? err.message : String(err) }));

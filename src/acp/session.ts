@@ -1206,7 +1206,7 @@ export class PiAcpSession {
     // Shown now, not at pi's compaction_start: a summary still being written can take a while.
     this.startCompaction()
     this.compactionAfterReply = (async () => {
-      await this.background.wait()
+      await this.background.untilUsable(this.peakContextTokens)
       if (this.cancelRequested) return finishIfPiDidNot({ status: 'cancelled' })
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }))
     })().catch(err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) }))
