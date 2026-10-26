@@ -335,6 +335,8 @@ var PiRpcProcess = class _PiRpcProcess {
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
     });
+    child.stdin.on("error", () => {
+    });
   }
   static async spawn(params) {
     const cmd = getPiCommand(params.piCommand);
@@ -379,8 +381,7 @@ var PiRpcProcess = class _PiRpcProcess {
       }
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e });
     }
-    child.stderr.on("data", () => {
-    });
+    child.stderr.pipe(process.stderr, { end: false });
     const proc2 = new _PiRpcProcess(child);
     try {
       const state = await proc2.getState();
