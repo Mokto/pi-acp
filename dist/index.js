@@ -637,11 +637,11 @@ var SessionStore = class {
     const db = loadFile(this.path);
     const existing = db.sessions[entry.sessionId];
     db.sessions[entry.sessionId] = {
+      ...existing,
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      ...existing && "startBranch" in existing ? { startBranch: existing.startBranch } : {}
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     saveFile(this.path, db);
   }
@@ -657,6 +657,14 @@ var SessionStore = class {
     const existing = db.sessions[sessionId];
     if (!existing) return;
     existing.startBranch = branch;
+    saveFile(this.path, db);
+  }
+  /** Record the compaction size picked in a session. No-op if the session isn't registered yet. */
+  setCompactAt(sessionId, tokens) {
+    const db = loadFile(this.path);
+    const existing = db.sessions[sessionId];
+    if (!existing) return;
+    existing.compactAt = tokens;
     saveFile(this.path, db);
   }
   delete(sessionId) {
@@ -1113,24 +1121,20 @@ var THINKING_CONFIG_ID = "thinking";
 var COMPACT_AT_CONFIG_ID = "compact_at";
 var MODEL_LIMIT = "model_limit";
 var COMPACT_AT_SIZES = [2e5, 3e5, 4e5, 5e5];
-var compactAt = null;
-function pickCompactAt(value) {
+function parseCompactAt(value) {
   const tokens = Number(value);
-  compactAt = COMPACT_AT_SIZES.includes(tokens) ? tokens : null;
-}
-function compactAtTokens() {
-  return compactAt;
+  return COMPACT_AT_SIZES.includes(tokens) ? tokens : null;
 }
 function formatTokens2(tokens) {
   return tokens >= 1e6 ? `${Number((tokens / 1e6).toFixed(2))}M` : `${Math.round(tokens / 1e3)}k`;
 }
-function buildCompactAtOption(contextWindow) {
+function buildCompactAtOption(contextWindow, compactAt) {
   const sizes = COMPACT_AT_SIZES.filter((tokens) => !contextWindow || tokens < contextWindow);
   return {
     type: "select",
     id: COMPACT_AT_CONFIG_ID,
     name: "Compaction",
-    description: "When to summarize a long thread so the agent stays fast and cheap. Applies to every thread.",
+    description: "When to summarize a long thread so the agent stays fast and cheap. New threads start with your last pick.",
     currentValue: compactAt && sizes.includes(compactAt) ? String(compactAt) : MODEL_LIMIT,
     options: [
       ...sizes.length ? [
@@ -1181,10 +1185,10 @@ function groupByProvider(models) {
   }
   return [...groups.values()];
 }
-function buildSessionConfigOptions(models, thinking, usage = null) {
+function buildSessionConfigOptions(models, thinking, usage = null, compactAt = null) {
   const options = [];
   const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null));
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt));
   const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
   if (usageOption) options.push(usageOption);
   if (models && models.availableModels.length) {
@@ -1643,9 +1647,6 @@ var SessionManager = class {
   pushConfigOptionUpdates() {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate();
   }
-  compactAtPicked() {
-    for (const s of this.sessions.values()) s.compactAtPicked();
-  }
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId) {
     return this.sessions.get(sessionId);
@@ -1738,9 +1739,6 @@ var SessionManager = class {
     this.live?.remove(sessionId);
   }
 };
-function ringSize(contextWindow) {
-  return Math.min(contextWindow, compactAtTokens() ?? contextWindow);
-}
 var PiAcpSession = class _PiAcpSession {
   sessionId;
   cwd;
@@ -1758,6 +1756,7 @@ var PiAcpSession = class _PiAcpSession {
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
   compactAfterReplyFailed = false;
+  compactAtPick = null;
   // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
   compactedSinceLastStep = false;
   background;
@@ -1877,6 +1876,7 @@ var PiAcpSession = class _PiAcpSession {
     this.conn = opts.conn;
     this.fileCommands = opts.fileCommands ?? [];
     this.store = opts.store ?? null;
+    this.compactAtPick = parseCompactAt(String(this.store?.get(this.sessionId)?.compactAt));
     this.onDead = opts.onDead ?? null;
     this.compactionEntries = opts.compactionEntries ?? false;
     this.notices = opts.notices ?? false;
@@ -2381,7 +2381,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     });
   }
   shouldCompactAfterReply(reason) {
-    const limit = compactAtTokens();
+    const limit = this.compactAtPick;
     return reason === "end_turn" && !this.pendingTurn && !this.turnQueue.length && limit !== null && this.peakContextTokens >= limit && !this.compactAfterReplyFailed;
   }
   /** Runs while the user reads the reply; a prompt sent meanwhile waits in the turn queue. */
@@ -2519,13 +2519,23 @@ ${message}` }
   // know the model's window or has no post-compaction count yet.
   emitUsageUpdate(tokens, contextWindow) {
     if (!tokens || !contextWindow) return;
-    this.emit({ sessionUpdate: "usage_update", used: tokens, size: ringSize(contextWindow) });
+    this.emit({ sessionUpdate: "usage_update", used: tokens, size: this.ringSize(contextWindow) });
   }
-  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
-  compactAtPicked() {
+  /** Context size at which a finished reply compacts this thread, or null to leave it to pi. */
+  get compactAt() {
+    return this.compactAtPick;
+  }
+  /** A pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  setCompactAt(value) {
+    this.compactAtPick = parseCompactAt(value);
+    this.store?.setCompactAt(this.sessionId, this.compactAtPick);
     this.compactAfterReplyFailed = false;
     void this.background.discard();
     void this.pushUsageUpdate();
+  }
+  /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+  ringSize(contextWindow) {
+    return Math.min(contextWindow, this.compactAtPick ?? contextWindow);
   }
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
   async pushUsageUpdate(estimatedTokens) {
@@ -2551,7 +2561,7 @@ ${message}` }
     };
   }
   maybeStartBackgroundCompaction() {
-    const picked = compactAtTokens();
+    const picked = this.compactAtPick;
     const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null;
     const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity);
     if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return;
@@ -2595,7 +2605,7 @@ ${message}` }
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`);
       if (contextWindow) {
-        const percent = displayTokens / ringSize(contextWindow) * 100;
+        const percent = displayTokens / this.ringSize(contextWindow) * 100;
         parts.push(`${Math.round(percent * 10) / 10}%`);
       }
     }
@@ -4343,7 +4353,8 @@ var PiAcpAgent = class {
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     this.store.upsert({
@@ -4479,7 +4490,8 @@ var PiAcpAgent = class {
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     const quietStartup = getQuietStartup(params.cwd);
@@ -4494,7 +4506,7 @@ var PiAcpAgent = class {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -4694,7 +4706,7 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       });
     } catch (e) {
@@ -4741,7 +4753,7 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       });
     } catch (e) {
@@ -5335,13 +5347,14 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -5391,16 +5404,18 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         this.sessions.pushConfigOptionUpdates();
         break;
       case COMPACT_AT_CONFIG_ID:
-        pickCompactAt(String(params.value));
-        this.sessions.pushConfigOptionUpdates();
-        this.sessions.compactAtPicked();
+        session.setCompactAt(String(params.value));
         break;
       default:
         throw RequestError3.invalidParams(`Unknown configId: ${params.configId}`);
     }
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
-    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) };
+    return {
+      configOptions: session.withDeferredConfig(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      )
+    };
   }
   async setSessionMode(params) {
     const session = await this.autoRestoreSession(params.sessionId);
