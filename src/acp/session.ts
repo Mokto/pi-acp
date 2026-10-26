@@ -34,7 +34,7 @@ import { NARRATED_TOOL_CALL_COMPACT_TIP, planNarratedToolCallEmit } from './tran
 import { getPlanUsageDir } from './translate/plan-usage.js'
 import { extensionName, noticeFromNotify } from './translate/notice.js'
 import { compactionStateFromPiEnd, compactionUpdate, type CompactionState } from './translate/compaction.js'
-import { compactAtTokens, MODEL_CONFIG_ID, THINKING_CONFIG_ID } from './translate/config-options.js'
+import { MODEL_CONFIG_ID, parseCompactAt, THINKING_CONFIG_ID } from './translate/config-options.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
@@ -249,10 +249,6 @@ export class SessionManager {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate()
   }
 
-  compactAtPicked(): void {
-    for (const s of this.sessions.values()) s.compactAtPicked()
-  }
-
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId: string): PiAcpSession | undefined {
     return this.sessions.get(sessionId)
@@ -361,11 +357,6 @@ export class SessionManager {
   }
 }
 
-/** The ring fills toward the picked compaction size, since that is when the thread compacts. */
-function ringSize(contextWindow: number): number {
-  return Math.min(contextWindow, compactAtTokens() ?? contextWindow)
-}
-
 export class PiAcpSession {
   readonly sessionId: string
   readonly cwd: string
@@ -385,6 +376,9 @@ export class PiAcpSession {
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
   private compactAfterReplyFailed = false
+  private compactAtPick: number | null = null
+  // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
+  private compactedSinceLastStep = false
   private readonly background: BackgroundCompaction
 
   // Used to map abort semantics to ACP stopReason.
@@ -500,6 +494,11 @@ export class PiAcpSession {
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   private subagentToolCalls = new Map<string, string>()
+  // Tool calls the model is still writing, by content index: pi sends only their id and name, then argument text in pieces.
+  private streamingToolCalls = new Map<
+    number,
+    { id: string; name: string; args: string; titleArgs: Record<string, string> | null }
+  >()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -531,6 +530,8 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.store = opts.store ?? null
+    // A size a later release dropped from the menu would otherwise compact at a size the button can't show.
+    this.compactAtPick = parseCompactAt(String(this.store?.get(this.sessionId)?.compactAt))
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
     this.notices = opts.notices ?? false
@@ -786,6 +787,7 @@ export class PiAcpSession {
     if (state.status === 'failed' && this.compactionAfterReply) this.compactAfterReplyFailed = true
     if (state.status !== 'completed') return
     this.compactAfterReplyFailed = false
+    this.compactedSinceLastStep = true
     // pi reports no context size until the next reply after a compaction, so the ring would
     // keep the pre-compaction size; show pi's estimate (messages only, so it reads low) meanwhile.
     this.peakContextTokens = 0
@@ -1184,7 +1186,7 @@ export class PiAcpSession {
   }
 
   private shouldCompactAfterReply(reason: StopReason): boolean {
-    const limit = compactAtTokens()
+    const limit = this.compactAtPick
     return (
       reason === 'end_turn' &&
       !this.pendingTurn &&
@@ -1349,14 +1351,26 @@ export class PiAcpSession {
   // know the model's window or has no post-compaction count yet.
   private emitUsageUpdate(tokens: number | null, contextWindow: number | null): void {
     if (!tokens || !contextWindow) return
-    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: ringSize(contextWindow) })
+    this.emit({ sessionUpdate: 'usage_update', used: tokens, size: this.ringSize(contextWindow) })
   }
 
-  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
-  compactAtPicked(): void {
+  /** Context size at which a finished reply compacts this thread, or null to leave it to pi. */
+  get compactAt(): number | null {
+    return this.compactAtPick
+  }
+
+  /** A pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  setCompactAt(value: string): void {
+    this.compactAtPick = parseCompactAt(value)
+    this.store?.setCompactAt(this.sessionId, this.compactAtPick)
     this.compactAfterReplyFailed = false
     void this.background.discard()
     void this.pushUsageUpdate()
+  }
+
+  /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+  private ringSize(contextWindow: number): number {
+    return Math.min(contextWindow, this.compactAtPick ?? contextWindow)
   }
 
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
@@ -1375,7 +1389,7 @@ export class PiAcpSession {
     const raw = (stats as { contextUsage?: unknown } | null)?.contextUsage
     const cu = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
     if (typeof cu.contextWindow === 'number') this.contextWindow = cu.contextWindow
-    const tokens = typeof cu.tokens === 'number' ? cu.tokens : null
+    const tokens = typeof cu.tokens === 'number' && !this.compactedSinceLastStep ? cu.tokens : null
 
     // Use a monotonic peak to guard against Cursor Composer's "take-once" input accounting
     // where intermediate tool-call LLM responses report input=0, making totalTokens tiny.
@@ -1390,7 +1404,7 @@ export class PiAcpSession {
   }
 
   private maybeStartBackgroundCompaction(): void {
-    const picked = compactAtTokens()
+    const picked = this.compactAtPick
     const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null
     const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity)
     if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return
@@ -1438,7 +1452,7 @@ export class PiAcpSession {
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`)
       if (contextWindow) {
-        const percent = (displayTokens / ringSize(contextWindow)) * 100
+        const percent = (displayTokens / this.ringSize(contextWindow)) * 100
         parts.push(`${Math.round(percent * 10) / 10}%`)
       }
     }
@@ -1498,29 +1512,41 @@ export class PiAcpSession {
         // Surface tool calls ASAP so clients (e.g. Zed) can show a tool-in-use/loading UI
         // while the model is still streaming tool call args.
         if (ame?.type === 'toolcall_start' || ame?.type === 'toolcall_delta' || ame?.type === 'toolcall_end') {
-          const toolCall =
-            // pi sometimes includes the tool call directly on the event
-            (ame as any)?.toolCall ??
-            // ...and always includes it in the partial assistant message at contentIndex
-            (ame as any)?.partial?.content?.[(ame as any)?.contentIndex ?? 0]
+          const index = Number(ame.contentIndex ?? 0)
+          // pi 0.84+ sends the whole call only on `toolcall_end`; older pi sends it as `partial` on every event.
+          const toolCall = ame.toolCall ?? ame.partial?.content?.[index]
+          if (!toolCall && ame.type === 'toolcall_start') {
+            this.streamingToolCalls.set(index, {
+              id: String(ame.id ?? ''),
+              name: String(ame.toolName ?? 'tool'),
+              args: '',
+              titleArgs: null
+            })
+          }
+          const streaming = this.streamingToolCalls.get(index)
+          if (ame.type === 'toolcall_end') this.streamingToolCalls.delete(index)
 
-          const toolCallId = String((toolCall as any)?.id ?? '')
-          const toolName = String((toolCall as any)?.name ?? 'tool')
+          const toolCallId = String(toolCall?.id ?? streaming?.id ?? '')
+          const toolName = String(toolCall?.name ?? streaming?.name ?? 'tool')
           if (toolName === PLAN_TOOL) break
+
+          let titleArgs: Record<string, string> | undefined
+          if (!toolCall && streaming && ame.type === 'toolcall_delta') {
+            // One update when the file name or command arrives, not one per piece.
+            // ponytail: stops looking after 8 KB of arguments, so a path the model sends after a long
+            // `content` shows only when the call ends. Upgrade: a streaming JSON parser.
+            if (streaming.titleArgs || streaming.args.length > 8192) break
+            streaming.args += String(ame.delta ?? '')
+            const found = streamedTitleArgs(streaming.args)
+            if (!found) break
+            streaming.titleArgs = titleArgs = found
+          }
 
           if (toolCallId) {
             const rawInput =
-              (toolCall as any)?.arguments && typeof (toolCall as any).arguments === 'object'
-                ? (toolCall as any).arguments
-                : (() => {
-                    const s = String((toolCall as any)?.partialArgs ?? '')
-                    if (!s) return undefined
-                    try {
-                      return JSON.parse(s)
-                    } catch {
-                      return { partialArgs: s }
-                    }
-                  })()
+              toolCall?.arguments && typeof toolCall.arguments === 'object'
+                ? toolCall.arguments
+                : (titleArgs ?? streaming?.titleArgs ?? undefined)
 
             const locations = toToolCallLocations(toolName, rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
@@ -1552,12 +1578,13 @@ export class PiAcpSession {
                 rawInput
               })
             } else {
-              // Best-effort: keep rawInput updated while args are streaming.
               // Keep the existing status (pending or in_progress).
+              const title = toToolTitle(toolName, rawInput, this.cwd)
+              this.originalToolTitles.set(toolCallId, title)
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 status,
                 locations,
                 rawInput
@@ -1886,6 +1913,7 @@ export class PiAcpSession {
       case 'agent_start': {
         this.inAgentLoop = true
         this.agentRunError = ''
+        this.streamingToolCalls.clear()
         this.resetNarratedToolCallGate()
         break
       }
@@ -1918,6 +1946,7 @@ export class PiAcpSession {
         // Re-arm inference-startup mode: the model is about to receive tool results and
         // may take a while before it starts streaming the next response.
         this.inferenceStartup = true
+        this.compactedSinceLastStep = false
         // End of this model segment: tip /compact if it narrated tools, then reset for the next.
         this.flushNarratedToolCallGate()
         void this.pushUsageUpdate()
@@ -2314,6 +2343,22 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const reason = isNetworkError || !facing ? (isNetworkError ? 'Network error' : null) : truncateTitle(facing, 150)
   const prefix = reason ? `${reason} — r` : 'R'
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+}
+
+const TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g
+
+/** The arguments a tool card's title is made from, once the model has finished sending them, or null before that. */
+function streamedTitleArgs(json: string): Record<string, string> | null {
+  const args: Record<string, string> = {}
+  for (const [, key, raw] of json.matchAll(TITLE_ARG_PATTERN)) {
+    if (key in args) continue
+    try {
+      args[key] = JSON.parse(`"${raw}"`) as string
+    } catch {
+      // ignore
+    }
+  }
+  return Object.keys(args).length ? args : null
 }
 
 /** Truncate a string for display in tool titles. */

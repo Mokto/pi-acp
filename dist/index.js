@@ -335,6 +335,8 @@ var PiRpcProcess = class _PiRpcProcess {
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
     });
+    child.stdin.on("error", () => {
+    });
   }
   static async spawn(params) {
     const cmd = getPiCommand(params.piCommand);
@@ -379,8 +381,7 @@ var PiRpcProcess = class _PiRpcProcess {
       }
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e });
     }
-    child.stderr.on("data", () => {
-    });
+    child.stderr.pipe(process.stderr, { end: false });
     const proc2 = new _PiRpcProcess(child);
     try {
       const state = await proc2.getState();
@@ -600,7 +601,7 @@ function maybeAuthRequiredError(err) {
 }
 
 // src/acp/session-store.ts
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "fs";
+import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "fs";
 import { dirname as dirname2 } from "path";
 function ensureParentDir(path) {
   mkdirSync(dirname2(path), { recursive: true });
@@ -619,7 +620,9 @@ function loadFile(path) {
 }
 function saveFile(path, data) {
   ensureParentDir(path);
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  renameSync(tmp, path);
 }
 var SessionStore = class {
   path;
@@ -634,11 +637,11 @@ var SessionStore = class {
     const db = loadFile(this.path);
     const existing = db.sessions[entry.sessionId];
     db.sessions[entry.sessionId] = {
+      ...existing,
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      ...existing && "startBranch" in existing ? { startBranch: existing.startBranch } : {}
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     saveFile(this.path, db);
   }
@@ -654,6 +657,14 @@ var SessionStore = class {
     const existing = db.sessions[sessionId];
     if (!existing) return;
     existing.startBranch = branch;
+    saveFile(this.path, db);
+  }
+  /** Record the compaction size picked in a session. No-op if the session isn't registered yet. */
+  setCompactAt(sessionId, tokens) {
+    const db = loadFile(this.path);
+    const existing = db.sessions[sessionId];
+    if (!existing) return;
+    existing.compactAt = tokens;
     saveFile(this.path, db);
   }
   delete(sessionId) {
@@ -1110,24 +1121,20 @@ var THINKING_CONFIG_ID = "thinking";
 var COMPACT_AT_CONFIG_ID = "compact_at";
 var MODEL_LIMIT = "model_limit";
 var COMPACT_AT_SIZES = [2e5, 3e5, 4e5, 5e5];
-var compactAt = null;
-function pickCompactAt(value) {
+function parseCompactAt(value) {
   const tokens = Number(value);
-  compactAt = COMPACT_AT_SIZES.includes(tokens) ? tokens : null;
-}
-function compactAtTokens() {
-  return compactAt;
+  return COMPACT_AT_SIZES.includes(tokens) ? tokens : null;
 }
 function formatTokens2(tokens) {
   return tokens >= 1e6 ? `${Number((tokens / 1e6).toFixed(2))}M` : `${Math.round(tokens / 1e3)}k`;
 }
-function buildCompactAtOption(contextWindow) {
+function buildCompactAtOption(contextWindow, compactAt) {
   const sizes = COMPACT_AT_SIZES.filter((tokens) => !contextWindow || tokens < contextWindow);
   return {
     type: "select",
     id: COMPACT_AT_CONFIG_ID,
     name: "Compaction",
-    description: "When to summarize a long thread so the agent stays fast and cheap. Applies to every thread.",
+    description: "When to summarize a long thread so the agent stays fast and cheap. New threads start with your last pick.",
     currentValue: compactAt && sizes.includes(compactAt) ? String(compactAt) : MODEL_LIMIT,
     options: [
       ...sizes.length ? [
@@ -1155,10 +1162,33 @@ function buildCompactAtOption(contextWindow) {
     ]
   };
 }
-function buildSessionConfigOptions(models, thinking, usage = null) {
+var CONTEXT_SUFFIX = / @ \S+$/;
+function groupByProvider(models) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const m of models) {
+    const provider = m.modelId.split("/")[0] ?? "";
+    const heading = providerDisplayName(provider);
+    let group = groups.get(provider);
+    if (!group) groups.set(provider, group = { group: provider, name: heading, options: [] });
+    const prefix = `${heading} / `;
+    group.options.push({
+      value: m.modelId,
+      name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
+      description: m.description ?? null
+    });
+  }
+  for (const group of groups.values()) {
+    const short = group.options.map((o) => o.name.replace(CONTEXT_SUFFIX, ""));
+    group.options.forEach((o, i) => {
+      if (short.indexOf(short[i]) === short.lastIndexOf(short[i])) o.name = short[i];
+    });
+  }
+  return [...groups.values()];
+}
+function buildSessionConfigOptions(models, thinking, usage = null, compactAt = null) {
   const options = [];
   const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null));
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt));
   const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
   if (usageOption) options.push(usageOption);
   if (models && models.availableModels.length) {
@@ -1168,11 +1198,7 @@ function buildSessionConfigOptions(models, thinking, usage = null) {
       name: "Model",
       category: "model",
       currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
+      options: groupByProvider(models.availableModels)
     });
   }
   if (thinking.availableModes.length) {
@@ -1390,7 +1416,7 @@ var TimeoutError = class extends Error {
 
 // src/acp/background-compaction.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { join as join7 } from "path";
 function backgroundLead(limit) {
   return Math.min(32e3, Math.max(8e3, Math.round(limit * 0.125)));
@@ -1406,7 +1432,9 @@ var BackgroundCompaction = class {
   failed = false;
   shouldStart(tokens, limit) {
     if (this.running || this.failed || tokens < limit - backgroundLead(limit)) return false;
-    return !this.ready || tokens >= this.ready.maxTokensBefore;
+    if (!this.ready) return true;
+    if (tokens >= limit) return tokens >= this.ready.maxTokensBefore;
+    return tokens >= this.ready.refreshAt;
   }
   start(session, tokens, limit) {
     const generation = ++this.generation;
@@ -1419,7 +1447,9 @@ var BackgroundCompaction = class {
       }
     });
   }
-  async wait() {
+  /** Resolves at once if the ready summary still works for a thread of `tokens`, else when the summary being written is done. */
+  async untilUsable(tokens) {
+    if (this.ready && tokens < this.ready.maxTokensBefore) return;
     await this.running;
   }
   async discard() {
@@ -1438,6 +1468,7 @@ var BackgroundCompaction = class {
     await mkdir(dir, { recursive: true, mode: 448 });
     await chmod(dir, 448);
     const copy = join7(dir, `${randomUUID2()}.jsonl`);
+    const partial = join7(dir, `${randomUUID2()}.json.tmp`);
     const text = await readFile(file, "utf8");
     try {
       await writeFile(copy, text.slice(0, text.lastIndexOf("\n") + 1), { mode: 384 });
@@ -1456,17 +1487,21 @@ var BackgroundCompaction = class {
       const handoff = join7(dir, `${id}.json`);
       const { summary, firstKeptEntryId, details, usage } = result;
       const tokensAfter = typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : 0;
-      const maxTokensBefore = tokens + limit / 4 - tokensAfter;
-      await writeFile(handoff, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
+      const refreshAt = tokens + limit / 4 - tokensAfter;
+      const maxTokensBefore = tokens + limit / 2 - tokensAfter;
+      await writeFile(partial, JSON.stringify({ summary, firstKeptEntryId, details, usage, maxTokensBefore }), {
         mode: 384
       });
+      if (this.generation !== generation) return;
+      await rename(partial, handoff);
       if (this.generation !== generation) {
         await rm(handoff, { force: true });
         return;
       }
-      this.ready = { maxTokensBefore, file: handoff };
+      this.ready = { refreshAt, maxTokensBefore, file: handoff };
     } finally {
       await rm(copy, { force: true });
+      await rm(partial, { force: true });
     }
   }
 };
@@ -1621,9 +1656,6 @@ var SessionManager = class {
   pushConfigOptionUpdates() {
     for (const s of this.sessions.values()) void s.pushConfigOptionUpdate();
   }
-  compactAtPicked() {
-    for (const s of this.sessions.values()) s.compactAtPicked();
-  }
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId) {
     return this.sessions.get(sessionId);
@@ -1716,9 +1748,6 @@ var SessionManager = class {
     this.live?.remove(sessionId);
   }
 };
-function ringSize(contextWindow) {
-  return Math.min(contextWindow, compactAtTokens() ?? contextWindow);
-}
 var PiAcpSession = class _PiAcpSession {
   sessionId;
   cwd;
@@ -1736,6 +1765,9 @@ var PiAcpSession = class _PiAcpSession {
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
   compactAfterReplyFailed = false;
+  compactAtPick = null;
+  // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
+  compactedSinceLastStep = false;
   background;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -1837,6 +1869,8 @@ var PiAcpSession = class _PiAcpSession {
   // Tracks synthetic tool call IDs emitted for subagent child tool calls.
   // Key: `${parentToolCallId}__${subagentCallId}` → syntheticToolCallId
   subagentToolCalls = /* @__PURE__ */ new Map();
+  // Tool calls the model is still writing, by content index: pi sends only their id and name, then argument text in pieces.
+  streamingToolCalls = /* @__PURE__ */ new Map();
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   lastEmit = Promise.resolve();
@@ -1851,6 +1885,7 @@ var PiAcpSession = class _PiAcpSession {
     this.conn = opts.conn;
     this.fileCommands = opts.fileCommands ?? [];
     this.store = opts.store ?? null;
+    this.compactAtPick = parseCompactAt(String(this.store?.get(this.sessionId)?.compactAt));
     this.onDead = opts.onDead ?? null;
     this.compactionEntries = opts.compactionEntries ?? false;
     this.notices = opts.notices ?? false;
@@ -2039,6 +2074,7 @@ var PiAcpSession = class _PiAcpSession {
     if (state.status === "failed" && this.compactionAfterReply) this.compactAfterReplyFailed = true;
     if (state.status !== "completed") return;
     this.compactAfterReplyFailed = false;
+    this.compactedSinceLastStep = true;
     this.peakContextTokens = 0;
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== "false")
       this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow);
@@ -2354,7 +2390,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     });
   }
   shouldCompactAfterReply(reason) {
-    const limit = compactAtTokens();
+    const limit = this.compactAtPick;
     return reason === "end_turn" && !this.pendingTurn && !this.turnQueue.length && limit !== null && this.peakContextTokens >= limit && !this.compactAfterReplyFailed;
   }
   /** Runs while the user reads the reply; a prompt sent meanwhile waits in the turn queue. */
@@ -2365,7 +2401,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     };
     this.startCompaction();
     this.compactionAfterReply = (async () => {
-      await this.background.wait();
+      await this.background.untilUsable(this.peakContextTokens);
       if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }));
     })().catch((err) => finishIfPiDidNot({ status: "failed", error: err instanceof Error ? err.message : String(err) }));
@@ -2492,13 +2528,23 @@ ${message}` }
   // know the model's window or has no post-compaction count yet.
   emitUsageUpdate(tokens, contextWindow) {
     if (!tokens || !contextWindow) return;
-    this.emit({ sessionUpdate: "usage_update", used: tokens, size: ringSize(contextWindow) });
+    this.emit({ sessionUpdate: "usage_update", used: tokens, size: this.ringSize(contextWindow) });
   }
-  /** A new pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
-  compactAtPicked() {
+  /** Context size at which a finished reply compacts this thread, or null to leave it to pi. */
+  get compactAt() {
+    return this.compactAtPick;
+  }
+  /** A pick re-arms after-reply compaction in a thread where it failed, and resizes the ring. */
+  setCompactAt(value) {
+    this.compactAtPick = parseCompactAt(value);
+    this.store?.setCompactAt(this.sessionId, this.compactAtPick);
     this.compactAfterReplyFailed = false;
     void this.background.discard();
     void this.pushUsageUpdate();
+  }
+  /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
+  ringSize(contextWindow) {
+    return Math.min(contextWindow, this.compactAtPick ?? contextWindow);
   }
   /** Refreshes the context ring outside turn ends: after each model step, on a reopened thread and after a model switch. */
   async pushUsageUpdate(estimatedTokens) {
@@ -2514,7 +2560,7 @@ ${message}` }
     const raw = stats?.contextUsage;
     const cu = raw && typeof raw === "object" ? raw : {};
     if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
-    const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
+    const tokens = typeof cu.tokens === "number" && !this.compactedSinceLastStep ? cu.tokens : null;
     if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens);
     this.maybeStartBackgroundCompaction();
     return {
@@ -2524,7 +2570,7 @@ ${message}` }
     };
   }
   maybeStartBackgroundCompaction() {
-    const picked = compactAtTokens();
+    const picked = this.compactAtPick;
     const piCompactsAt = this.contextWindow ? getAutoCompactionPoint(this.cwd, this.contextWindow) : null;
     const limit = Math.min(picked ?? Infinity, piCompactsAt ?? Infinity);
     if (limit === Infinity || this.compactAfterReplyFailed || this.compactionAfterReply) return;
@@ -2568,7 +2614,7 @@ ${message}` }
     if (displayTokens !== null && displayTokens > 0) {
       parts.push(`${displayTokens.toLocaleString()} tokens`);
       if (contextWindow) {
-        const percent = displayTokens / ringSize(contextWindow) * 100;
+        const percent = displayTokens / this.ringSize(contextWindow) * 100;
         parts.push(`${Math.round(percent * 10) / 10}%`);
       }
     }
@@ -2618,24 +2664,31 @@ ${message}` }
           this.markStructuredToolCall();
         }
         if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
-          const toolCall = (
-            // pi sometimes includes the tool call directly on the event
-            ame?.toolCall ?? // ...and always includes it in the partial assistant message at contentIndex
-            ame?.partial?.content?.[ame?.contentIndex ?? 0]
-          );
-          const toolCallId = String(toolCall?.id ?? "");
-          const toolName = String(toolCall?.name ?? "tool");
+          const index = Number(ame.contentIndex ?? 0);
+          const toolCall = ame.toolCall ?? ame.partial?.content?.[index];
+          if (!toolCall && ame.type === "toolcall_start") {
+            this.streamingToolCalls.set(index, {
+              id: String(ame.id ?? ""),
+              name: String(ame.toolName ?? "tool"),
+              args: "",
+              titleArgs: null
+            });
+          }
+          const streaming = this.streamingToolCalls.get(index);
+          if (ame.type === "toolcall_end") this.streamingToolCalls.delete(index);
+          const toolCallId = String(toolCall?.id ?? streaming?.id ?? "");
+          const toolName = String(toolCall?.name ?? streaming?.name ?? "tool");
           if (toolName === PLAN_TOOL) break;
+          let titleArgs;
+          if (!toolCall && streaming && ame.type === "toolcall_delta") {
+            if (streaming.titleArgs || streaming.args.length > 8192) break;
+            streaming.args += String(ame.delta ?? "");
+            const found = streamedTitleArgs(streaming.args);
+            if (!found) break;
+            streaming.titleArgs = titleArgs = found;
+          }
           if (toolCallId) {
-            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : (() => {
-              const s = String(toolCall?.partialArgs ?? "");
-              if (!s) return void 0;
-              try {
-                return JSON.parse(s);
-              } catch {
-                return { partialArgs: s };
-              }
-            })();
+            const rawInput = toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : titleArgs ?? streaming?.titleArgs ?? void 0;
             const locations = toToolCallLocations(toolName, rawInput, this.cwd);
             const existingStatus = this.currentToolCalls.get(toolCallId);
             const status = existingStatus ?? "pending";
@@ -2664,10 +2717,12 @@ ${message}` }
                 rawInput
               });
             } else {
+              const title = toToolTitle(toolName, rawInput, this.cwd);
+              this.originalToolTitles.set(toolCallId, title);
               this.emit({
                 sessionUpdate: "tool_call_update",
                 toolCallId,
-                title: toToolTitle(toolName, rawInput, this.cwd),
+                title,
                 status,
                 locations,
                 rawInput
@@ -2938,6 +2993,7 @@ ${formatAutoRetryMessage(ev)}` }
       case "agent_start": {
         this.inAgentLoop = true;
         this.agentRunError = "";
+        this.streamingToolCalls.clear();
         this.resetNarratedToolCallGate();
         break;
       }
@@ -2959,6 +3015,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "turn_end": {
         this.inferenceStartup = true;
+        this.compactedSinceLastStep = false;
         this.flushNarratedToolCallGate();
         void this.pushUsageUpdate();
         if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
@@ -3264,6 +3321,18 @@ function formatAutoRetryMessage(ev) {
   const prefix = reason ? `${reason} \u2014 r` : "R";
   return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
 }
+var TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+function streamedTitleArgs(json) {
+  const args = {};
+  for (const [, key, raw] of json.matchAll(TITLE_ARG_PATTERN)) {
+    if (key in args) continue;
+    try {
+      args[key] = JSON.parse(`"${raw}"`);
+    } catch {
+    }
+  }
+  return Object.keys(args).length ? args : null;
+}
 function truncateTitle(s, max = 60) {
   return s.length <= max ? s : `${s.slice(0, max)}\u2026`;
 }
@@ -3566,10 +3635,18 @@ function listPiSessions() {
   });
   return items;
 }
+function findPiSession(sessionId) {
+  const files = [];
+  walkJsonlFiles(getPiSessionsDir(), files);
+  for (const file of files) {
+    const first = readFirstLine(file);
+    const header = first ? parseSessionHeader(first) : null;
+    if (header?.sessionId === sessionId) return { sessionFile: file, cwd: header.cwd };
+  }
+  return null;
+}
 function findPiSessionFile(sessionId) {
-  const all = listPiSessions();
-  const found = all.find((s) => s.sessionId === sessionId);
-  return found?.sessionFile ?? null;
+  return findPiSession(sessionId)?.sessionFile ?? null;
 }
 
 // src/acp/translate/pi-messages.ts
@@ -3800,7 +3877,7 @@ import {
   mkdirSync as mkdirSync3,
   readdirSync as readdirSync4,
   readFileSync as readFileSync8,
-  renameSync,
+  renameSync as renameSync2,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
@@ -3962,7 +4039,7 @@ var LiveServer = class {
     const tmp = `${this.registryPath}.tmp`;
     try {
       writeFileSync3(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
-      renameSync(tmp, this.registryPath);
+      renameSync2(tmp, this.registryPath);
       chmodSync(this.registryPath, 384);
     } catch {
       try {
@@ -4254,7 +4331,7 @@ var PiAcpAgent = class {
     const existing = this.sessions.maybeGet(sessionId);
     if (existing && !existing.proc.exited) return existing;
     if (existing) this.sessions.close(sessionId);
-    const stored = this.store.get(sessionId);
+    const stored = this.store.get(sessionId) ?? findPiSession(sessionId);
     if (!stored?.sessionFile) {
       throw RequestError3.invalidParams(`Unknown sessionId: ${sessionId}`);
     }
@@ -4285,7 +4362,8 @@ var PiAcpAgent = class {
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     this.store.upsert({
@@ -4421,7 +4499,8 @@ var PiAcpAgent = class {
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     const quietStartup = getQuietStartup(params.cwd);
@@ -4436,7 +4515,7 @@ var PiAcpAgent = class {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -4636,7 +4715,7 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       });
     } catch (e) {
@@ -4683,7 +4762,7 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       });
     } catch (e) {
@@ -5277,13 +5356,14 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
       async () => buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     );
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -5333,16 +5413,18 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         this.sessions.pushConfigOptionUpdates();
         break;
       case COMPACT_AT_CONFIG_ID:
-        pickCompactAt(String(params.value));
-        this.sessions.pushConfigOptionUpdates();
-        this.sessions.compactAtPicked();
+        session.setCompactAt(String(params.value));
         break;
       default:
         throw RequestError3.invalidParams(`Unknown configId: ${params.configId}`);
     }
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
-    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) };
+    return {
+      configOptions: session.withDeferredConfig(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      )
+    };
   }
   async setSessionMode(params) {
     const session = await this.autoRestoreSession(params.sessionId);

@@ -819,6 +819,49 @@ test('PiAcpSession: emits streamed tool locations from pi path args', async () =
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: '/tmp/test.txt' }])
 })
 
+test('PiAcpSession: shows a tool card as soon as pi starts streaming the call, and names its file once, when the path arrives', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-streaming-card-'))
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd,
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const update = (assistantMessageEvent: Record<string, unknown>) =>
+    proc.emit({ type: 'message_update', assistantMessageEvent })
+  update({ type: 'toolcall_start', contentIndex: 1, id: 't1', toolName: 'write' })
+  for (const delta of ['{"pa', 'th": "no', 'tes.md", "content": "a \\"path\\": \\"x\\"', ' more', ' text"}'])
+    update({ type: 'toolcall_delta', contentIndex: 1, delta })
+  await new Promise(r => setTimeout(r, 0))
+
+  const cards = conn.updates.map(u => u.update as any)
+  assert.deepEqual(
+    cards.map(u => [u.sessionUpdate, u.status, u.title]),
+    [
+      ['tool_call', 'pending', 'Write'],
+      ['tool_call_update', 'pending', 'Write notes.md']
+    ]
+  )
+  assert.deepEqual(cards[1].locations, [{ path: join(cwd, 'notes.md') }])
+
+  update({
+    type: 'toolcall_end',
+    contentIndex: 1,
+    toolCall: { id: 't1', name: 'write', arguments: { path: 'notes.md', content: 'a "path": "x" more text' } }
+  })
+  await new Promise(r => setTimeout(r, 0))
+  assert.deepEqual((conn.updates.at(-1)!.update as any).rawInput, {
+    path: 'notes.md',
+    content: 'a "path": "x" more text'
+  })
+})
+
 test('PiAcpSession: emits edit tool line when oldText matches uniquely', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

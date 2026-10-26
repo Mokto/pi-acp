@@ -323,8 +323,18 @@ export function listPiSessions(): PiSessionListItem[] {
   return items
 }
 
+/** Reads only each file's first line: `listPiSessions` also reads every file's end, which takes seconds with thousands of sessions. */
+export function findPiSession(sessionId: string): { sessionFile: string; cwd: string } | null {
+  const files: string[] = []
+  walkJsonlFiles(getPiSessionsDir(), files)
+  for (const file of files) {
+    const first = readFirstLine(file)
+    const header = first ? parseSessionHeader(first) : null
+    if (header?.sessionId === sessionId) return { sessionFile: file, cwd: header.cwd }
+  }
+  return null
+}
+
 export function findPiSessionFile(sessionId: string): string | null {
-  const all = listPiSessions()
-  const found = all.find(s => s.sessionId === sessionId)
-  return found?.sessionFile ?? null
+  return findPiSession(sessionId)?.sessionFile ?? null
 }

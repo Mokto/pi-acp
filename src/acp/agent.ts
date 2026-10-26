@@ -39,7 +39,7 @@ import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } fr
 import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
-import { listPiSessions, findPiSessionFile } from './pi-sessions.js'
+import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -58,7 +58,6 @@ import {
   buildSessionConfigOptions,
   COMPACT_AT_CONFIG_ID,
   MODEL_CONFIG_ID,
-  pickCompactAt,
   THINKING_CONFIG_ID
 } from './translate/config-options.js'
 import { buildPlanUsageOption, PLAN_USAGE_CONFIG_ID, pickPlanUsageRow, readPlanUsage } from './translate/plan-usage.js'
@@ -262,7 +261,7 @@ export class PiAcpAgent implements ACPAgent {
     if (existing && !existing.proc.exited) return existing
     if (existing) this.sessions.close(sessionId)
 
-    const stored = this.store.get(sessionId)
+    const stored = this.store.get(sessionId) ?? findPiSession(sessionId)
     if (!stored?.sessionFile) {
       throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
     }
@@ -295,7 +294,8 @@ export class PiAcpAgent implements ACPAgent {
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: stored.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     )
 
@@ -474,7 +474,8 @@ export class PiAcpAgent implements ACPAgent {
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     )
 
@@ -498,7 +499,7 @@ export class PiAcpAgent implements ACPAgent {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -760,7 +761,7 @@ export class PiAcpAgent implements ACPAgent {
         sessionId,
         update: {
           sessionUpdate: 'config_option_update',
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       })
     } catch (e) {
@@ -813,7 +814,7 @@ export class PiAcpAgent implements ACPAgent {
         sessionId,
         update: {
           sessionUpdate: 'config_option_update',
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage())
+          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
         }
       })
     } catch (e) {
@@ -1536,14 +1537,15 @@ export class PiAcpAgent implements ACPAgent {
       buildSessionConfigOptions(
         await getModelState(session.proc, { cwd: params.cwd }),
         await getThinkingState(session.proc),
-        readPlanUsage()
+        readPlanUsage(),
+        session.compactAt
       )
     )
 
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage()),
+      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -1603,9 +1605,7 @@ export class PiAcpAgent implements ACPAgent {
         this.sessions.pushConfigOptionUpdates()
         break
       case COMPACT_AT_CONFIG_ID:
-        pickCompactAt(String(params.value))
-        this.sessions.pushConfigOptionUpdates()
-        this.sessions.compactAtPicked()
+        session.setCompactAt(String(params.value))
         break
       default:
         throw RequestError.invalidParams(`Unknown configId: ${params.configId}`)
@@ -1613,7 +1613,11 @@ export class PiAcpAgent implements ACPAgent {
 
     const models = await getModelState(session.proc, { cwd: session.cwd })
     const thinking = await getThinkingState(session.proc)
-    return { configOptions: session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage())) }
+    return {
+      configOptions: session.withDeferredConfig(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      )
+    }
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {

@@ -1,5 +1,6 @@
-import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import type { SessionConfigOption, SessionConfigSelectGroup } from '@agentclientprotocol/sdk'
 import { buildPlanUsageOption, type PlanUsage } from './plan-usage.js'
+import { providerDisplayName } from './provider-name.js'
 
 // Config option ids the adapter advertises. These double as the `configId` the
 // client sends back via `session/set_config_option`.
@@ -9,17 +10,14 @@ export const COMPACT_AT_CONFIG_ID = 'compact_at'
 
 const MODEL_LIMIT = 'model_limit'
 const COMPACT_AT_SIZES = [200_000, 300_000, 400_000, 500_000]
-let compactAt: number | null = null
 
-/** Zed replays saved picks into new sessions, so an unknown or stale value falls back to pi's default. */
-export function pickCompactAt(value: string): void {
+/**
+ * Context size at which a finished reply triggers a compaction, or null to leave it to pi.
+ * Zed replays saved picks into new sessions, so an unknown or stale value falls back to pi's default.
+ */
+export function parseCompactAt(value: string): number | null {
   const tokens = Number(value)
-  compactAt = COMPACT_AT_SIZES.includes(tokens) ? tokens : null
-}
-
-/** Context size at which a finished reply triggers a compaction, or null to leave it to pi. */
-export function compactAtTokens(): number | null {
-  return compactAt
+  return COMPACT_AT_SIZES.includes(tokens) ? tokens : null
 }
 
 function formatTokens(tokens: number): string {
@@ -27,13 +25,14 @@ function formatTokens(tokens: number): string {
 }
 
 /** Sizes the current model can't reach are left out, and the button then shows what happens instead: the model's limit. */
-function buildCompactAtOption(contextWindow: number | null): SessionConfigOption {
+function buildCompactAtOption(contextWindow: number | null, compactAt: number | null): SessionConfigOption {
   const sizes = COMPACT_AT_SIZES.filter(tokens => !contextWindow || tokens < contextWindow)
   return {
     type: 'select',
     id: COMPACT_AT_CONFIG_ID,
     name: 'Compaction',
-    description: 'When to summarize a long thread so the agent stays fast and cheap. Applies to every thread.',
+    description:
+      'When to summarize a long thread so the agent stays fast and cheap. New threads start with your last pick.',
     currentValue: compactAt && sizes.includes(compactAt) ? String(compactAt) : MODEL_LIMIT,
     options: [
       ...(sizes.length
@@ -81,15 +80,45 @@ export type ConfigThinkingState = {
   currentModeId: string
 }
 
+const CONTEXT_SUFFIX = / @ \S+$/
+
+/**
+ * Puts the provider in a heading so the button shows only the model. Zed's search matches option names, not headings.
+ * The Compaction button shows the context window, so pi-cursor-sdk's " @ 256k" is dropped unless two rows would then match.
+ */
+function groupByProvider(models: NonNullable<ConfigModelState>['availableModels']) {
+  const groups = new Map<string, SessionConfigSelectGroup>()
+  for (const m of models) {
+    const provider = m.modelId.split('/')[0] ?? ''
+    const heading = providerDisplayName(provider)
+    let group = groups.get(provider)
+    if (!group) groups.set(provider, (group = { group: provider, name: heading, options: [] }))
+    const prefix = `${heading} / `
+    group.options.push({
+      value: m.modelId,
+      name: m.name.startsWith(prefix) ? m.name.slice(prefix.length) : m.name,
+      description: m.description ?? null
+    })
+  }
+  for (const group of groups.values()) {
+    const short = group.options.map(o => o.name.replace(CONTEXT_SUFFIX, ''))
+    group.options.forEach((o, i) => {
+      if (short.indexOf(short[i]) === short.lastIndexOf(short[i])) o.name = short[i]
+    })
+  }
+  return [...groups.values()]
+}
+
 export function buildSessionConfigOptions(
   models: ConfigModelState,
   thinking: ConfigThinkingState,
-  usage: PlanUsage | null = null
+  usage: PlanUsage | null = null,
+  compactAt: number | null = null
 ): SessionConfigOption[] {
   const options: SessionConfigOption[] = []
 
   const currentModel = models?.availableModels.find(m => m.modelId === models.currentModelId)
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null))
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt))
   const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split('/')[0] ?? null)
   if (usageOption) options.push(usageOption)
 
@@ -100,11 +129,7 @@ export function buildSessionConfigOptions(
       name: 'Model',
       category: 'model',
       currentValue: models.currentModelId,
-      options: models.availableModels.map(m => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? null
-      }))
+      options: groupByProvider(models.availableModels)
     })
   }
 

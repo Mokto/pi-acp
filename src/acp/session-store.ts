@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { getPiAcpSessionMapPath } from './paths.js'
 
@@ -14,6 +14,8 @@ export type StoredSession = {
   // Absent = not yet captured; null = captured but branch was undetectable
   // (e.g. detached HEAD).
   startBranch?: string | null
+  // Compaction size picked in this thread; null = Model limit. Absent = never picked.
+  compactAt?: number | null
 }
 
 type SessionMapFile = {
@@ -40,7 +42,11 @@ function loadFile(path: string): SessionMapFile {
 
 function saveFile(path: string, data: SessionMapFile): void {
   ensureParentDir(path)
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+  // Every pi-acp process rewrites this file, and loadFile reads one it can't parse as empty, so
+  // a half-written map seen by another process would be saved back with only one entry.
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+  renameSync(tmp, path)
 }
 
 export class SessionStore {
@@ -59,11 +65,11 @@ export class SessionStore {
     const db = loadFile(this.path)
     const existing = db.sessions[entry.sessionId]
     db.sessions[entry.sessionId] = {
+      ...existing,
       sessionId: entry.sessionId,
       cwd: entry.cwd,
       sessionFile: entry.sessionFile,
-      updatedAt: new Date().toISOString(),
-      ...(existing && 'startBranch' in existing ? { startBranch: existing.startBranch } : {})
+      updatedAt: new Date().toISOString()
     }
     saveFile(this.path, db)
   }
@@ -81,6 +87,15 @@ export class SessionStore {
     const existing = db.sessions[sessionId]
     if (!existing) return
     existing.startBranch = branch
+    saveFile(this.path, db)
+  }
+
+  /** Record the compaction size picked in a session. No-op if the session isn't registered yet. */
+  setCompactAt(sessionId: string, tokens: number | null): void {
+    const db = loadFile(this.path)
+    const existing = db.sessions[sessionId]
+    if (!existing) return
+    existing.compactAt = tokens
     saveFile(this.path, db)
   }
 
