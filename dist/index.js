@@ -1757,6 +1757,8 @@ var PiAcpSession = class _PiAcpSession {
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
   compactAfterReplyFailed = false;
+  // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
+  compactedSinceLastStep = false;
   background;
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -2060,6 +2062,7 @@ var PiAcpSession = class _PiAcpSession {
     if (state.status === "failed" && this.compactionAfterReply) this.compactAfterReplyFailed = true;
     if (state.status !== "completed") return;
     this.compactAfterReplyFailed = false;
+    this.compactedSinceLastStep = true;
     this.peakContextTokens = 0;
     if (process.env.PI_ACP_SHOW_TOKEN_USAGE !== "false")
       this.emitUsageUpdate(state.tokensAfter ?? null, this.contextWindow);
@@ -2535,7 +2538,7 @@ ${message}` }
     const raw = stats?.contextUsage;
     const cu = raw && typeof raw === "object" ? raw : {};
     if (typeof cu.contextWindow === "number") this.contextWindow = cu.contextWindow;
-    const tokens = typeof cu.tokens === "number" ? cu.tokens : null;
+    const tokens = typeof cu.tokens === "number" && !this.compactedSinceLastStep ? cu.tokens : null;
     if (tokens !== null && tokens > 0) this.peakContextTokens = Math.max(this.peakContextTokens, tokens);
     this.maybeStartBackgroundCompaction();
     return {
@@ -2980,6 +2983,7 @@ ${formatAutoRetryMessage(ev)}` }
       }
       case "turn_end": {
         this.inferenceStartup = true;
+        this.compactedSinceLastStep = false;
         this.flushNarratedToolCallGate();
         void this.pushUsageUpdate();
         if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
