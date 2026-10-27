@@ -173,7 +173,10 @@ test('plan usage: a provider not updated for a week drops out; nothing left hide
 test('plan usage: one file per provider is read from disk and listed right after the compaction size', () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'plan-usage-')), 'plan-usage')
   mkdirSync(dir)
-  writeFileSync(join(dir, 'anthropic.json'), JSON.stringify(usage.anthropic))
+  writeFileSync(
+    join(dir, 'anthropic.json'),
+    JSON.stringify({ ...usage.anthropic, updatedAt: new Date().toISOString() })
+  )
   writeFileSync(join(dir, 'broken.json'), '{')
   const read = readPlanUsage(dir)
   assert.deepEqual(Object.keys(read ?? {}), ['anthropic'])

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,6 +12,7 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 import type { SummaryWriter } from '../../src/acp/background-compaction.js'
 import { SessionStore } from '../../src/acp/session-store.js'
 import { until } from '../helpers/until.js'
+import { getPiAcpCompactionDir } from '../../src/acp/paths.js'
 
 const SUMMARY = '## Goal\nShip the compaction entry.'
 const END_OK = {
@@ -496,35 +497,42 @@ test("compaction: on Model limit, the summary is written in the background befor
   }
 })
 
-test('compaction: Stop while the background summary is still being written skips the compaction', async () => {
+test('compaction: Stop while the background summary is still being written skips the compaction but keeps the summary', async () => {
   const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
-  writeFileSync(sessionFile, '{"type":"session"}\n')
-  let stopWriter: (e: Error) => void = () => {}
-  let stopped = false
-  let writerStarted = false
+  writeFileSync(sessionFile, '{"type":"session","id":"e1"}\n')
+  const sessionId = `bg-${Date.now()}`
+  let finishWriter: (result: unknown) => void = () => {}
+  let writers = 0
   const { proc, s, updates } = session(true, async () => ({
     compact: () => {
-      writerStarted = true
-      return new Promise((_, reject) => (stopWriter = reject))
+      writers += 1
+      return new Promise(resolve => (finishWriter = resolve))
     },
-    dispose: () => {
-      stopped = true
-      stopWriter(new Error('stopped'))
-    }
+    dispose: () => {}
   }))
-  proc.getState = async () => ({ sessionFile, sessionId: `bg-${Date.now()}` })
-  s.setCompactAt('300000')
-  await finishReply(s, proc, 280_000)
-  await until(() => writerStarted)
-  await finishReply(s, proc, 305_000)
-  const queued = s.prompt('next')
-  await s.cancel()
-  assert.equal(await queued, 'cancelled')
-  await until(() => stopped)
-  await new Promise(r => setTimeout(r, 20))
-  assert.equal(proc.compactCalls, 0)
-  assert.deepEqual(
-    (await updates()).filter(u => u.sessionUpdate === 'compaction_update').map(u => u.status),
-    ['in_progress', 'cancelled']
-  )
+  proc.getState = async () => ({ sessionFile, sessionId })
+  try {
+    s.setCompactAt('300000')
+    await finishReply(s, proc, 280_000)
+    await until(() => writers > 0)
+    await finishReply(s, proc, 305_000)
+    const queued = s.prompt('next')
+    await s.cancel()
+    assert.equal(await queued, 'cancelled')
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(proc.compactCalls, 0)
+    assert.deepEqual(
+      (await updates()).filter(u => u.sessionUpdate === 'compaction_update').map(u => u.status),
+      ['in_progress', 'cancelled']
+    )
+
+    finishWriter({ summary: SUMMARY, firstKeptEntryId: 'e1', estimatedTokensAfter: 30_000 })
+    const handoff = join(getPiAcpCompactionDir(), `${sessionId}.json`)
+    await until(() => existsSync(handoff))
+    await finishReply(s, proc, 306_000)
+    assert.equal(proc.compactCalls, 1, 'the next reply over the size compacts with the kept summary')
+    assert.equal(writers, 1, 'without writing it again')
+  } finally {
+    s.markClosed()
+  }
 })

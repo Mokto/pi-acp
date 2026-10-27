@@ -375,6 +375,7 @@ export class PiAcpSession {
   private compactionId: string | null = null
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
+  private stopWaitingForSummary: (() => void) | null = null
   private compactAfterReplyFailed = false
   private compactAtPick: number | null = null
   // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
@@ -686,7 +687,7 @@ export class PiAcpSession {
       })
     }
 
-    if (this.compactionAfterReply) void this.background.discard()
+    this.stopWaitingForSummary?.()
     // Abort the currently running turn (if any). If nothing is running, this is a no-op.
     await this.proc.abort()
   }
@@ -778,7 +779,8 @@ export class PiAcpSession {
   }
 
   finishCompaction(state: CompactionState): void {
-    void this.background.discard()
+    // A cancelled compaction left the thread as it was, so the summary written for it still fits.
+    if (state.status !== 'cancelled') void this.background.discard()
     const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`
     this.compactionId = null
     this.compactionsFinishedCount += 1
@@ -1206,7 +1208,11 @@ export class PiAcpSession {
     // Shown now, not at pi's compaction_start: a summary still being written can take a while.
     this.startCompaction()
     this.compactionAfterReply = (async () => {
-      await this.background.untilUsable(this.peakContextTokens)
+      await Promise.race([
+        this.background.untilUsable(this.peakContextTokens),
+        new Promise<void>(resolve => (this.stopWaitingForSummary = resolve))
+      ])
+      this.stopWaitingForSummary = null
       if (this.cancelRequested) return finishIfPiDidNot({ status: 'cancelled' })
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }))
     })().catch(err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) }))

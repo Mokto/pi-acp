@@ -1764,6 +1764,7 @@ var PiAcpSession = class _PiAcpSession {
   compactionId = null;
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
+  stopWaitingForSummary = null;
   compactAfterReplyFailed = false;
   compactAtPick = null;
   // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
@@ -1992,7 +1993,7 @@ var PiAcpSession = class _PiAcpSession {
         _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
       });
     }
-    if (this.compactionAfterReply) void this.background.discard();
+    this.stopWaitingForSummary?.();
     await this.proc.abort();
   }
   wasCancelRequested() {
@@ -2066,7 +2067,7 @@ var PiAcpSession = class _PiAcpSession {
     this.emit(compactionUpdate(this.compactionId, { status: "in_progress" }, this.compactionEntries));
   }
   finishCompaction(state) {
-    void this.background.discard();
+    if (state.status !== "cancelled") void this.background.discard();
     const id = this.compactionId ?? `compaction-${crypto.randomUUID()}`;
     this.compactionId = null;
     this.compactionsFinishedCount += 1;
@@ -2401,7 +2402,11 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     };
     this.startCompaction();
     this.compactionAfterReply = (async () => {
-      await this.background.untilUsable(this.peakContextTokens);
+      await Promise.race([
+        this.background.untilUsable(this.peakContextTokens),
+        new Promise((resolve4) => this.stopWaitingForSummary = resolve4)
+      ]);
+      this.stopWaitingForSummary = null;
       if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }));
     })().catch((err) => finishIfPiDidNot({ status: "failed", error: err instanceof Error ? err.message : String(err) }));
