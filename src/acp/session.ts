@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import type { SparePi } from '../pi-rpc/spare.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { snapshotImageMarkdown, toolResultToText } from './translate/pi-tools.js'
@@ -235,9 +236,11 @@ export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
   private readonly live: LiveSessionBridge | null
+  private readonly spare: SparePi | null
 
-  constructor(opts?: { live?: LiveSessionBridge | null }) {
+  constructor(opts?: { live?: LiveSessionBridge | null; spare?: SparePi | null }) {
     this.live = opts?.live ?? null
+    this.spare = opts?.spare ?? null
   }
 
   /** Dispose all sessions and their underlying pi subprocesses. */
@@ -274,12 +277,14 @@ export class SessionManager {
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
-    let proc: PiRpcProcess
+    let proc: PiRpcProcess | null = await (this.spare?.take(params.cwd, params.piCommand)?.catch(() => null) ?? null)
     try {
-      proc = await PiRpcProcess.spawn({
-        cwd: params.cwd,
-        piCommand: params.piCommand
-      })
+      if (!proc || proc.exited) {
+        proc = await PiRpcProcess.spawn({
+          cwd: params.cwd,
+          piCommand: params.piCommand
+        })
+      }
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)

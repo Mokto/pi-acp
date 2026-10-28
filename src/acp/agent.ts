@@ -39,6 +39,7 @@ import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } fr
 import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
+import { SparePi } from '../pi-rpc/spare.js'
 import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
@@ -222,6 +223,7 @@ export class PiAcpAgent implements ACPAgent {
   private readonly sessions: SessionManager
   private readonly store = new SessionStore()
   private readonly live: LiveServer | null
+  private readonly spare = new SparePi()
   private lastPlanUsage = 'null'
   private readonly planUsageTimer = setInterval(() => {
     try {
@@ -236,6 +238,7 @@ export class PiAcpAgent implements ACPAgent {
 
   dispose(): void {
     clearInterval(this.planUsageTimer)
+    this.spare.dispose()
     this.sessions.disposeAll()
     this.live?.dispose()
   }
@@ -312,7 +315,7 @@ export class PiAcpAgent implements ACPAgent {
     this.conn = conn
     void _config
     this.live = isLiveEnabled() ? new LiveServer() : null
-    this.sessions = new SessionManager({ live: this.live })
+    this.sessions = new SessionManager({ live: this.live, spare: this.spare })
     if (this.live) {
       void this.live.start().catch(err => {
         const message = err instanceof Error ? err.message : String(err)
@@ -517,6 +520,7 @@ export class PiAcpAgent implements ACPAgent {
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands)
       session.replayEarlyEvents()
+      this.spare.warm(params.cwd, process.env.PI_ACP_PI_COMMAND)
     }, 0)
 
     return response
@@ -825,6 +829,7 @@ export class PiAcpAgent implements ACPAgent {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = await this.autoRestoreSession(params.sessionId)
+    this.spare.warm(session.cwd, process.env.PI_ACP_PI_COMMAND)
 
     const { message, images } = promptToPiMessage(params.prompt)
 
