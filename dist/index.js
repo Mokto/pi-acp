@@ -543,7 +543,9 @@ var PiRpcProcess = class _PiRpcProcess {
   }
   async switchSession(sessionPath) {
     const res = await this.request({ type: "switch_session", sessionPath });
-    if (!res.success) throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`);
+    if (!res.success || res.data?.cancelled) {
+      throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`);
+    }
   }
   async getMessages() {
     const res = await this.request({ type: "get_messages" });
@@ -5301,11 +5303,7 @@ ${JSON.stringify(stats, null, 2)}`;
     }
     let proc2;
     try {
-      proc2 = await PiRpcProcess.spawn({
-        cwd: params.cwd,
-        sessionPath: sessionFile,
-        piCommand: process.env.PI_ACP_PI_COMMAND
-      });
+      proc2 = await this.startPiForSession(params.cwd, sessionFile);
     } catch (e) {
       if (e?.name === "PiRpcSpawnError") {
         throw RequestError3.internalError({ code: e?.code }, String(e?.message ?? e));
@@ -5323,6 +5321,21 @@ ${JSON.stringify(stats, null, 2)}`;
       notices: this.clientSupportsNotices
     });
     return this.finishLoadSession(session, proc2, params, { replayHistory: true, sessionFile });
+  }
+  /** The spare pi switched to this session (a fraction of a fresh start), else a fresh pi. */
+  async startPiForSession(cwd, sessionPath) {
+    const piCommand = process.env.PI_ACP_PI_COMMAND;
+    const spare = await this.spare.take(cwd, piCommand)?.catch(() => null);
+    if (spare && !spare.exited) {
+      try {
+        await spare.switchSession(sessionPath);
+        this.spare.warm(cwd, piCommand);
+        return spare;
+      } catch {
+        spare.dispose();
+      }
+    }
+    return PiRpcProcess.spawn({ cwd, sessionPath, piCommand });
   }
   async finishLoadSession(session, proc2, params, opts) {
     const fileCommands = loadSlashCommands(params.cwd);
