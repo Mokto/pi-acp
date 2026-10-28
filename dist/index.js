@@ -201,9 +201,9 @@ import { fileURLToPath } from "url";
 
 // src/acp/paths.ts
 import { homedir } from "os";
-import { join as join2 } from "path";
+import { join as join2, resolve } from "path";
 function getPiAcpDir() {
-  return join2(homedir(), ".pi", "pi-acp");
+  return process.env.PI_ACP_DIR ? resolve(process.env.PI_ACP_DIR) : join2(homedir(), ".pi", "pi-acp");
 }
 function getPiAcpSessionMapPath() {
   return join2(getPiAcpDir(), "session-map.json");
@@ -352,10 +352,10 @@ var PiRpcProcess = class _PiRpcProcess {
       shell: shouldUseShellForPiCommand(cmd)
     });
     try {
-      await new Promise((resolve4, reject) => {
+      await new Promise((resolve5, reject) => {
         const onSpawn = () => {
           cleanup();
-          resolve4();
+          resolve5();
         };
         const onError = (err) => {
           cleanup();
@@ -543,8 +543,8 @@ var PiRpcProcess = class _PiRpcProcess {
     const withId = { ...cmd, id };
     const line = `${JSON.stringify(withId)}
 `;
-    return new Promise((resolve4, reject) => {
-      this.pending.set(id, { resolve: resolve4, reject });
+    return new Promise((resolve5, reject) => {
+      this.pending.set(id, { resolve: resolve5, reject });
       void this.writeLine(line).catch((error) => {
         this.pending.delete(id);
         reject(error);
@@ -552,14 +552,14 @@ var PiRpcProcess = class _PiRpcProcess {
     });
   }
   writeLine(line) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       try {
         this.child.stdin.write(line, (error) => {
           if (error) {
             reject(error);
             return;
           }
-          resolve4();
+          resolve5();
         });
       } catch (error) {
         reject(error);
@@ -815,7 +815,7 @@ import { basename as basename2, join as join5 } from "path";
 // src/acp/pi-settings.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join4, resolve } from "path";
+import { join as join4, resolve as resolve2 } from "path";
 function isObject(x) {
   return Boolean(x) && typeof x === "object" && !Array.isArray(x);
 }
@@ -840,13 +840,13 @@ function readJsonFile(path) {
 }
 function getMergedSettings(cwd) {
   const globalSettingsPath = join4(getAgentDir(), "settings.json");
-  const projectSettingsPath = resolve(cwd, ".pi", "settings.json");
+  const projectSettingsPath = resolve2(cwd, ".pi", "settings.json");
   const global = readJsonFile(globalSettingsPath);
   const project = readJsonFile(projectSettingsPath);
   return deepMerge(global, project);
 }
 function getAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join4(homedir2(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join4(homedir2(), ".pi", "agent");
 }
 function getEnableSkillCommands(cwd) {
   const merged = getMergedSettings(cwd);
@@ -1221,7 +1221,7 @@ function buildSessionConfigOptions(models, thinking, usage = null, compactAt = n
 // src/acp/slash-commands.ts
 import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join6, resolve as resolve2 } from "path";
+import { join as join6, resolve as resolve3 } from "path";
 function parseFrontmatter(content) {
   const frontmatter = {};
   if (!content.startsWith("---")) return { frontmatter, content };
@@ -1278,7 +1278,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
 function loadSlashCommands(cwd) {
   const commands = [];
   const userDir = join6(homedir3(), ".pi", "agent", "prompts");
-  const projectDir = resolve2(cwd, ".pi", "prompts");
+  const projectDir = resolve3(cwd, ".pi", "prompts");
   commands.push(...loadCommandsFromDir(userDir, "user"));
   commands.push(...loadCommandsFromDir(projectDir, "project"));
   return commands;
@@ -1393,12 +1393,12 @@ function pauseStayAwake() {
 
 // src/acp/timeout.ts
 function withTimeout(promise, ms) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
     promise.then(
       (v) => {
         clearTimeout(timer);
-        resolve4(v);
+        resolve5(v);
       },
       (e) => {
         clearTimeout(timer);
@@ -1951,12 +1951,12 @@ var PiAcpSession = class _PiAcpSession {
       });
     }
     const expandedMessage = expandSlashCommand(message, this.fileCommands);
-    const turnPromise = new Promise((resolve4, reject) => {
+    const turnPromise = new Promise((resolve5, reject) => {
       const queued = {
         message: expandedMessage,
         images,
         showInClient: opts?.showInClient,
-        resolve: resolve4,
+        resolve: resolve5,
         reject
       };
       if (this.pendingTurn || this.turnQueue.length > 0 || this.compactionAfterReply) {
@@ -1974,7 +1974,7 @@ var PiAcpSession = class _PiAcpSession {
         });
         return;
       }
-      this.pendingTurn = { resolve: resolve4, reject };
+      this.pendingTurn = { resolve: resolve5, reject };
       this.startTurn(queued);
     });
     return turnPromise;
@@ -2404,7 +2404,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     this.compactionAfterReply = (async () => {
       await Promise.race([
         this.background.untilUsable(this.peakContextTokens),
-        new Promise((resolve4) => this.stopWaitingForSummary = resolve4)
+        new Promise((resolve5) => this.stopWaitingForSummary = resolve5)
       ]);
       this.stopWaitingForSummary = null;
       if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
@@ -3395,11 +3395,11 @@ function toToolKind(toolName) {
 // src/acp/pi-sessions.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { join as join8, resolve as resolve3, isAbsolute as isAbsolute3 } from "path";
+import { join as join8, resolve as resolve4, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join8(homedir4(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve4(process.env.PI_CODING_AGENT_DIR) : join8(homedir4(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
   const settingsPath = join8(agentDir, "settings.json");
@@ -3410,7 +3410,7 @@ function readSessionDirFromSettings(agentDir) {
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     const sessionDir = data.sessionDir;
     if (typeof sessionDir !== "string" || !sessionDir.trim()) return null;
-    return isAbsolute3(sessionDir) ? sessionDir : resolve3(agentDir, sessionDir);
+    return isAbsolute3(sessionDir) ? sessionDir : resolve4(agentDir, sessionDir);
   } catch {
     return null;
   }
@@ -4021,14 +4021,14 @@ var LiveServer = class {
     this.unlinkIfExists(this.registryPath);
   }
   listen(server) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const onError = (err) => {
         server.off("listening", onListening);
         reject(err);
       };
       const onListening = () => {
         server.off("error", onError);
-        resolve4();
+        resolve5();
       };
       server.once("error", onError);
       server.once("listening", onListening);
@@ -4587,12 +4587,12 @@ ${text}`;
     }
     const abort = new AbortController();
     let detach;
-    const detached = new Promise((resolve4) => detach = () => resolve4("detached"));
+    const detached = new Promise((resolve5) => detach = () => resolve5("detached"));
     const flow = { abort, detach, awaitingCode: null, done: Promise.resolve() };
-    const code = (signal) => new Promise((resolve4) => {
+    const code = (signal) => new Promise((resolve5) => {
       const deliver = (c) => {
         flow.awaitingCode = null;
-        resolve4(c);
+        resolve5(c);
       };
       flow.awaitingCode = deliver;
       signal.addEventListener(
@@ -5746,15 +5746,15 @@ if (process.argv.includes("--terminal-login")) {
 }
 var input = new WritableStream({
   write(chunk) {
-    return new Promise((resolve4) => {
-      if (process.stdout.destroyed || !process.stdout.writable) return resolve4();
+    return new Promise((resolve5) => {
+      if (process.stdout.destroyed || !process.stdout.writable) return resolve5();
       try {
         process.stdout.write(chunk, (err) => {
           void err;
-          resolve4();
+          resolve5();
         });
       } catch {
-        resolve4();
+        resolve5();
       }
     });
   }
