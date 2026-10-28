@@ -1,4 +1,4 @@
-import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { getPiAcpCompactionDir } from '../acp/paths.js'
@@ -31,27 +31,40 @@ const ANSI_ESCAPE_REGEX = new RegExp(
 
 // First pi release that emits `agent_settled`; without it no turn ever completes.
 const MIN_PI_VERSION = [0, 80, 4]
-const supportedPiCommands = new Set<string>()
+const supportedPiCommands = new Map<string, Promise<void>>()
 
-function assertSupportedPiVersion(cmd: string): void {
-  if (supportedPiCommands.has(cmd)) return
-  const res = spawnSync(cmd, ['--version'], {
-    encoding: 'utf-8',
-    timeout: 5_000,
-    shell: shouldUseShellForPiCommand(cmd)
-  })
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${res.stdout ?? ''}${res.stderr ?? ''}`)
-  // Unknown version (not installed, odd output): let the real spawn report it.
-  if (!match) return
+function checkPiVersion(cmd: string): Promise<void> {
+  const cached = supportedPiCommands.get(cmd)
+  if (cached) return cached
+  const check = new Promise<void>((resolve, reject) => {
+    execFile(
+      cmd,
+      ['--version'],
+      { encoding: 'utf-8', timeout: 5_000, shell: shouldUseShellForPiCommand(cmd) },
+      (_err, stdout, stderr) => {
+        const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${stdout ?? ''}${stderr ?? ''}`)
+        // Unknown version (not installed, odd output): let the real spawn report it.
+        if (!match) {
+          supportedPiCommands.delete(cmd)
+          return resolve()
+        }
 
-  const found = match.slice(1, 4).map(Number)
-  const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i])
-  if (differsAt !== -1 && found[differsAt]! < MIN_PI_VERSION[differsAt]!) {
-    throw new PiRpcSpawnError(
-      `pi v${found.join('.')} is too old: pi-acp needs pi ${MIN_PI_VERSION.join('.')} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+        const found = match.slice(1, 4).map(Number)
+        const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i])
+        if (differsAt !== -1 && found[differsAt]! < MIN_PI_VERSION[differsAt]!) {
+          supportedPiCommands.delete(cmd)
+          return reject(
+            new PiRpcSpawnError(
+              `pi v${found.join('.')} is too old: pi-acp needs pi ${MIN_PI_VERSION.join('.')} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+            )
+          )
+        }
+        resolve()
+      }
     )
-  }
-  supportedPiCommands.add(cmd)
+  })
+  supportedPiCommands.set(cmd, check)
+  return check
 }
 
 function stripAnsi(s: string): string {
@@ -212,7 +225,8 @@ export class PiRpcProcess {
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
-    assertSupportedPiVersion(cmd)
+    const versionCheck = checkPiVersion(cmd)
+    versionCheck.catch(() => {})
 
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
@@ -267,6 +281,13 @@ export class PiRpcProcess {
       }
 
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
+    }
+
+    try {
+      await versionCheck
+    } catch (e) {
+      child.kill()
+      throw e
     }
 
     // Zed writes each line to Zed.log as "agent stderr: …", so pi's crash traces land there.
