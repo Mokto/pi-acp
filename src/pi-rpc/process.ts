@@ -471,7 +471,9 @@ export class PiRpcProcess {
 
   async switchSession(sessionPath: string): Promise<void> {
     const res = await this.request({ type: 'switch_session', sessionPath })
-    if (!res.success) throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`)
+    if (!res.success || (res.data as { cancelled?: boolean } | undefined)?.cancelled) {
+      throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`)
+    }
   }
 
   async getMessages(): Promise<unknown> {
