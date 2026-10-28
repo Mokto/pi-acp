@@ -1342,11 +1342,7 @@ export class PiAcpAgent implements ACPAgent {
 
     let proc: PiRpcProcess
     try {
-      proc = await PiRpcProcess.spawn({
-        cwd: params.cwd,
-        sessionPath: sessionFile,
-        piCommand: process.env.PI_ACP_PI_COMMAND
-      })
+      proc = await this.startPiForSession(params.cwd, sessionFile)
     } catch (e: any) {
       if (e?.name === 'PiRpcSpawnError') {
         throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
@@ -1366,6 +1362,22 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile })
+  }
+
+  /** The spare pi switched to this session (a fraction of a fresh start), else a fresh pi. */
+  private async startPiForSession(cwd: string, sessionPath: string): Promise<PiRpcProcess> {
+    const piCommand = process.env.PI_ACP_PI_COMMAND
+    const spare = await this.spare.take(cwd, piCommand)?.catch(() => null)
+    if (spare && !spare.exited) {
+      try {
+        await spare.switchSession(sessionPath)
+        this.spare.warm(cwd, piCommand)
+        return spare
+      } catch {
+        spare.dispose()
+      }
+    }
+    return PiRpcProcess.spawn({ cwd, sessionPath, piCommand })
   }
 
   private async finishLoadSession(
