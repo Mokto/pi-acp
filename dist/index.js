@@ -189,13 +189,13 @@ function terminalAuthLaunchSpec() {
 
 // src/acp/session.ts
 import { RequestError as RequestError2 } from "@agentclientprotocol/sdk";
-import { execFile } from "child_process";
+import { execFile as execFile2 } from "child_process";
 import { existsSync as existsSync5, readFileSync as readFileSync6 } from "fs";
 import { basename as basename3, isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "path";
 import { promisify } from "util";
 
 // src/pi-rpc/process.ts
-import { execFileSync, spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
+import { execFile, execFileSync, spawn as spawn2 } from "child_process";
 import { existsSync as existsSync2 } from "fs";
 import { fileURLToPath } from "url";
 
@@ -243,24 +243,37 @@ var ANSI_ESCAPE_REGEX = new RegExp(
   "g"
 );
 var MIN_PI_VERSION = [0, 80, 4];
-var supportedPiCommands = /* @__PURE__ */ new Set();
-function assertSupportedPiVersion(cmd) {
-  if (supportedPiCommands.has(cmd)) return;
-  const res = spawnSync2(cmd, ["--version"], {
-    encoding: "utf-8",
-    timeout: 5e3,
-    shell: shouldUseShellForPiCommand(cmd)
-  });
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${res.stdout ?? ""}${res.stderr ?? ""}`);
-  if (!match) return;
-  const found = match.slice(1, 4).map(Number);
-  const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i]);
-  if (differsAt !== -1 && found[differsAt] < MIN_PI_VERSION[differsAt]) {
-    throw new PiRpcSpawnError(
-      `pi v${found.join(".")} is too old: pi-acp needs pi ${MIN_PI_VERSION.join(".")} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+var supportedPiCommands = /* @__PURE__ */ new Map();
+function checkPiVersion(cmd) {
+  const cached = supportedPiCommands.get(cmd);
+  if (cached) return cached;
+  const check = new Promise((resolve5, reject) => {
+    execFile(
+      cmd,
+      ["--version"],
+      { encoding: "utf-8", timeout: 5e3, shell: shouldUseShellForPiCommand(cmd) },
+      (_err, stdout, stderr) => {
+        const match = /(\d+)\.(\d+)\.(\d+)/.exec(`${stdout ?? ""}${stderr ?? ""}`);
+        if (!match) {
+          supportedPiCommands.delete(cmd);
+          return resolve5();
+        }
+        const found = match.slice(1, 4).map(Number);
+        const differsAt = found.findIndex((n, i) => n !== MIN_PI_VERSION[i]);
+        if (differsAt !== -1 && found[differsAt] < MIN_PI_VERSION[differsAt]) {
+          supportedPiCommands.delete(cmd);
+          return reject(
+            new PiRpcSpawnError(
+              `pi v${found.join(".")} is too old: pi-acp needs pi ${MIN_PI_VERSION.join(".")} or newer. Update it with \`npm install -g @earendil-works/pi-coding-agent\`, then try again.`
+            )
+          );
+        }
+        resolve5();
+      }
     );
-  }
-  supportedPiCommands.add(cmd);
+  });
+  supportedPiCommands.set(cmd, check);
+  return check;
 }
 function stripAnsi(s) {
   return s.replace(ANSI_ESCAPE_REGEX, "");
@@ -340,7 +353,9 @@ var PiRpcProcess = class _PiRpcProcess {
   }
   static async spawn(params) {
     const cmd = getPiCommand(params.piCommand);
-    assertSupportedPiVersion(cmd);
+    const versionCheck = checkPiVersion(cmd);
+    versionCheck.catch(() => {
+    });
     const args = ["--mode", "rpc", "--no-themes"];
     if (params.sessionPath) args.push("--session", params.sessionPath);
     if (params.summaryWriter) args.push("--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files");
@@ -381,6 +396,12 @@ var PiRpcProcess = class _PiRpcProcess {
       }
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e });
     }
+    try {
+      await versionCheck;
+    } catch (e) {
+      child.kill();
+      throw e;
+    }
     child.stderr.pipe(process.stderr, { end: false });
     const proc2 = new _PiRpcProcess(child);
     try {
@@ -388,8 +409,8 @@ var PiRpcProcess = class _PiRpcProcess {
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
         const { mkdirSync: mkdirSync4 } = await import("fs");
-        const { dirname: dirname5 } = await import("path");
-        mkdirSync4(dirname5(sessionFile), { recursive: true });
+        const { dirname: dirname6 } = await import("path");
+        mkdirSync4(dirname6(sessionFile), { recursive: true });
       }
     } catch {
     }
@@ -1646,8 +1667,10 @@ var SessionManager = class {
   sessions = /* @__PURE__ */ new Map();
   store = new SessionStore();
   live;
+  spare;
   constructor(opts) {
     this.live = opts?.live ?? null;
+    this.spare = opts?.spare ?? null;
   }
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll() {
@@ -1676,12 +1699,14 @@ var SessionManager = class {
     this.live?.remove(sessionId);
   }
   async create(params) {
-    let proc2;
+    let proc2 = await (this.spare?.take(params.cwd, params.piCommand)?.catch(() => null) ?? null);
     try {
-      proc2 = await PiRpcProcess.spawn({
-        cwd: params.cwd,
-        piCommand: params.piCommand
-      });
+      if (!proc2 || proc2.exited) {
+        proc2 = await PiRpcProcess.spawn({
+          cwd: params.cwd,
+          piCommand: params.piCommand
+        });
+      }
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
         throw RequestError2.internalError({ code: e.code }, e.message);
@@ -2464,7 +2489,7 @@ ${message}` }
     });
   }
   static PR_LINK_CACHE_MS = 3e4;
-  static execFileAsync = promisify(execFile);
+  static execFileAsync = promisify(execFile2);
   // Best-effort, cached GitHub PR URL for the current branch — appended to the
   // token-usage footer so it's visible without running /pr-link manually. Never
   // blocks the caller: returns whatever is cached (possibly null on a cold
@@ -3392,20 +3417,101 @@ function toToolKind(toolName) {
   }
 }
 
+// src/pi-rpc/spare.ts
+import { createHash } from "crypto";
+import { readFileSync as readFileSync7, statSync } from "fs";
+import { dirname as dirname4, join as join8 } from "path";
+var MAX_AGE_MS = 10 * 6e4;
+function startupInputs(cwd) {
+  const agentDir = getAgentDir();
+  const paths = ["settings.json", "models.json", "AGENTS.md", "CLAUDE.md", "extensions", "skills", "prompts"].map(
+    (f) => join8(agentDir, f)
+  );
+  paths.push(join8(cwd, ".pi", "settings.json"), join8(cwd, ".pi", "extensions"));
+  for (let dir = cwd; ; dir = dirname4(dir)) {
+    paths.push(join8(dir, "AGENTS.md"), join8(dir, "CLAUDE.md"));
+    if (dirname4(dir) === dir) break;
+  }
+  const hash = createHash("sha1");
+  for (const p of paths) {
+    try {
+      const st = statSync(p);
+      hash.update(st.isDirectory() ? String(st.mtimeMs) : readFileSync7(p));
+    } catch {
+      hash.update("-");
+    }
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+var SparePi = class {
+  spare = null;
+  /** The spare, if it was started for this cwd/command and is still current. */
+  take(cwd, piCommand) {
+    const spare = this.spare;
+    if (!spare) return null;
+    this.spare = null;
+    clearTimeout(spare.timer);
+    if (spare.key !== keyOf(cwd, piCommand) || spare.inputs !== startupInputs(cwd)) {
+      disposeSpare(spare);
+      return null;
+    }
+    return spare.proc;
+  }
+  /** Start a spare for this cwd unless one is already there. */
+  warm(cwd, piCommand) {
+    if (process.env.PI_ACP_PREWARM === "0") return;
+    const key = keyOf(cwd, piCommand);
+    if (this.spare?.key === key && !this.spare.ready?.exited) return;
+    this.dispose();
+    const inputs = startupInputs(cwd);
+    const proc2 = PiRpcProcess.spawn({ cwd, piCommand });
+    const spare = { key, inputs, proc: proc2, timer: setTimeout(() => this.drop(spare), MAX_AGE_MS) };
+    proc2.then(
+      (p) => spare.ready = p,
+      () => {
+      }
+    );
+    spare.timer.unref?.();
+    this.spare = spare;
+  }
+  dispose() {
+    const spare = this.spare;
+    this.spare = null;
+    if (!spare) return;
+    clearTimeout(spare.timer);
+    disposeSpare(spare);
+  }
+  drop(spare) {
+    if (this.spare === spare) this.dispose();
+  }
+};
+function keyOf(cwd, piCommand) {
+  return `${piCommand ?? ""}\0${cwd}`;
+}
+function disposeSpare(spare) {
+  if (spare.ready) return spare.ready.dispose();
+  void spare.proc.then(
+    (p) => p.dispose(),
+    () => {
+    }
+  );
+}
+
 // src/acp/pi-sessions.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync7, statSync, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync8, statSync as statSync2, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { join as join8, resolve as resolve4, isAbsolute as isAbsolute3 } from "path";
+import { join as join9, resolve as resolve4, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
 var DEFAULT_HEAD_BYTES = 64 * 1024;
 function getPiAgentDir() {
-  return process.env.PI_CODING_AGENT_DIR ? resolve4(process.env.PI_CODING_AGENT_DIR) : join8(homedir4(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ? resolve4(process.env.PI_CODING_AGENT_DIR) : join9(homedir4(), ".pi", "agent");
 }
 function readSessionDirFromSettings(agentDir) {
-  const settingsPath = join8(agentDir, "settings.json");
+  const settingsPath = join9(agentDir, "settings.json");
   try {
     if (!existsSync6(settingsPath)) return null;
-    const raw = readFileSync7(settingsPath, "utf8");
+    const raw = readFileSync8(settingsPath, "utf8");
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     const sessionDir = data.sessionDir;
@@ -3417,7 +3523,7 @@ function readSessionDirFromSettings(agentDir) {
 }
 function getPiSessionsDir() {
   const agentDir = getPiAgentDir();
-  return readSessionDirFromSettings(agentDir) ?? join8(agentDir, "sessions");
+  return readSessionDirFromSettings(agentDir) ?? join9(agentDir, "sessions");
 }
 function walkJsonlFiles(dir, out) {
   let entries;
@@ -3428,7 +3534,7 @@ function walkJsonlFiles(dir, out) {
   }
   for (const e of entries) {
     const name = typeof e.name === "string" ? e.name : String(e.name);
-    const p = join8(dir, name);
+    const p = join9(dir, name);
     if (e.isDirectory()) walkJsonlFiles(p, out);
     else if (e.isFile() && name.endsWith(".jsonl")) out.push(p);
   }
@@ -3452,7 +3558,7 @@ function readFirstLine(path) {
   }
 }
 function readTail(path, tailBytes = DEFAULT_TAIL_BYTES) {
-  const st = statSync(path);
+  const st = statSync2(path);
   const start = Math.max(0, st.size - tailBytes);
   const len = st.size - start;
   const fd = openSync(path, "r");
@@ -3571,7 +3677,7 @@ function pickUpdatedAtFromTail(tail) {
 }
 function pickFallbackTitleFromHead(path) {
   try {
-    const raw = readFileSync7(path, { encoding: "utf8" });
+    const raw = readFileSync8(path, { encoding: "utf8" });
     const lines = raw.split(/\r?\n/);
     for (const line0 of lines) {
       const line = line0.trim();
@@ -3617,7 +3723,7 @@ function listPiSessions() {
     }
     if (!updatedAt) {
       try {
-        updatedAt = statSync(file).mtime.toISOString();
+        updatedAt = statSync2(file).mtime.toISOString();
       } catch {
         updatedAt = null;
       }
@@ -3881,12 +3987,12 @@ import {
   existsSync as existsSync7,
   mkdirSync as mkdirSync3,
   readdirSync as readdirSync4,
-  readFileSync as readFileSync8,
+  readFileSync as readFileSync9,
   renameSync as renameSync2,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 function isLiveEnabled(env = process.env) {
   const v = env.PI_ACP_LIVE;
   if (v == null || v === "") return false;
@@ -3923,7 +4029,7 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
     if (pid === process.pid) continue;
     if (isPidAlive(pid)) continue;
     for (const ext of ["json", "sock"]) {
-      const path = join9(liveDir, `${pid}.${ext}`);
+      const path = join10(liveDir, `${pid}.${ext}`);
       try {
         if (existsSync7(path)) unlinkSync(path);
       } catch {
@@ -3944,8 +4050,8 @@ var LiveServer = class {
   constructor(opts = {}) {
     this.pid = opts.pid ?? process.pid;
     this.liveDir = opts.liveDir ?? getPiAcpLiveDir();
-    this.sockPath = opts.liveDir ? join9(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
-    this.registryPath = opts.liveDir ? join9(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
+    this.sockPath = opts.liveDir ? join10(opts.liveDir, `${this.pid}.sock`) : getPiAcpLiveSocketPath(this.pid);
+    this.registryPath = opts.liveDir ? join10(opts.liveDir, `${this.pid}.json`) : getPiAcpLivePidRegistryPath(this.pid);
   }
   get socketPath() {
     return this.sockPath;
@@ -4184,9 +4290,9 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync8, readFileSync as readFileSync9, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
-import { join as join10, dirname as dirname4, basename as basename4 } from "path";
-import { spawnSync as spawnSync3 } from "child_process";
+import { existsSync as existsSync8, readFileSync as readFileSync10, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
+import { join as join11, dirname as dirname5, basename as basename4 } from "path";
+import { spawnSync as spawnSync2 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
 import { fileURLToPath as fileURLToPath2 } from "url";
 function getMessagesTimeoutMs() {
@@ -4196,7 +4302,7 @@ function getMessagesTimeoutMs() {
 function buildSessionSummaryFromFile(sessionFile) {
   let raw;
   try {
-    raw = readFileSync9(sessionFile, "utf-8");
+    raw = readFileSync10(sessionFile, "utf-8");
   } catch {
     return "";
   }
@@ -4302,6 +4408,7 @@ var PiAcpAgent = class {
   sessions;
   store = new SessionStore();
   live;
+  spare = new SparePi();
   lastPlanUsage = "null";
   planUsageTimer = setInterval(() => {
     try {
@@ -4314,6 +4421,7 @@ var PiAcpAgent = class {
   }, 6e4).unref();
   dispose() {
     clearInterval(this.planUsageTimer);
+    this.spare.dispose();
     this.sessions.disposeAll();
     this.live?.dispose();
   }
@@ -4382,7 +4490,7 @@ var PiAcpAgent = class {
     this.conn = conn;
     void _config;
     this.live = isLiveEnabled() ? new LiveServer() : null;
-    this.sessions = new SessionManager({ live: this.live });
+    this.sessions = new SessionManager({ live: this.live, spare: this.spare });
     if (this.live) {
       void this.live.start().catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -4531,6 +4639,7 @@ var PiAcpAgent = class {
     setTimeout(() => {
       void this.advertiseCommands(session, fileCommands);
       session.replayEarlyEvents();
+      this.spare.warm(params.cwd, process.env.PI_ACP_PI_COMMAND);
     }, 0);
     return response;
   }
@@ -4777,6 +4886,7 @@ ${text}`;
   }
   async prompt(params) {
     const session = await this.autoRestoreSession(params.sessionId);
+    this.spare.warm(session.cwd, process.env.PI_ACP_PI_COMMAND);
     const { message, images } = promptToPiMessage(params.prompt);
     const delivered = await this.maybeDeliverAuthCode(params.sessionId, message);
     if (delivered) return delivered;
@@ -4961,21 +5071,21 @@ ${JSON.stringify(stats, null, 2)}`;
         const findChangelog = () => {
           try {
             const whichCmd = process.platform === "win32" ? "where" : "which";
-            const which = spawnSync3(whichCmd, ["pi"], { encoding: "utf-8" });
+            const which = spawnSync2(whichCmd, ["pi"], { encoding: "utf-8" });
             const piPath = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim();
             if (piPath) {
               const resolved = realpathSync2(piPath);
-              const pkgRoot = dirname4(dirname4(resolved));
-              const p = join10(pkgRoot, "CHANGELOG.md");
+              const pkgRoot = dirname5(dirname5(resolved));
+              const p = join11(pkgRoot, "CHANGELOG.md");
               if (existsSync8(p)) return p;
             }
           } catch {
           }
           try {
-            const npmRoot = spawnSync3("npm", ["root", "-g"], { encoding: "utf-8" });
+            const npmRoot = spawnSync2("npm", ["root", "-g"], { encoding: "utf-8" });
             const root = String(npmRoot.stdout ?? "").trim();
             if (root) {
-              const p = join10(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
+              const p = join11(root, "@earendil-works", "pi-coding-agent", "CHANGELOG.md");
               if (existsSync8(p)) return p;
             }
           } catch {
@@ -4995,7 +5105,7 @@ ${JSON.stringify(stats, null, 2)}`;
         }
         let text = "";
         try {
-          text = readFileSync9(changelogPath, "utf-8");
+          text = readFileSync10(changelogPath, "utf-8");
         } catch (e) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -5035,7 +5145,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         try {
-          const raw = readFileSync9(sessionFile, "utf-8");
+          const raw = readFileSync10(sessionFile, "utf-8");
           if (raw.trim().length === 0) {
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
@@ -5063,7 +5173,7 @@ ${JSON.stringify(stats, null, 2)}`;
           return { stopReason: "end_turn" };
         }
         const safeSessionId = session.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const outputPath = join10(session.cwd, `pi-session-${safeSessionId}.html`);
+        const outputPath = join11(session.cwd, `pi-session-${safeSessionId}.html`);
         let resultPath = "";
         try {
           const result = await session.proc.exportHtml(outputPath);
@@ -5232,7 +5342,7 @@ ${JSON.stringify(stats, null, 2)}`;
       if (replayTimedOut) {
         const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
         if (summary) {
-          const summaryPath = join10(params.cwd, ".pi-history-summary.md");
+          const summaryPath = join11(params.cwd, ".pi-history-summary.md");
           try {
             writeFileSync4(summaryPath, summary, "utf-8");
           } catch {
@@ -5579,13 +5689,13 @@ function shouldSkipUpdateNotice() {
 function buildUpdateNotice() {
   if (shouldSkipUpdateNotice()) return null;
   try {
-    const piVersion = spawnSync3("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
     );
     if (!installed || !isSemver(installed)) return null;
-    const latestRes = spawnSync3("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
+    const latestRes = spawnSync2("npm", ["view", "@earendil-works/pi-coding-agent", "version"], {
       encoding: "utf-8",
       timeout: 800
     });
@@ -5602,7 +5712,7 @@ function buildStartupInfo(opts) {
   const md = [];
   let headerLine = "";
   try {
-    const piVersion = spawnSync3("pi", ["--version"], { encoding: "utf-8" });
+    const piVersion = spawnSync2("pi", ["--version"], { encoding: "utf-8" });
     const installed = (String(piVersion.stdout ?? "").trim() || String(piVersion.stderr ?? "").trim()).replace(
       /^v/i,
       ""
@@ -5621,16 +5731,16 @@ function buildStartupInfo(opts) {
     md.push("");
   };
   const contextItems = [];
-  const contextPath = join10(opts.cwd, "AGENTS.md");
+  const contextPath = join11(opts.cwd, "AGENTS.md");
   if (existsSync8(contextPath)) contextItems.push(contextPath);
   addSection("Context", contextItems);
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
       for (const e of readdirSync5(root)) {
-        const p = join10(root, e);
+        const p = join11(root, e);
         try {
-          const st = statSync2(p);
+          const st = statSync3(p);
           if (st.isFile() && e.toLowerCase().endsWith(".md")) {
             skillsItems.push(p);
           }
@@ -5648,10 +5758,10 @@ function buildStartupInfo(opts) {
         }
         for (const name of entries) {
           if (name === "node_modules" || name === ".git") continue;
-          const p = join10(dir, name);
+          const p = join11(dir, name);
           let st;
           try {
-            st = statSync2(p);
+            st = statSync3(p);
           } catch {
             continue;
           }
@@ -5665,15 +5775,15 @@ function buildStartupInfo(opts) {
     } catch {
     }
   };
-  const globalSkillsDir = join10(getAgentDir(), "skills");
+  const globalSkillsDir = join11(getAgentDir(), "skills");
   pushSkillFromRoot(globalSkillsDir);
-  const legacyAgentsSkillsDir = join10(process.env.HOME ?? "", ".agents", "skills");
+  const legacyAgentsSkillsDir = join11(process.env.HOME ?? "", ".agents", "skills");
   pushSkillFromRoot(legacyAgentsSkillsDir);
-  const projectSkillsDir = join10(opts.cwd, ".pi", "skills");
+  const projectSkillsDir = join11(opts.cwd, ".pi", "skills");
   pushSkillFromRoot(projectSkillsDir);
   addSection("Skills", skillsItems);
   const promptsItems = [];
-  const promptsDir = join10(process.env.HOME ?? "", ".pi", "agent", "prompts");
+  const promptsDir = join11(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
     const prompts = readdirSync5(promptsDir).filter((f) => f.endsWith(".md"));
     for (const f of prompts) promptsItems.push(`/${basename4(f, ".md")}`);
@@ -5681,15 +5791,15 @@ function buildStartupInfo(opts) {
   }
   addSection("Prompts", promptsItems);
   const extItems = [];
-  const extDir = join10(process.env.HOME ?? "", ".pi", "agent", "extensions");
+  const extDir = join11(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
     const exts = readdirSync5(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
-    for (const f of exts) extItems.push(join10(extDir, f));
+    for (const f of exts) extItems.push(join11(extDir, f));
   } catch {
   }
   try {
-    const settingsPath = join10(process.env.HOME ?? "", ".pi", "agent", "settings.json");
-    const settings = JSON.parse(readFileSync9(settingsPath, "utf-8"));
+    const settingsPath = join11(process.env.HOME ?? "", ".pi", "agent", "settings.json");
+    const settings = JSON.parse(readFileSync10(settingsPath, "utf-8"));
     const pkgs = Array.isArray(settings?.packages) ? settings.packages : [];
     for (const pkg2 of pkgs) {
       const s = String(pkg2);
@@ -5712,14 +5822,14 @@ function buildStartupInfo(opts) {
 }
 function readNearestPackageJson(metaUrl) {
   try {
-    let dir = dirname4(fileURLToPath2(metaUrl));
+    let dir = dirname5(fileURLToPath2(metaUrl));
     for (let i = 0; i < 6; i++) {
-      const p = join10(dir, "package.json");
+      const p = join11(dir, "package.json");
       if (existsSync8(p)) {
-        const json = JSON.parse(readFileSync9(p, "utf-8"));
+        const json = JSON.parse(readFileSync10(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
-      dir = dirname4(dir);
+      dir = dirname5(dir);
     }
   } catch {
   }
@@ -5728,9 +5838,9 @@ function readNearestPackageJson(metaUrl) {
 
 // src/index.ts
 if (process.argv.includes("--terminal-login")) {
-  const { spawnSync: spawnSync4 } = await import("child_process");
+  const { spawnSync: spawnSync3 } = await import("child_process");
   const cmd = getPiCommand(process.env.PI_ACP_PI_COMMAND);
-  const res = spawnSync4(cmd, [], {
+  const res = spawnSync3(cmd, [], {
     stdio: "inherit",
     env: process.env,
     shell: shouldUseShellForPiCommand(cmd)
