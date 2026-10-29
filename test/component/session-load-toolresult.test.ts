@@ -42,6 +42,13 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
             content: [{ type: 'text', text: 'RAW=1' }],
             details: { _display: 'Shown' },
             isError: false
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call_3',
+            toolName: 'grep',
+            content: [{ type: 'text', text: 'src/a.ts:1: match' }],
+            isError: false
           }
         ]
       }),
@@ -82,6 +89,9 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     assert.equal(lookupCall?.kind, 'fetch')
     const lookupDone = updates.find(u => u?.sessionUpdate === 'tool_call_update' && u.toolCallId === 'call_2')
     assert.deepEqual(lookupDone?.content, [{ type: 'content', content: { type: 'text', text: 'Shown' } }])
+
+    const grepCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_3')
+    assert.equal(grepCall?.kind, 'search')
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }

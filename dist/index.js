@@ -3434,6 +3434,10 @@ function toToolKind(toolName) {
       return "edit";
     case "bash":
       return "execute";
+    case "grep":
+    case "find":
+    case "ls":
+      return "search";
     default:
       return "other";
   }
@@ -5474,7 +5478,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
               sessionUpdate: "tool_call",
               toolCallId,
               title: toolName,
-              kind: toolKinds.get(toolName) ?? (toolName === "read" ? "read" : toolName === "write" || toolName === "edit" ? "edit" : "other"),
+              kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: "completed",
               rawInput: null,
               rawOutput: m
