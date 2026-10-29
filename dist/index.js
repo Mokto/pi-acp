@@ -722,6 +722,9 @@ function snapshotImageMarkdown(result, sourcePath, dir = join3(tmpdir(), "pi-acp
 function toolResultToText(result) {
   if (!result) return "";
   const details = result?.details;
+  if (typeof details?._display === "string" && details._display.trim()) {
+    return details._display;
+  }
   const diff = details?.diff;
   if (typeof diff === "string" && diff.trim()) {
     return diff;
@@ -898,6 +901,23 @@ function getAutoCompactionPoint(cwd, contextWindow) {
   if (settings.enabled === false) return null;
   const reserve = typeof settings.reserveTokens === "number" ? settings.reserveTokens : 16384;
   return contextWindow - reserve;
+}
+var TOOL_KINDS = [
+  "read",
+  "edit",
+  "delete",
+  "move",
+  "search",
+  "execute",
+  "think",
+  "fetch",
+  "switch_mode",
+  "other"
+];
+function getToolKinds(cwd) {
+  const value = getMergedSettings(cwd).acpToolKinds;
+  if (!isObject(value)) return /* @__PURE__ */ new Map();
+  return new Map(Object.entries(value).filter((e) => TOOL_KINDS.includes(e[1])));
 }
 function getQuietStartup(cwd) {
   const merged = getMergedSettings(cwd);
@@ -2743,7 +2763,7 @@ ${message}` }
                 sessionUpdate: "tool_call",
                 toolCallId,
                 title,
-                kind: toToolKind(toolName),
+                kind: getToolKinds(this.cwd).get(toolName) ?? toToolKind(toolName),
                 status,
                 locations,
                 rawInput
@@ -2827,7 +2847,7 @@ ${message}` }
             sessionUpdate: "tool_call",
             toolCallId,
             title,
-            kind: toToolKind(toolName),
+            kind: getToolKinds(this.cwd).get(toolName) ?? toToolKind(toolName),
             status: "in_progress",
             locations,
             content: initialFileContent,
@@ -5369,6 +5389,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
         }
       }
       const messages = Array.isArray(data?.messages) ? data.messages : [];
+      const toolKinds = getToolKinds(params.cwd);
       for (const m of messages) {
         const role = String(m?.role ?? "");
         if (role === "user") {
@@ -5453,7 +5474,7 @@ Reference it in your next message: _"see .pi-history-summary.md"_`
               sessionUpdate: "tool_call",
               toolCallId,
               title: toolName,
-              kind: toolName === "read" ? "read" : toolName === "write" || toolName === "edit" ? "edit" : "other",
+              kind: toolKinds.get(toolName) ?? (toolName === "read" ? "read" : toolName === "write" || toolName === "edit" ? "edit" : "other"),
               status: "completed",
               rawInput: null,
               rawOutput: m
