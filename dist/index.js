@@ -3411,6 +3411,7 @@ function toToolKind(toolName) {
       return "read";
     case "write":
     case "edit":
+    case "create_pr":
       return "edit";
     case "bash":
       return "execute";
