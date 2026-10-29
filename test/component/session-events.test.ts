@@ -268,7 +268,7 @@ test('PiAcpSession: extension tool titles keep acronyms upper case and show a no
   assert.equal((conn.updates[0]!.update as any).locations, undefined)
 })
 
-test('PiAcpSession: search, web and screenshot tools get their own kind, so Zed draws a magnifier or globe instead of a hammer', async () => {
+test('PiAcpSession: search, web, screenshot and create_pr tools get their own kind, so Zed draws a magnifier, globe or pencil instead of a hammer', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -281,14 +281,14 @@ test('PiAcpSession: search, web and screenshot tools get their own kind, so Zed 
     fileCommands: []
   })
 
-  const tools = ['grep', 'find', 'ls', 'web_search', 'web_fetch', 'ui_screenshot', 'create_pr']
+  const tools = ['grep', 'find', 'ls', 'web_search', 'web_fetch', 'ui_screenshot', 'create_pr', 'audit']
   tools.forEach((toolName, i) => proc.emit({ type: 'tool_execution_start', toolCallId: `t${i}`, toolName, args: {} }))
 
   await new Promise(r => setTimeout(r, 0))
 
   assert.deepEqual(
     conn.updates.map(u => (u.update as any).kind),
-    ['search', 'search', 'search', 'fetch', 'fetch', 'fetch', 'other']
+    ['search', 'search', 'search', 'fetch', 'fetch', 'fetch', 'edit', 'other']
   )
 })
 

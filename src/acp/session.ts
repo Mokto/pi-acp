@@ -2431,6 +2431,7 @@ export function toToolKind(toolName: string): ToolKind {
       return 'read'
     case 'write':
     case 'edit':
+    case 'create_pr':
       return 'edit'
     case 'bash':
       return 'execute'
