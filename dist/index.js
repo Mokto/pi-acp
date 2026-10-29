@@ -1880,6 +1880,8 @@ var PiAcpSession = class _PiAcpSession {
   // `agent_settled`/error events must not complete the ACP turn early; only the `.then()` in
   // startTurn() does, once the command handler itself is done.
   pendingTurnIsExtensionCommand = false;
+  // The latest agent_settled's footer; a command's prompt response waits for it before completing the turn.
+  settledFooter = Promise.resolve();
   // Context window size reported by pi (updated from getSessionStats).
   contextWindow = null;
   // Peak context tokens seen this session. Context only grows, so we never
@@ -2301,7 +2303,7 @@ var PiAcpSession = class _PiAcpSession {
       (disposition) => {
         const handled = disposition ? disposition === "handled" : this.isExtensionCommandMessage(t.message);
         if (!handled) return;
-        void this.flushEmits().finally(() => {
+        void Promise.allSettled([this.flushEmits(), this.settledFooter]).finally(() => {
           this.pendingTurnIsExtensionCommand = false;
           this.completeTurn(this.cancelRequested ? "cancelled" : "end_turn");
         });
@@ -3089,12 +3091,13 @@ ${formatAutoRetryMessage(ev)}` }
           });
         }
         this.flushNarratedToolCallGate();
-        void (async () => {
+        const nestedInCommand = this.pendingTurnIsExtensionCommand;
+        this.settledFooter = (async () => {
           await this.flushEmits();
           await this.maybeEmitTokenStats();
           if (existsSync5(getPlanUsageDir())) void this.pushConfigOptionUpdate();
           await this.flushEmits();
-          if (this.pendingTurnIsExtensionCommand) return;
+          if (nestedInCommand) return;
           this.completeTurn(this.cancelRequested ? "cancelled" : turnError ? "error" : "end_turn");
         })();
         break;
