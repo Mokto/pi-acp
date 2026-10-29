@@ -2425,7 +2425,7 @@ function toolVerb(toolName: string): string {
   }
 }
 
-function toToolKind(toolName: string): ToolKind {
+export function toToolKind(toolName: string): ToolKind {
   switch (toolName) {
     case 'read':
       return 'read'
@@ -2434,6 +2434,14 @@ function toToolKind(toolName: string): ToolKind {
       return 'edit'
     case 'bash':
       return 'execute'
+    case 'grep':
+    case 'find':
+    case 'ls':
+      return 'search'
+    case 'web_search':
+    case 'web_fetch':
+    case 'ui_screenshot':
+      return 'fetch'
     default:
       return 'other'
   }

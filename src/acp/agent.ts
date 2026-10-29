@@ -35,7 +35,7 @@ import {
   runOAuthLogin,
   type ModelRuntimeLike
 } from './login.js'
-import { SessionManager, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
+import { SessionManager, toToolKind, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
 import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
@@ -1519,7 +1519,7 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call',
               toolCallId,
               title: toolName,
-              kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
+              kind: toToolKind(toolName),
               status: 'completed',
               rawInput: null,
               rawOutput: m

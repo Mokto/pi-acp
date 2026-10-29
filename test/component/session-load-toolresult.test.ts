@@ -27,6 +27,13 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
             args: { command: 'echo hello' },
             content: [{ type: 'text', text: 'hello from bash' }],
             isError: false
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call_2',
+            toolName: 'grep',
+            content: [{ type: 'text', text: 'src/a.ts:1: match' }],
+            isError: false
           }
         ]
       }),
@@ -62,6 +69,9 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
       terminal_exit: { terminal_id: 'call_1', exit_code: 0, signal: null }
     })
     assert.equal(toolCallUpdate.rawOutput, undefined)
+
+    const grepCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_2')
+    assert.equal(grepCall?.kind, 'search')
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }
