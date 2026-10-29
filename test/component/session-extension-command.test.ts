@@ -105,3 +105,48 @@ test('PiAcpSession: a non-command message still waits for agent_settled', async 
 
   assert.equal(await pending, 'end_turn')
 })
+
+test('PiAcpSession: a command that ends while its last reply is still being measured compacts the thread once, after the reply footer', async () => {
+  const proc = new NestedTurnFakePiRpcProcess()
+  const conn = new FakeAgentSideConnection()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    compactionEntries: true
+  })
+  session.setPiExtensionCommands(['sync-main'])
+  session.setCompactAt('300000')
+  const stats = { contextUsage: { tokens: 307_520, contextWindow: 1_000_000 } }
+  proc.sessionStats = stats
+  let measured: () => void = () => {}
+  let compacted: () => void = () => {}
+  proc.compactResult = new Promise(resolve => (compacted = () => resolve({ summary: 'S', tokensBefore: 307_520 })))
+
+  const pending = session.prompt('/sync-main')
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  proc.getSessionStats = () => new Promise(resolve => (measured = () => resolve(stats)))
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  proc.resolvePrompt()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  measured()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  compacted()
+  assert.equal(await pending, 'end_turn')
+  await new Promise(resolve => setTimeout(resolve, 10))
+
+  assert.equal(proc.compactCalls, 1)
+  const order = conn.updates
+    .map(u => u.update as any)
+    .filter(u => u.sessionUpdate === 'compaction_update' || u.content?.text?.includes('↳'))
+    .map(u => (u.sessionUpdate === 'compaction_update' ? 'compaction' : 'footer'))
+  assert.equal(order[0], 'footer')
+  assert.equal(order.filter(o => o === 'footer').length, 1)
+})
