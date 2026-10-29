@@ -3411,7 +3411,6 @@ function toToolKind(toolName) {
       return "read";
     case "write":
     case "edit":
-    case "create_pr":
       return "edit";
     case "bash":
       return "execute";
@@ -3419,10 +3418,6 @@ function toToolKind(toolName) {
     case "find":
     case "ls":
       return "search";
-    case "web_search":
-    case "web_fetch":
-    case "ui_screenshot":
-      return "fetch";
     default:
       return "other";
   }
