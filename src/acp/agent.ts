@@ -70,7 +70,8 @@ import {
   getEnableExtensionCommands,
   getEnableSkillCommands,
   getEnabledModels,
-  getQuietStartup
+  getQuietStartup,
+  getToolKinds
 } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { resolveEnabledModelIds, type ScopeModel } from './model-scope.js'
@@ -1424,6 +1425,7 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       const messages = Array.isArray((data as any)?.messages) ? (data as any).messages : []
+      const toolKinds = getToolKinds(params.cwd)
 
       for (const m of messages) {
         const role = String(m?.role ?? '')
@@ -1519,7 +1521,7 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call',
               toolCallId,
               title: toolName,
-              kind: toToolKind(toolName),
+              kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: 'completed',
               rawInput: null,
               rawOutput: m

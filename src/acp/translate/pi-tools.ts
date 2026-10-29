@@ -34,6 +34,10 @@ export function toolResultToText(result: unknown): string {
 
   const details = (result as any)?.details
 
+  if (typeof details?._display === 'string' && details._display.trim()) {
+    return details._display
+  }
+
   // pi's edit tool returns a terse success message in content and the full unified diff in details.diff.
   const diff = details?.diff
   if (typeof diff === 'string' && diff.trim()) {

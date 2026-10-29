@@ -292,6 +292,39 @@ test("PiAcpSession: pi's search tools get the search kind, so Zed draws a magnif
   )
 })
 
+test('PiAcpSession: acpToolKinds in pi settings picks the icon from the first card, and the result text comes from details._display', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-tool-kinds-'))
+  mkdirSync(join(cwd, '.pi'))
+  writeFileSync(join(cwd, '.pi', 'settings.json'), JSON.stringify({ acpToolKinds: { team_lookup_tool: 'fetch' } }))
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd,
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'team_lookup_tool', args: {} })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'unlisted_tool', args: {} })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    isError: false,
+    result: { content: [{ type: 'text', text: 'RAW=1' }], details: { _display: 'Shown' } }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const [first, second, end] = conn.updates.map(u => u.update as any)
+  assert.equal(first.kind, 'fetch')
+  assert.equal(second.kind, 'other')
+  assert.deepEqual(end.content, [{ type: 'content', content: { type: 'text', text: 'Shown' } }])
+})
+
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

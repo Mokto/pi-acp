@@ -1,3 +1,4 @@
+import type { ToolKind } from '@agentclientprotocol/sdk'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -97,6 +98,29 @@ export function getAutoCompactionPoint(cwd: string, contextWindow: number): numb
   if (settings.enabled === false) return null
   const reserve = typeof settings.reserveTokens === 'number' ? settings.reserveTokens : 16_384
   return contextWindow - reserve
+}
+
+const TOOL_KINDS: readonly unknown[] = [
+  'read',
+  'edit',
+  'delete',
+  'move',
+  'search',
+  'execute',
+  'think',
+  'fetch',
+  'switch_mode',
+  'other'
+] satisfies ToolKind[]
+
+/**
+ * pi-acp's own `acpToolKinds` setting: tool name → ACP tool kind, which picks the icon on the
+ * tool's Zed card. Lets extension and MCP tools get an icon without pi-acp knowing their names.
+ */
+export function getToolKinds(cwd: string): Map<string, ToolKind> {
+  const value = getMergedSettings(cwd).acpToolKinds
+  if (!isObject(value)) return new Map()
+  return new Map(Object.entries(value).filter((e): e is [string, ToolKind] => TOOL_KINDS.includes(e[1])))
 }
 
 /**
