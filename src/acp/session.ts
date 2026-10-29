@@ -459,6 +459,8 @@ export class PiAcpSession {
   // `agent_settled`/error events must not complete the ACP turn early; only the `.then()` in
   // startTurn() does, once the command handler itself is done.
   private pendingTurnIsExtensionCommand = false
+  // The latest agent_settled's footer; a command's prompt response waits for it before completing the turn.
+  private settledFooter: Promise<void> = Promise.resolve()
 
   // Context window size reported by pi (updated from getSessionStats).
   private contextWindow: number | null = null
@@ -1036,7 +1038,7 @@ export class PiAcpSession {
         // pi before 0.99 reports no disposition; fall back to recognising command names.
         const handled = disposition ? disposition === 'handled' : this.isExtensionCommandMessage(t.message)
         if (!handled) return
-        void this.flushEmits().finally(() => {
+        void Promise.allSettled([this.flushEmits(), this.settledFooter]).finally(() => {
           this.pendingTurnIsExtensionCommand = false
           this.completeTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
         })
@@ -1987,16 +1989,18 @@ export class PiAcpSession {
 
         this.flushNarratedToolCallGate()
 
+        // A nested turn inside a still-running extension command (see
+        // pendingTurnIsExtensionCommand above) — its own agent_settled, not the command's.
+        // Read now: the command's prompt response can complete the turn while the footer is measured.
+        const nestedInCommand = this.pendingTurnIsExtensionCommand
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void (async () => {
+        this.settledFooter = (async () => {
           await this.flushEmits()
           await this.maybeEmitTokenStats()
           if (existsSync(getPlanUsageDir())) void this.pushConfigOptionUpdate()
           await this.flushEmits()
-          // A nested turn inside a still-running extension command (see
-          // pendingTurnIsExtensionCommand above) — its own agent_settled, not the command's.
-          if (this.pendingTurnIsExtensionCommand) return
+          if (nestedInCommand) return
           this.completeTurn(this.cancelRequested ? 'cancelled' : turnError ? 'error' : 'end_turn')
         })()
         break
