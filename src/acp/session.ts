@@ -39,7 +39,7 @@ import { MODEL_CONFIG_ID, parseCompactAt, THINKING_CONFIG_ID } from './translate
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import { pauseStayAwake } from './stay-awake.js'
 import { withTimeout } from './timeout.js'
-import { getAutoCompactionPoint } from './pi-settings.js'
+import { getAutoCompactionPoint, getToolKinds } from './pi-settings.js'
 import { BackgroundCompaction, type SessionFileInfo, type SummaryWriter } from './background-compaction.js'
 import { PLAN_TOOL, planEntries } from './translate/plan.js'
 
@@ -1583,7 +1583,7 @@ export class PiAcpSession {
                 sessionUpdate: 'tool_call',
                 toolCallId,
                 title,
-                kind: toToolKind(toolName),
+                kind: getToolKinds(this.cwd).get(toolName) ?? toToolKind(toolName),
                 status,
                 locations,
                 rawInput
@@ -1685,7 +1685,7 @@ export class PiAcpSession {
             sessionUpdate: 'tool_call',
             toolCallId,
             title,
-            kind: toToolKind(toolName),
+            kind: getToolKinds(this.cwd).get(toolName) ?? toToolKind(toolName),
             status: 'in_progress',
             locations,
             content: initialFileContent,

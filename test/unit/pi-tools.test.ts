@@ -23,6 +23,14 @@ test('toolResultToText: prefers details.diff when present', () => {
   assert.equal(text, '--- a\n+++ b\n')
 })
 
+test('toolResultToText: shows details._display instead of the text the agent reads', () => {
+  const text = toolResultToText({
+    content: [{ type: 'text', text: 'PR_URL=https://example.com/1\nTITLE=Fix' }],
+    details: { _display: '[Fix](https://example.com/1)\n\nBody' }
+  })
+  assert.equal(text, '[Fix](https://example.com/1)\n\nBody')
+})
+
 test('toolResultToText: falls back to JSON', () => {
   const text = toolResultToText({ a: 1 })
   assert.match(text, /"a": 1/)

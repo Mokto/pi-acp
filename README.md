@@ -18,6 +18,8 @@ Expect some minor breaking changes.
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+  - Each tool call carries an ACP tool kind, which picks the icon on its card in Zed. pi-acp knows pi's built-in tools; give extension and MCP tools one with `acpToolKinds` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`), e.g. `"acpToolKinds": { "web_search": "fetch", "create_pr": "edit" }`. Kinds: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other`; in Zed, `edit` and `execute` also change the card's layout.
+  - An extension tool can show the user different text than the model reads: put Markdown in its result's `details._display`, and the card shows that instead of the result text, also when the thread is reopened.
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
