@@ -2431,7 +2431,6 @@ export function toToolKind(toolName: string): ToolKind {
       return 'read'
     case 'write':
     case 'edit':
-    case 'create_pr':
       return 'edit'
     case 'bash':
       return 'execute'
@@ -2439,10 +2438,6 @@ export function toToolKind(toolName: string): ToolKind {
     case 'find':
     case 'ls':
       return 'search'
-    case 'web_search':
-    case 'web_fetch':
-    case 'ui_screenshot':
-      return 'fetch'
     default:
       return 'other'
   }
