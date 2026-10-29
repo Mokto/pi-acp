@@ -281,7 +281,7 @@ test("PiAcpSession: pi's search tools get the search kind, so Zed draws a magnif
     fileCommands: []
   })
 
-  const tools = ['grep', 'find', 'ls', 'create_pr']
+  const tools = ['grep', 'find', 'ls', 'unlisted_tool']
   tools.forEach((toolName, i) => proc.emit({ type: 'tool_execution_start', toolCallId: `t${i}`, toolName, args: {} }))
 
   await new Promise(r => setTimeout(r, 0))
