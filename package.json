@@ -40,7 +40,7 @@
     "format": "prettier . --write",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "PI_ACP_LIVE= PI_ACP_PREWARM=0 PI_ACP_DIR=$(mktemp -d) node --import tsx --test test/**/*.test.ts",
+    "test": "PI_ACP_LIVE= PI_ACP_PREWARM=0 PI_ACP_DIR=$(mktemp -d) PI_CODING_AGENT_DIR=$(mktemp -d) node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs",
     "prepublishOnly": "npm run test && npm run build"
   },
