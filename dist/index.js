@@ -1841,7 +1841,8 @@ var PiAcpSession = class _PiAcpSession {
   turnQueue = [];
   turnWatchdog = null;
   lastModelRequestAt = null;
-  idleTimer = null;
+  idleSummaryTimer = null;
+  idleCompactTimer = null;
   inferenceStartup = false;
   awaitingUserInput = 0;
   // Model/thinking changes from the client are deferred while a turn is active so
@@ -2626,20 +2627,22 @@ ${message}` }
     if (process.env.PI_ACP_IDLE_COMPACTION !== "1" || process.env.PI_CACHE_RETENTION !== "long") return;
     if (since === null || this.compactAtPick === null) return;
     if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return;
-    this.idleTimer = setTimeout(
+    this.idleSummaryTimer = setTimeout(
       () => void this.writeIdleSummary(since),
       since + IDLE_SUMMARY_AFTER_MS - Date.now()
     ).unref();
   }
   clearIdleCompaction() {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
+    if (this.idleSummaryTimer) clearTimeout(this.idleSummaryTimer);
+    if (this.idleCompactTimer) clearTimeout(this.idleCompactTimer);
+    this.idleSummaryTimer = null;
+    this.idleCompactTimer = null;
   }
   isIdle() {
     return !this.pendingTurn && !this.turnQueue.length && !this.compactionAfterReply && !this.closed;
   }
   async writeIdleSummary(since) {
-    this.idleTimer = null;
+    this.idleSummaryTimer = null;
     if (Date.now() >= since + PROMPT_CACHE_MS || !this.isIdle()) return;
     const state = await this.proc.getState().catch(() => null);
     const limit = this.compactAtPick;
@@ -2647,10 +2650,10 @@ ${message}` }
     this.background.ensure(() => this.sessionFileInfo(), this.peakContextTokens, limit);
     process.stderr.write(`pi-acp: idle compaction: summary for ${this.sessionId} at ${this.peakContextTokens} tokens
 `);
-    this.idleTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref();
+    this.idleCompactTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref();
   }
   compactIdleThread() {
-    this.idleTimer = null;
+    this.idleCompactTimer = null;
     if (!this.isIdle() || !this.background.covers(this.peakContextTokens)) return;
     process.stderr.write(`pi-acp: idle compaction: compacting ${this.sessionId}
 `);

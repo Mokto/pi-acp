@@ -402,7 +402,8 @@ export class PiAcpSession {
   private readonly turnQueue: QueuedTurn[] = []
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null
   private lastModelRequestAt: number | null = null
-  private idleTimer: ReturnType<typeof setTimeout> | null = null
+  private idleSummaryTimer: ReturnType<typeof setTimeout> | null = null
+  private idleCompactTimer: ReturnType<typeof setTimeout> | null = null
   private inferenceStartup = false
   private awaitingUserInput = 0
 
@@ -1401,15 +1402,17 @@ export class PiAcpSession {
     if (process.env.PI_ACP_IDLE_COMPACTION !== '1' || process.env.PI_CACHE_RETENTION !== 'long') return
     if (since === null || this.compactAtPick === null) return
     if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return
-    this.idleTimer = setTimeout(
+    this.idleSummaryTimer = setTimeout(
       () => void this.writeIdleSummary(since),
       since + IDLE_SUMMARY_AFTER_MS - Date.now()
     ).unref()
   }
 
   private clearIdleCompaction(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer)
-    this.idleTimer = null
+    if (this.idleSummaryTimer) clearTimeout(this.idleSummaryTimer)
+    if (this.idleCompactTimer) clearTimeout(this.idleCompactTimer)
+    this.idleSummaryTimer = null
+    this.idleCompactTimer = null
   }
 
   private isIdle(): boolean {
@@ -1417,7 +1420,7 @@ export class PiAcpSession {
   }
 
   private async writeIdleSummary(since: number): Promise<void> {
-    this.idleTimer = null
+    this.idleSummaryTimer = null
     // A computer that slept can fire this late. Past the hour, skip, as Claude Code does.
     if (Date.now() >= since + PROMPT_CACHE_MS || !this.isIdle()) return
     const state = (await this.proc.getState().catch(() => null)) as { model?: { provider?: unknown } } | null
@@ -1426,11 +1429,11 @@ export class PiAcpSession {
     if (state?.model?.provider !== 'anthropic' || limit === null || !this.isIdle()) return
     this.background.ensure(() => this.sessionFileInfo(), this.peakContextTokens, limit)
     process.stderr.write(`pi-acp: idle compaction: summary for ${this.sessionId} at ${this.peakContextTokens} tokens\n`)
-    this.idleTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref()
+    this.idleCompactTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref()
   }
 
   private compactIdleThread(): void {
-    this.idleTimer = null
+    this.idleCompactTimer = null
     // Without a summary of its own pi would write one now, from the expired cache.
     if (!this.isIdle() || !this.background.covers(this.peakContextTokens)) return
     process.stderr.write(`pi-acp: idle compaction: compacting ${this.sessionId}\n`)
