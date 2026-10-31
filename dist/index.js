@@ -1490,9 +1490,20 @@ var BackgroundCompaction = class {
       }
     });
   }
+  /** Whether a summary is being written, or one that still works for a thread of `tokens` is ready. */
+  covers(tokens) {
+    return this.running !== null || this.isReadyFor(tokens);
+  }
+  isReadyFor(tokens) {
+    return this.ready !== null && tokens < this.ready.maxTokensBefore;
+  }
+  /** Starts a summary unless one covers `tokens` or the last one failed. */
+  ensure(session, tokens, limit) {
+    if (!this.covers(tokens) && !this.failed) this.start(session(), tokens, limit);
+  }
   /** Resolves at once if the ready summary still works for a thread of `tokens`, else when the summary being written is done. */
   async untilUsable(tokens) {
-    if (this.ready && tokens < this.ready.maxTokensBefore) return;
+    if (this.isReadyFor(tokens)) return;
     await this.running;
   }
   async discard() {
@@ -1589,6 +1600,9 @@ function latestPlanEntries(messages) {
 var DEFAULT_TURN_INACTIVITY_MS = 60 * 6e4;
 var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONTEXT_USAGE_TIMEOUT_MS = 2e3;
+var IDLE_SUMMARY_AFTER_MS = 54 * 6e4;
+var PROMPT_CACHE_MS = 60 * 6e4;
+var IDLE_COMPACTION_MIN_TOKENS = 2e5;
 var MAX_CURSOR_SDK_AUTH_RETRIES = 2;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
@@ -1826,6 +1840,8 @@ var PiAcpSession = class _PiAcpSession {
   cursorSdkAuthRetries = 0;
   turnQueue = [];
   turnWatchdog = null;
+  lastModelRequestAt = null;
+  idleTimer = null;
   inferenceStartup = false;
   awaitingUserInput = 0;
   // Model/thinking changes from the client are deferred while a turn is active so
@@ -2225,10 +2241,12 @@ var PiAcpSession = class _PiAcpSession {
   closed = false;
   markClosed() {
     this.closed = true;
+    this.clearIdleCompaction();
     void this.background.discard();
   }
   async handleProcessExit(code, signal) {
     this.clearTurnWatchdog();
+    this.clearIdleCompaction();
     void this.background.discard();
     if (this.closed) {
       if (this.pendingTurn) this.completeTurn("cancelled");
@@ -2290,6 +2308,7 @@ var PiAcpSession = class _PiAcpSession {
     this.inAgentLoop = false;
     this.agentRunError = "";
     this.inferenceStartup = true;
+    this.clearIdleCompaction();
     this.pendingTurn = { resolve: t.resolve, reject: t.reject };
     this.inFlightTurn = t;
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message);
@@ -2436,7 +2455,10 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
     this.inAgentLoop = false;
     void this.flushDeferredConfig().finally(() => {
       if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply();
-      else this.startNextQueuedTurn();
+      else {
+        this.startNextQueuedTurn();
+        if (!this.pendingTurn) this.armIdleCompaction();
+      }
     });
   }
   shouldCompactAfterReply(reason) {
@@ -2595,6 +2617,38 @@ ${message}` }
     this.compactAfterReplyFailed = false;
     void this.background.discard();
     void this.pushUsageUpdate();
+    if (!this.pendingTurn) this.armIdleCompaction();
+  }
+  /** A big thread left alone gets its summary before the prompt cache expires, and is compacted when it does. */
+  armIdleCompaction() {
+    this.clearIdleCompaction();
+    const since = this.lastModelRequestAt;
+    if (process.env.PI_CACHE_RETENTION !== "long" || since === null || this.compactAtPick === null) return;
+    if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return;
+    this.idleTimer = setTimeout(
+      () => void this.writeIdleSummary(since),
+      since + IDLE_SUMMARY_AFTER_MS - Date.now()
+    ).unref();
+  }
+  clearIdleCompaction() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+  isIdle() {
+    return !this.pendingTurn && !this.turnQueue.length && !this.compactionAfterReply && !this.closed;
+  }
+  async writeIdleSummary(since) {
+    this.idleTimer = null;
+    if (Date.now() >= since + PROMPT_CACHE_MS || !this.isIdle()) return;
+    const state = await this.proc.getState().catch(() => null);
+    const limit = this.compactAtPick;
+    if (state?.model?.provider !== "anthropic" || limit === null || !this.isIdle()) return;
+    this.background.ensure(() => this.sessionFileInfo(), this.peakContextTokens, limit);
+    this.idleTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref();
+  }
+  compactIdleThread() {
+    this.idleTimer = null;
+    if (this.isIdle() && this.background.covers(this.peakContextTokens)) void this.compactAfterReply();
   }
   /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
   ringSize(contextWindow) {
@@ -3042,6 +3096,10 @@ ${formatAutoRetryMessage(ev)}` }
       case "compaction_end":
       case "auto_compaction_end": {
         this.finishCompaction(compactionStateFromPiEnd(ev));
+        break;
+      }
+      case "turn_start": {
+        this.lastModelRequestAt = Date.now();
         break;
       }
       case "agent_start": {

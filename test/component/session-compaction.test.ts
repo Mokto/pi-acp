@@ -536,3 +536,130 @@ test('compaction: Stop while the background summary is still being written skips
     s.markClosed()
   }
 })
+
+const MIN = 60_000
+const realSetTimeout = setTimeout
+
+async function idleThread(opts: { provider?: string; pick?: string; tokens?: number; retention?: string } = {}) {
+  const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-idle-')), 'session.jsonl')
+  writeFileSync(sessionFile, '{"type":"session","id":"e1"}\n')
+  let writers = 0
+  let finishWriter: (result: unknown) => void = () => {}
+  const { proc, s, updates } = session(true, async () => {
+    writers += 1
+    return { compact: () => new Promise(r => (finishWriter = r)), dispose: () => {} }
+  })
+  proc.getState = async () => ({
+    model: { provider: opts.provider ?? 'anthropic', id: 'claude' },
+    sessionFile,
+    sessionId: `idle-${Math.random()}`
+  })
+  const prev = process.env.PI_CACHE_RETENTION
+  if (opts.retention === undefined) process.env.PI_CACHE_RETENTION = 'long'
+  else delete process.env.PI_CACHE_RETENTION
+  test.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const settle = () => new Promise(r => realSetTimeout(r, 30))
+  const reply = async (tokens: number) => {
+    proc.sessionStats = { contextUsage: { tokens, contextWindow: 1_000_000 } }
+    const done = s.prompt('work')
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'turn_start' })
+    proc.emit({ type: 'turn_end' })
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
+    await done
+    await settle()
+  }
+  s.setCompactAt(opts.pick ?? '300000')
+  await reply(opts.tokens ?? 250_000)
+  const wait = async (ms: number) => {
+    test.mock.timers.tick(ms)
+    await settle()
+  }
+  const cleanup = () => {
+    test.mock.timers.reset()
+    s.markClosed()
+    if (prev == null) delete process.env.PI_CACHE_RETENTION
+    else process.env.PI_CACHE_RETENTION = prev
+  }
+  return {
+    proc,
+    s,
+    updates,
+    reply,
+    wait,
+    settle,
+    cleanup,
+    writers: () => writers,
+    finishWriter: (r: unknown) => finishWriter(r)
+  }
+}
+
+test('idle compaction: a thread over 200k left alone gets its summary at 54 minutes and is compacted at the hour', async () => {
+  const t = await idleThread()
+  try {
+    await t.wait(53 * MIN)
+    assert.equal(t.writers(), 0)
+    await t.wait(1 * MIN)
+    assert.equal(t.writers(), 1, 'the summary is written before the 1-hour cache expires')
+    t.finishWriter({ summary: SUMMARY, firstKeptEntryId: 'e1', estimatedTokensAfter: 30_000 })
+    await t.settle()
+    await t.wait(5 * MIN)
+    assert.equal(t.proc.compactCalls, 0, 'the cache is still warm, so the full thread stays')
+    await t.wait(1 * MIN)
+    assert.equal(t.proc.compactCalls, 1)
+    test.mock.timers.reset()
+    assert.ok((await t.updates()).some(u => u.sessionUpdate === 'compaction_update' && u.status === 'in_progress'))
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('idle compaction: a message before the hour keeps the full thread', async () => {
+  const t = await idleThread()
+  try {
+    await t.wait(55 * MIN)
+    assert.equal(t.writers(), 1)
+    await t.reply(150_000)
+    await t.wait(10 * MIN)
+    assert.equal(t.proc.compactCalls, 0)
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('idle compaction: skipped asleep past the hour, under 200k, on Model limit, off Anthropic, or without the 1-hour cache', async () => {
+  const cases = [
+    { name: 'asleep', opts: {}, asleep: true },
+    { name: 'under 200k', opts: { tokens: 150_000 } },
+    { name: 'Model limit', opts: { pick: 'model_limit' } },
+    { name: 'other provider', opts: { provider: 'cursor' } },
+    { name: 'short cache', opts: { retention: 'short' } }
+  ]
+  for (const c of cases) {
+    const t = await idleThread(c.opts)
+    try {
+      if (c.asleep) test.mock.timers.setTime(Date.now() + 2 * 60 * MIN)
+      await t.wait(54 * MIN)
+      await t.wait(6 * MIN)
+      assert.equal(t.writers(), 0, c.name)
+      assert.equal(t.proc.compactCalls, 0, c.name)
+    } finally {
+      t.cleanup()
+    }
+  }
+})
+
+test('idle compaction: a failed summary leaves the thread to pi instead of compacting from the expired cache', async () => {
+  const t = await idleThread()
+  try {
+    await t.wait(54 * MIN)
+    assert.equal(t.writers(), 1)
+    t.finishWriter({})
+    await t.settle()
+    await t.wait(6 * MIN)
+    assert.equal(t.proc.compactCalls, 0)
+  } finally {
+    t.cleanup()
+  }
+})
