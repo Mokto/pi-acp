@@ -1398,7 +1398,8 @@ export class PiAcpSession {
   private armIdleCompaction(): void {
     this.clearIdleCompaction()
     const since = this.lastModelRequestAt
-    if (process.env.PI_CACHE_RETENTION !== 'long' || since === null || this.compactAtPick === null) return
+    if (process.env.PI_ACP_IDLE_COMPACTION !== '1' || process.env.PI_CACHE_RETENTION !== 'long') return
+    if (since === null || this.compactAtPick === null) return
     if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return
     this.idleTimer = setTimeout(
       () => void this.writeIdleSummary(since),
@@ -1424,13 +1425,16 @@ export class PiAcpSession {
     const limit = this.compactAtPick
     if (state?.model?.provider !== 'anthropic' || limit === null || !this.isIdle()) return
     this.background.ensure(() => this.sessionFileInfo(), this.peakContextTokens, limit)
+    process.stderr.write(`pi-acp: idle compaction: summary for ${this.sessionId} at ${this.peakContextTokens} tokens\n`)
     this.idleTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref()
   }
 
   private compactIdleThread(): void {
     this.idleTimer = null
     // Without a summary of its own pi would write one now, from the expired cache.
-    if (this.isIdle() && this.background.covers(this.peakContextTokens)) void this.compactAfterReply()
+    if (!this.isIdle() || !this.background.covers(this.peakContextTokens)) return
+    process.stderr.write(`pi-acp: idle compaction: compacting ${this.sessionId}\n`)
+    void this.compactAfterReply()
   }
 
   /** The ring fills toward the picked compaction size, since that is when the thread compacts. */

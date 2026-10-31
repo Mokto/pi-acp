@@ -540,7 +540,9 @@ test('compaction: Stop while the background summary is still being written skips
 const MIN = 60_000
 const realSetTimeout = setTimeout
 
-async function idleThread(opts: { provider?: string; pick?: string; tokens?: number; retention?: string } = {}) {
+async function idleThread(
+  opts: { provider?: string; pick?: string; tokens?: number; retention?: string; optedIn?: boolean } = {}
+) {
   const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-idle-')), 'session.jsonl')
   writeFileSync(sessionFile, '{"type":"session","id":"e1"}\n')
   let writers = 0
@@ -555,10 +557,19 @@ async function idleThread(opts: { provider?: string; pick?: string; tokens?: num
     sessionId: `idle-${Math.random()}`
   })
   const prev = process.env.PI_CACHE_RETENTION
+  const prevSwitch = process.env.PI_ACP_IDLE_COMPACTION
   if (opts.retention === undefined) process.env.PI_CACHE_RETENTION = 'long'
   else delete process.env.PI_CACHE_RETENTION
+  if (opts.optedIn === false) delete process.env.PI_ACP_IDLE_COMPACTION
+  else process.env.PI_ACP_IDLE_COMPACTION = '1'
   test.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const settle = () => new Promise(r => realSetTimeout(r, 30))
+  const eventually = async (ok: () => boolean, message: string) => {
+    for (let i = 0; !ok(); i++) {
+      assert.ok(i < 200, message)
+      await settle()
+    }
+  }
   const reply = async (tokens: number) => {
     proc.sessionStats = { contextUsage: { tokens, contextWindow: 1_000_000 } }
     const done = s.prompt('work')
@@ -581,6 +592,8 @@ async function idleThread(opts: { provider?: string; pick?: string; tokens?: num
     s.markClosed()
     if (prev == null) delete process.env.PI_CACHE_RETENTION
     else process.env.PI_CACHE_RETENTION = prev
+    if (prevSwitch == null) delete process.env.PI_ACP_IDLE_COMPACTION
+    else process.env.PI_ACP_IDLE_COMPACTION = prevSwitch
   }
   return {
     proc,
@@ -589,6 +602,7 @@ async function idleThread(opts: { provider?: string; pick?: string; tokens?: num
     reply,
     wait,
     settle,
+    eventually,
     cleanup,
     writers: () => writers,
     finishWriter: (r: unknown) => finishWriter(r)
@@ -601,13 +615,13 @@ test('idle compaction: a thread over 200k left alone gets its summary at 54 minu
     await t.wait(53 * MIN)
     assert.equal(t.writers(), 0)
     await t.wait(1 * MIN)
-    assert.equal(t.writers(), 1, 'the summary is written before the 1-hour cache expires')
+    await t.eventually(() => t.writers() === 1, 'the summary is written before the 1-hour cache expires')
     t.finishWriter({ summary: SUMMARY, firstKeptEntryId: 'e1', estimatedTokensAfter: 30_000 })
     await t.settle()
     await t.wait(5 * MIN)
     assert.equal(t.proc.compactCalls, 0, 'the cache is still warm, so the full thread stays')
     await t.wait(1 * MIN)
-    assert.equal(t.proc.compactCalls, 1)
+    await t.eventually(() => t.proc.compactCalls === 1, 'compacted at the hour')
     test.mock.timers.reset()
     assert.ok((await t.updates()).some(u => u.sessionUpdate === 'compaction_update' && u.status === 'in_progress'))
   } finally {
@@ -619,7 +633,7 @@ test('idle compaction: a message before the hour keeps the full thread', async (
   const t = await idleThread()
   try {
     await t.wait(55 * MIN)
-    assert.equal(t.writers(), 1)
+    await t.eventually(() => t.writers() === 1, 'summary started')
     await t.reply(150_000)
     await t.wait(10 * MIN)
     assert.equal(t.proc.compactCalls, 0)
@@ -628,8 +642,9 @@ test('idle compaction: a message before the hour keeps the full thread', async (
   }
 })
 
-test('idle compaction: skipped asleep past the hour, under 200k, on Model limit, off Anthropic, or without the 1-hour cache', async () => {
+test('idle compaction: skipped unless opted in, asleep past the hour, under 200k, on Model limit, off Anthropic, or without the 1-hour cache', async () => {
   const cases = [
+    { name: 'not opted in', opts: { optedIn: false } },
     { name: 'asleep', opts: {}, asleep: true },
     { name: 'under 200k', opts: { tokens: 150_000 } },
     { name: 'Model limit', opts: { pick: 'model_limit' } },
@@ -654,9 +669,9 @@ test('idle compaction: a failed summary leaves the thread to pi instead of compa
   const t = await idleThread()
   try {
     await t.wait(54 * MIN)
-    assert.equal(t.writers(), 1)
+    await t.eventually(() => t.writers() === 1, 'summary started')
     t.finishWriter({})
-    await t.settle()
+    await t.eventually(() => !(t.s as any).background.covers(250_000), 'the failed summary never finished')
     await t.wait(6 * MIN)
     assert.equal(t.proc.compactCalls, 0)
   } finally {
