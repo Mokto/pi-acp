@@ -56,9 +56,23 @@ export class BackgroundCompaction {
       })
   }
 
+  /** Whether a summary is being written, or one that still works for a thread of `tokens` is ready. */
+  covers(tokens: number): boolean {
+    return this.running !== null || this.isReadyFor(tokens)
+  }
+
+  private isReadyFor(tokens: number): boolean {
+    return this.ready !== null && tokens < this.ready.maxTokensBefore
+  }
+
+  /** Starts a summary unless one covers `tokens` or the last one failed. */
+  ensure(session: () => Promise<SessionFileInfo>, tokens: number, limit: number): void {
+    if (!this.covers(tokens) && !this.failed) this.start(session(), tokens, limit)
+  }
+
   /** Resolves at once if the ready summary still works for a thread of `tokens`, else when the summary being written is done. */
   async untilUsable(tokens: number): Promise<void> {
-    if (this.ready && tokens < this.ready.maxTokensBefore) return
+    if (this.isReadyFor(tokens)) return
     await this.running
   }
 

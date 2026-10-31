@@ -90,6 +90,10 @@ const DEFAULT_INFERENCE_STARTUP_MS = 5 * 60_000
 // the stats are cosmetic, so the turn finishes with the last known count instead of waiting
 // on the watchdog.
 const CONTEXT_USAGE_TIMEOUT_MS = 2_000
+// 90% of the 1-hour prompt cache, so the summary is ready when the cache expires.
+const IDLE_SUMMARY_AFTER_MS = 54 * 60_000
+const PROMPT_CACHE_MS = 60 * 60_000
+const IDLE_COMPACTION_MIN_TOKENS = 200_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -397,6 +401,9 @@ export class PiAcpSession {
   private cursorSdkAuthRetries = 0
   private readonly turnQueue: QueuedTurn[] = []
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null
+  private lastModelRequestAt: number | null = null
+  private idleSummaryTimer: ReturnType<typeof setTimeout> | null = null
+  private idleCompactTimer: ReturnType<typeof setTimeout> | null = null
   private inferenceStartup = false
   private awaitingUserInput = 0
 
@@ -934,11 +941,13 @@ export class PiAcpSession {
 
   markClosed(): void {
     this.closed = true
+    this.clearIdleCompaction()
     void this.background.discard()
   }
 
   private async handleProcessExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     this.clearTurnWatchdog()
+    this.clearIdleCompaction()
     void this.background.discard()
     if (this.closed) {
       if (this.pendingTurn) this.completeTurn('cancelled')
@@ -1015,6 +1024,7 @@ export class PiAcpSession {
     this.inAgentLoop = false
     this.agentRunError = ''
     this.inferenceStartup = true
+    this.clearIdleCompaction()
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
     this.inFlightTurn = t
     this.pendingTurnIsExtensionCommand = this.isExtensionCommandMessage(t.message)
@@ -1190,7 +1200,10 @@ export class PiAcpSession {
 
     void this.flushDeferredConfig().finally(() => {
       if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply()
-      else this.startNextQueuedTurn()
+      else {
+        this.startNextQueuedTurn()
+        if (!this.pendingTurn) this.armIdleCompaction()
+      }
     })
   }
 
@@ -1379,6 +1392,52 @@ export class PiAcpSession {
     this.compactAfterReplyFailed = false
     void this.background.discard()
     void this.pushUsageUpdate()
+    if (!this.pendingTurn) this.armIdleCompaction()
+  }
+
+  /** A big thread left alone gets its summary before the prompt cache expires, and is compacted when it does. */
+  private armIdleCompaction(): void {
+    this.clearIdleCompaction()
+    const since = this.lastModelRequestAt
+    if (process.env.PI_ACP_IDLE_COMPACTION !== '1' || process.env.PI_CACHE_RETENTION !== 'long') return
+    if (since === null || this.compactAtPick === null) return
+    if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return
+    this.idleSummaryTimer = setTimeout(
+      () => void this.writeIdleSummary(since),
+      since + IDLE_SUMMARY_AFTER_MS - Date.now()
+    ).unref()
+  }
+
+  private clearIdleCompaction(): void {
+    if (this.idleSummaryTimer) clearTimeout(this.idleSummaryTimer)
+    if (this.idleCompactTimer) clearTimeout(this.idleCompactTimer)
+    this.idleSummaryTimer = null
+    this.idleCompactTimer = null
+  }
+
+  private isIdle(): boolean {
+    return !this.pendingTurn && !this.turnQueue.length && !this.compactionAfterReply && !this.closed
+  }
+
+  private async writeIdleSummary(since: number): Promise<void> {
+    this.idleSummaryTimer = null
+    // A computer that slept can fire this late. Past the hour, skip, as Claude Code does.
+    if (Date.now() >= since + PROMPT_CACHE_MS || !this.isIdle()) return
+    const state = (await this.proc.getState().catch(() => null)) as { model?: { provider?: unknown } } | null
+    // `PI_CACHE_RETENTION=long` means a 1-hour cache only on Anthropic; other providers' lengths differ or aren't published.
+    const limit = this.compactAtPick
+    if (state?.model?.provider !== 'anthropic' || limit === null || !this.isIdle()) return
+    this.background.ensure(() => this.sessionFileInfo(), this.peakContextTokens, limit)
+    process.stderr.write(`pi-acp: idle compaction: summary for ${this.sessionId} at ${this.peakContextTokens} tokens\n`)
+    this.idleCompactTimer = setTimeout(() => this.compactIdleThread(), since + PROMPT_CACHE_MS - Date.now()).unref()
+  }
+
+  private compactIdleThread(): void {
+    this.idleCompactTimer = null
+    // Without a summary of its own pi would write one now, from the expired cache.
+    if (!this.isIdle() || !this.background.covers(this.peakContextTokens)) return
+    process.stderr.write(`pi-acp: idle compaction: compacting ${this.sessionId}\n`)
+    void this.compactAfterReply()
   }
 
   /** The ring fills toward the picked compaction size, since that is when the thread compacts. */
@@ -1920,6 +1979,11 @@ export class PiAcpSession {
       case 'compaction_end':
       case 'auto_compaction_end': {
         this.finishCompaction(compactionStateFromPiEnd(ev))
+        break
+      }
+
+      case 'turn_start': {
+        this.lastModelRequestAt = Date.now()
         break
       }
 
