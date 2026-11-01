@@ -1,12 +1,16 @@
+import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
+
+// Saved images are shared across runs and keep their first name, so each run uses new bytes.
+const replayedBytes = `replayed-bytes-${randomUUID()}`
 
 const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-load-'))
 mkdirSync(join(cwd, '.pi'))
@@ -48,6 +52,16 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
             toolCallId: 'call_3',
             toolName: 'grep',
             content: [{ type: 'text', text: 'src/a.ts:1: match' }],
+            isError: false
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call_4',
+            toolName: 'page_snapshot',
+            content: [
+              { type: 'text', text: 'Script on /, 1 image.' },
+              { type: 'image', data: Buffer.from(replayedBytes).toString('base64'), mimeType: 'image/png' }
+            ],
             isError: false
           }
         ]
@@ -92,6 +106,15 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
 
     const grepCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_3')
     assert.equal(grepCall?.kind, 'search')
+
+    const shotCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_4')
+    assert.equal(shotCall?.rawOutput, undefined, 'the result goes once, on the update')
+    const shotDone = updates.find(u => u?.sessionUpdate === 'tool_call_update' && u.toolCallId === 'call_4')
+    const text = shotDone?.content?.[0]?.content?.text as string
+    const file = text.match(/^\[!\[page_snapshot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nScript on \/, 1 image\.$/)?.[1]
+    assert.ok(file, text)
+    assert.equal(readFileSync(file, 'utf8'), replayedBytes)
+    assert.doesNotMatch(JSON.stringify(shotDone.rawOutput), /cG5n/, 'no image bytes in rawOutput')
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }

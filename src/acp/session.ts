@@ -19,7 +19,7 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import type { SparePi } from '../pi-rpc/spare.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { snapshotImageMarkdown, toolResultToText } from './translate/pi-tools.js'
+import { imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1840,7 +1840,7 @@ export class PiAcpSession {
           content: text
             ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
             : undefined,
-          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial })
+          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: withoutImageData(partial) })
         })
         break
       }
@@ -1867,8 +1867,7 @@ export class PiAcpSession {
         }
 
         const readPath = this.readToolCallPaths.get(toolCallId)
-        const imageMarkdown = readPath && !isError ? snapshotImageMarkdown(result, readPath) : undefined
-        const text = imageMarkdown ? `${imageMarkdown}\n\n${toolResultToText(result)}` : toolResultToText(result)
+        const { text } = imageResultText(result, readPath ?? String((ev as any).toolName ?? 'image'))
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         const initialDiffEmitted = this.fileMutationDiffsEmitted.has(toolCallId)
@@ -1919,7 +1918,7 @@ export class PiAcpSession {
           status: isError ? 'failed' : 'completed',
           ...(restoredTitle ? { title: restoredTitle } : {}),
           content,
-          ...(hasStructuredDiff ? {} : { rawOutput: result })
+          ...(hasStructuredDiff ? {} : { rawOutput: withoutImageData(result) })
         })
 
         this.cleanupToolCall(toolCallId)
