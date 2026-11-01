@@ -4386,57 +4386,14 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync8, readFileSync as readFileSync10, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
 import { join as join11, dirname as dirname5, basename as basename4 } from "path";
 import { spawnSync as spawnSync2 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
-import { fileURLToPath as fileURLToPath2 } from "url";
+import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL2 } from "url";
 function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : 15e3;
-}
-function buildSessionSummaryFromFile(sessionFile) {
-  let raw;
-  try {
-    raw = readFileSync10(sessionFile, "utf-8");
-  } catch {
-    return "";
-  }
-  const lines = raw.split("\n").filter((l) => l.trim());
-  const parts = [];
-  let messageCount = 0;
-  for (const line of lines) {
-    let obj;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (obj?.type !== "message") continue;
-    const msg = obj?.message ?? {};
-    const role = String(msg?.role ?? "");
-    const content = Array.isArray(msg?.content) ? msg.content : [];
-    const textBlocks = content.filter((c) => typeof c === "object" && c !== null).filter((c) => c["type"] === "text").map((c) => String(c["text"] ?? "").trim()).filter(Boolean);
-    if (!textBlocks.length) continue;
-    if (role === "user") {
-      parts.push(`**You:** ${textBlocks.join(" ")}`);
-      messageCount++;
-    } else if (role === "assistant") {
-      const full = textBlocks.join("\n");
-      const truncated = full.length > 1e3 ? full.slice(0, 1e3) + "\u2026" : full;
-      parts.push(`**Assistant:** ${truncated}`);
-      messageCount++;
-    }
-  }
-  if (messageCount === 0) return "";
-  return [
-    `# Previous session \u2014 summary (${messageCount} messages)`,
-    "",
-    ...parts,
-    "",
-    "---",
-    "_Auto-generated from session JSONL. History was too large to replay in the UI._"
-  ].join("\n\n");
 }
 function builtinAvailableCommands() {
   return [
@@ -5447,20 +5404,11 @@ ${JSON.stringify(stats, null, 2)}`;
         }
       }
       if (replayTimedOut) {
-        const summary = opts.sessionFile ? buildSessionSummaryFromFile(opts.sessionFile) : "";
-        if (summary) {
-          const summaryPath = join11(params.cwd, ".pi-history-summary.md");
-          try {
-            writeFileSync4(summaryPath, summary, "utf-8");
-          } catch {
-          }
-          session.setStartupInfo(
-            `\u26A0\uFE0F  Session history was too large to load (timed out after ${getMessagesTimeoutMs() / 1e3}s).
-A summary of the previous conversation has been saved to \`.pi-history-summary.md\`.
-Reference it in your next message: _"see .pi-history-summary.md"_`
-          );
-          setTimeout(() => session.sendStartupInfoIfPending(), 0);
-        }
+        const history = opts.sessionFile ? ` The full history is in [pi's session file](${pathToFileURL2(opts.sessionFile).href.replace(/\(/g, "%28").replace(/\)/g, "%29")}).` : "";
+        session.setStartupInfo(
+          `\u26A0\uFE0F Couldn't show this thread's earlier messages: pi took over ${getMessagesTimeoutMs() / 1e3}s to send them. pi still has the whole conversation, so you can carry on.${history}`
+        );
+        setTimeout(() => session.sendStartupInfoIfPending(), 0);
       }
       const messages = Array.isArray(data?.messages) ? data.messages : [];
       const toolKinds = getToolKinds(params.cwd);
