@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { PiAcpSession } from '../../src/acp/session.js'
 import type { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+import { until } from '../helpers/until.js'
 
 function makeSession(conn: FakeAgentSideConnection): { session: PiAcpSession; proc: FakePiRpcProcess } {
   const proc = new FakePiRpcProcess()
@@ -128,4 +129,81 @@ test('PiAcpSession: prompt RPC rejection flushes Error text before the turn reso
       (u.update as { content?: { text?: string } }).content?.text === 'Error: write after stream destroyed'
   )
   assert.ok(errMsg, 'expected Error chunk to be delivered before session/prompt resolves')
+})
+
+const RATE_LIMIT_ERROR = '429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}'
+
+test('PiAcpSession: a model picked during a reply that hits a rate limit applies once pi settles', async () => {
+  const conn = new FakeAgentSideConnection()
+  const { session, proc } = makeSession(conn)
+
+  const pending = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  await session.setModelWhenIdle('other', 'm2')
+  proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: RATE_LIMIT_ERROR })
+
+  await assert.rejects(pending, /rate limit/i)
+  assert.deepEqual(proc.setModelCalls, [], 'pi is still ending its run')
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  await until(() => proc.setModelCalls.length === 1)
+  assert.deepEqual(proc.setModelCalls, [{ provider: 'other', modelId: 'm2' }])
+})
+
+test('PiAcpSession: a model picked during a reply whose retries fail applies when pi settled first', async () => {
+  const conn = new FakeAgentSideConnection()
+  const { session, proc } = makeSession(conn)
+
+  const pending = session.prompt('hello')
+  proc.emit({ type: 'agent_start' })
+  await session.setModelWhenIdle('other', 'm2')
+  proc.emit({ type: 'auto_retry_end', success: false, attempt: 3, finalError: 'provider overloaded: 529' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+
+  await assert.rejects(pending, /provider overloaded/)
+  await until(() => proc.setModelCalls.length === 1)
+  assert.deepEqual(proc.setModelCalls, [{ provider: 'other', modelId: 'm2' }])
+})
+
+class FailFirstPromptFakePiRpcProcess extends FakePiRpcProcess {
+  private failed = false
+
+  override async prompt(
+    message: string,
+    attachments: unknown[] = [],
+    opts?: { streamingBehavior?: 'steer' | 'followUp' }
+  ): Promise<undefined> {
+    await super.prompt(message, attachments, opts)
+    if (this.failed) return undefined
+    this.failed = true
+    throw new Error('pi prompt failed: boom')
+  }
+}
+
+test('PiAcpSession: after a prompt pi refused, the held model pick applies and the queued message starts', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FailFirstPromptFakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const first = session.prompt('first')
+  const second = session.prompt('second')
+  await session.setModelWhenIdle('other', 'm2')
+
+  assert.equal(await first, 'error')
+  await until(() => proc.prompts.length === 2)
+  assert.deepEqual(proc.setModelCalls, [{ provider: 'other', modelId: 'm2' }])
+  assert.equal(proc.prompts[1]!.message, 'second')
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await second, 'end_turn')
 })
