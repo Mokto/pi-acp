@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
@@ -57,7 +58,7 @@ test('PiAcpAgent: does not emit startup info on loadSession', async () => {
   }
 })
 
-test('PiAcpAgent: loadSession writes summary file and sets startup info when getMessages times out', async () => {
+test("PiAcpAgent: loadSession links pi's session file, writing nothing to the project, when getMessages times out", async () => {
   // Use a very short timeout so the test completes quickly with real timers.
   const prev = process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS
   process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS = '50'
@@ -105,13 +106,18 @@ test('PiAcpAgent: loadSession writes summary file and sets startup info when get
     // startupInfo is surfaced via session.setStartupInfo (not in _meta).
     assert.equal((res as any)?._meta?.piAcp?.startupInfo, null)
 
-    // Summary file should have been written to cwd.
-    const summaryPath = join(root, '.pi-history-summary.md')
-    assert.ok(existsSync(summaryPath), '.pi-history-summary.md should be written')
-
-    const summary = readFileSync(summaryPath, 'utf-8')
-    assert.ok(summary.includes('hello from history'), 'summary should include user message')
-    assert.ok(summary.includes('hi there'), 'summary should include assistant message')
+    const shownText = () =>
+      conn.updates
+        .map(u => (u.update as any).content?.text)
+        .filter(Boolean)
+        .join('')
+    for (let waited = 0; !shownText().includes("Couldn't show") && waited < 1000; waited += 10) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    const text = shownText()
+    assert.match(text, /Couldn't show this thread's earlier messages/)
+    assert.ok(text.includes(pathToFileURL(sessionFile).href), 'message should link the session file')
+    assert.deepEqual(readdirSync(root), ['session.jsonl'], 'nothing should be written to the project')
   } finally {
     PiRpcProcess.spawn = originalSpawn
     if (prev === undefined) delete process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS
