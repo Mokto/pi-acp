@@ -72,6 +72,13 @@ export function imageResultText(result: unknown, name: string): { images: string
   return { images, text: [imageMarkdown(images), toolResultToText(result)].filter(Boolean).join('\n\n') }
 }
 
+// ponytail: Zed can't open an image from a card's location, only from a link. Once it can
+// (zed-industries/zed#65823), send the image as the card's location and drop this.
+/** The title as a link to the image. */
+export function imageLinkTitle(title: string, file: string): string {
+  return `[${title.replace(/[\\[\]]/g, '\\$&')}](<${file}>)`
+}
+
 /** The result with image data left out: Zed only ever shows `rawOutput` as JSON text, and the card shows the images. */
 export function withoutImageData(result: unknown): unknown {
   if (!imageBlocks(result).length) return result

@@ -114,6 +114,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     const file = text.match(/^\[!\[page_snapshot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nScript on \/, 1 image\.$/)?.[1]
     assert.ok(file, text)
     assert.equal(readFileSync(file, 'utf8'), replayedBytes)
+    assert.equal(shotDone.title, `[page_snapshot](<${file}>)`)
     assert.doesNotMatch(JSON.stringify(shotDone.rawOutput), /cG5n/, 'no image bytes in rawOutput')
   } finally {
     PiRpcProcess.spawn = originalSpawn

@@ -19,7 +19,7 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import type { SparePi } from '../pi-rpc/spare.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
+import { imageLinkTitle, imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1754,10 +1754,12 @@ export class PiAcpSession {
           })
         } else {
           this.currentToolCalls.set(toolCallId, 'in_progress')
+          const title = toToolTitle(toolName, args, this.cwd)
+          this.originalToolTitles.set(toolCallId, title)
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
-            title: toToolTitle(toolName, args, this.cwd),
+            title,
             status: 'in_progress',
             locations,
             content: initialFileContent,
@@ -1867,7 +1869,7 @@ export class PiAcpSession {
         }
 
         const readPath = this.readToolCallPaths.get(toolCallId)
-        const { text } = imageResultText(result, readPath ?? String((ev as any).toolName ?? 'image'))
+        const { images, text } = imageResultText(result, readPath ?? String((ev as any).toolName ?? 'image'))
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         const initialDiffEmitted = this.fileMutationDiffsEmitted.has(toolCallId)
@@ -1908,15 +1910,18 @@ export class PiAcpSession {
         // Restore the base title (e.g. "Plan") if a mid-run _label ever overrode
         // it — otherwise the row is left showing a stale progress message like
         // "Reviewing with claude-opus-4.8 (round 2/3)…" forever after completion.
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId)
-          ? this.originalToolTitles.get(toolCallId)
-          : undefined
+        const baseTitle = this.originalToolTitles.get(toolCallId)
+        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : undefined
+        // ponytail: the title links the first image only; the card links them all.
+        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: isError ? 'failed' : 'completed',
-          ...(restoredTitle ? { title: restoredTitle } : {}),
+          ...(title ? { title } : {}),
+          // Zed makes a title with a location unclickable, so an image read drops it for the link.
+          ...(images[0] && readPath ? { locations: [] } : {}),
           content,
           ...(hasStructuredDiff ? {} : { rawOutput: withoutImageData(result) })
         })

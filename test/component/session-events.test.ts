@@ -1677,6 +1677,9 @@ test('PiAcpSession: an image read shows a clickable copy of the image in the too
   const text = (conn.updates.at(-1)!.update as any).content[0].content.text as string
   const file = text.match(/^\[!\[shot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nRead image file \[image\/png\]$/)?.[1]
   assert.ok(file, text)
+  const update = conn.updates.at(-1)!.update as any
+  assert.equal(update.title, `[Read shot.png](<${file}>)`)
+  assert.deepEqual(update.locations, [], 'Zed only makes the title clickable without a location')
   assert.equal(readFileSync(file, 'utf8'), readBytes)
 })
 
@@ -1715,4 +1718,6 @@ test('PiAcpSession: a screenshot tool shows its images in the tool card, without
   assert.ok(file, text)
   assert.equal(readFileSync(file, 'utf8'), screenshotBytes)
   assert.deepEqual(update.rawOutput.content[1], { type: 'image', mimeType: 'image/png' })
+  assert.equal(update.title, `[Page Snapshot: /](<${file}>)`, 'a click on the title opens the screenshot')
+  assert.equal(update.locations, undefined)
 })

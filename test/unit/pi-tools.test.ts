@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { imageMarkdown, saveImages, toolResultToText, withoutImageData } from '../../src/acp/translate/pi-tools.js'
+import {
+  imageLinkTitle,
+  imageMarkdown,
+  saveImages,
+  toolResultToText,
+  withoutImageData
+} from '../../src/acp/translate/pi-tools.js'
 
 test('toolResultToText: extracts text from content blocks', () => {
   const text = toolResultToText({
@@ -102,6 +108,10 @@ test('imageMarkdown: a picture per file that links to itself', () => {
     '[![x.png](</a/x.png>)](</a/x.png>)\n\n[![y.png](</b/y.png>)](</b/y.png>)'
   )
   assert.equal(imageMarkdown([]), '')
+})
+
+test('imageLinkTitle: the whole title links to the image, brackets escaped', () => {
+  assert.equal(imageLinkTitle('Read [draft] shot.png', '/a/b.png'), '[Read \\[draft\\] shot.png](</a/b.png>)')
 })
 
 test('withoutImageData: keeps everything but the image bytes', () => {
