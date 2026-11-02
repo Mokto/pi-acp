@@ -435,8 +435,8 @@ export class PiAcpSession {
   // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
   private turnTerminalFailureHandled = false
 
-  // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
-  // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
+  // From `agent_start` to `agent_settled`. pi can emit several `turn_end` and `agent_end` events for
+  // one prompt (tool use, retry, compaction, queued follow-ups); it is idle only after `agent_settled`.
   private inAgentLoop = false
   // Error from the current run's `agent_end`, reported on `agent_settled`. Cleared on
   // `agent_start`, so a failed attempt that pi retried doesn't fail the turn.
@@ -1059,9 +1059,7 @@ export class PiAcpSession {
           await this.flushEmits()
           // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
           const authErr = maybeAuthRequiredError(err)
-          if (authErr) {
-            this.pendingTurn?.reject(authErr)
-          } else {
+          if (!authErr) {
             const errorMessage = err instanceof Error ? err.message : String(err ?? 'Unknown error')
             this.emit({
               sessionUpdate: 'agent_message_chunk',
@@ -1069,23 +1067,10 @@ export class PiAcpSession {
             })
             // Clients close the turn on the prompt response; deliver the chunk first.
             await this.flushEmits()
-            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-            this.pendingTurn?.resolve(reason)
           }
-
-          this.pendingTurn = null
-          this.inFlightTurn = null
-          this.cursorSdkAuthRetries = 0
-          this.pendingTurnIsExtensionCommand = false
-          this.inAgentLoop = false
-          this.clearTurnWatchdog()
-
-          // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-          // But we still clear the queueDepth metadata.
-          this.emit({
-            sessionUpdate: 'session_info_update',
-            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-          })
+          // pi exiting completes the turn too; whichever comes second finds it done. Queued messages still
+          // start: on a broken pi each fails with its own error, where stopping here left them hanging.
+          if (this.pendingTurn) this.completeTurn(this.cancelRequested ? 'cancelled' : 'error', authErr ?? undefined)
         })()
       }
     )
@@ -1188,16 +1173,29 @@ export class PiAcpSession {
 
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_settled` event and synchronous command turns that produce no agent loop.
-  private completeTurn(reason: StopReason): void {
+  private completeTurn(reason: StopReason, error?: unknown): void {
+    this.answerTurn(reason, error)
+    this.afterTurn(reason)
+  }
+
+  /** Answers the client's prompt request; `afterTurn` follows once pi is idle. */
+  private answerTurn(reason: StopReason, error?: unknown): void {
     this.finishLiveTurnIndicator()
     this.clearTurnWatchdog()
-    this.pendingTurn?.resolve(reason)
+    if (error === undefined) this.pendingTurn?.resolve(reason)
+    else this.pendingTurn?.reject(error)
     this.pendingTurn = null
     this.inFlightTurn = null
     this.cursorSdkAuthRetries = 0
     this.pendingTurnIsExtensionCommand = false
-    this.inAgentLoop = false
+  }
 
+  /**
+   * Sends pi the model or thinking picked during the reply, then compacts or starts the next queued message.
+   * Needs the client answered and pi idle: after a retry or rate-limit failure, whichever of
+   * handleTerminalFailure and `agent_settled` comes second calls it.
+   */
+  private afterTurn(reason: StopReason): void {
     void this.flushDeferredConfig().finally(() => {
       if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply()
       else {
@@ -1266,18 +1264,8 @@ export class PiAcpSession {
     await this.flushEmits()
     if (this.pendingTurnIsExtensionCommand) return
 
-    this.finishLiveTurnIndicator()
-    this.clearTurnWatchdog()
-    this.pendingTurn?.reject(RequestError.internalError({}, message))
-    this.pendingTurn = null
-    this.inFlightTurn = null
-    this.cursorSdkAuthRetries = 0
-    this.pendingTurnIsExtensionCommand = false
-    this.inAgentLoop = false
-    this.emit({
-      sessionUpdate: 'session_info_update',
-      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-    })
+    this.answerTurn('error', RequestError.internalError({}, message))
+    if (!this.inAgentLoop) this.afterTurn('error')
   }
 
   private startNextQueuedTurn(): void {
@@ -2045,7 +2033,11 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        if (this.turnTerminalFailureHandled) break
+        this.inAgentLoop = false
+        if (this.turnTerminalFailureHandled) {
+          if (!this.pendingTurn) this.afterTurn('error')
+          break
+        }
         const turnError = this.agentRunError
         if (this.tryRetryCursorSdkAuthFlake(turnError)) break
         if (turnError) {
