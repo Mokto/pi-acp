@@ -66,3 +66,26 @@ test('PiAcpSession: thinking_level_changed without a refresher still emits curre
     false
   )
 })
+
+test('PiAcpSession: pushes the dropdowns only when they changed since Zed last got them', async () => {
+  const conn = new FakeAgentSideConnection()
+  const session = makeSession(conn, new FakePiRpcProcess())
+  const thinking = (level: string): SessionConfigOption[] => [
+    { type: 'select', id: 'thinking', name: 'Thinking', currentValue: level, options: [{ value: level, name: level }] }
+  ]
+  let current = thinking('high')
+  session.setConfigOptionsRefresher(async () => current)
+  const pushes = async () => {
+    await session.pushConfigOptionUpdate()
+    await flushMicrotasks()
+    return conn.updates.filter(u => u.update.sessionUpdate === 'config_option_update').length
+  }
+
+  assert.equal(await pushes(), 1)
+  assert.equal(await pushes(), 1, 'unchanged dropdowns are not sent again')
+  current = thinking('low')
+  assert.equal(await pushes(), 2)
+  session.configOptionsSent(thinking('high'))
+  assert.equal(await pushes(), 3, 'a value Zed got in a response counts as sent')
+  assert.equal(await pushes(), 3)
+})
