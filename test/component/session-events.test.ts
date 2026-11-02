@@ -556,11 +556,11 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: '\n\nRetrying (attempt 2/5, waiting 2s)...' }
+    content: { type: 'text', text: '\n\nRetrying in 2s (attempt 2 of 5)…' }
   })
 })
 
-test('PiAcpSession: formats a positive sub-second auto_retry_start delay as waiting 1s', async () => {
+test('PiAcpSession: rounds a positive sub-second retry delay up to 1s', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -580,7 +580,7 @@ test('PiAcpSession: formats a positive sub-second auto_retry_start delay as wait
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: '\n\nRetrying (attempt 1/3, waiting 1s)...' }
+    content: { type: 'text', text: '\n\nRetrying in 1s (attempt 1 of 3)…' }
   })
 })
 
@@ -604,7 +604,7 @@ test('PiAcpSession: falls back to a generic retry message when auto_retry_start 
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: '\n\nRetrying...' }
+    content: { type: 'text', text: '\n\nRetrying…' }
   })
 })
 
@@ -635,8 +635,34 @@ test('PiAcpSession: surfaces the errorMessage reason in auto_retry_start status 
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
   assert.equal(
     (conn.updates[0]!.update as any).content.text,
-    '\n\nprovider overloaded: 529 \u2014 retrying (attempt 1/4, waiting 2s)...'
+    '\n\nprovider overloaded: 529. Retrying in 2s (attempt 1 of 4)…'
   )
+})
+
+test("PiAcpSession: omits the wait for an immediate retry and does not double a reason's full stop", async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'auto_retry_start',
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 0,
+    errorMessage: 'Server is busy.'
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal((conn.updates[0]!.update as any).content.text, '\n\nServer is busy. Retrying (attempt 1 of 3)…')
 })
 
 test('PiAcpSession: falls back to a bare retry message when errorMessage is missing or "Unknown error"', async () => {
@@ -662,10 +688,10 @@ test('PiAcpSession: falls back to a bare retry message when errorMessage is miss
 
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal((conn.updates[0]!.update as any).content.text, '\n\nRetrying (attempt 1/4, waiting 2s)...')
+  assert.equal((conn.updates[0]!.update as any).content.text, '\n\nRetrying in 2s (attempt 1 of 4)…')
 })
 
-test('PiAcpSession: prefixes auto_retry_start message with Network error for network failures', async () => {
+test('PiAcpSession: says the connection was lost when a retry follows a network failure', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -682,7 +708,8 @@ test('PiAcpSession: prefixes auto_retry_start message with Network error for net
     'fetch failed',
     'Network error: ENOTFOUND api.example.com',
     'ECONNREFUSED 127.0.0.1:443',
-    'socket hang up'
+    'socket hang up',
+    'terminated'
   ]) {
     conn.updates.length = 0
     proc.emit({
@@ -698,13 +725,13 @@ test('PiAcpSession: prefixes auto_retry_start message with Network error for net
     assert.equal(conn.updates.length, 1, `expected update for: ${errorMessage}`)
     assert.equal(
       (conn.updates[0]!.update as any).content.text,
-      '\n\nNetwork error \u2014 retrying (attempt 1/3, waiting 2s)...',
+      '\n\nConnection lost. Retrying in 2s (attempt 1 of 3)…',
       `wrong text for: ${errorMessage}`
     )
   }
 })
 
-test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
+test('PiAcpSession: sends nothing when a retry succeeds, since the reply resuming already shows it', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -717,15 +744,11 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
     fileCommands: []
   })
 
-  proc.emit({ type: 'auto_retry_end' } as any)
+  proc.emit({ type: 'auto_retry_end', success: true, attempt: 1 } as any)
 
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: '\n\nRetry finished, resuming.' }
-  })
+  assert.equal(conn.updates.length, 0)
 })
 
 test('PiAcpSession: 429 rate limit on auto_retry_start aborts and rejects the prompt', async () => {
@@ -842,7 +865,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } },
       {
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '\n\nRetrying (attempt 1/2, waiting 2s)...' }
+        content: { type: 'text', text: '\n\nRetrying in 2s (attempt 1 of 2)…' }
       },
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' } }
     ]
