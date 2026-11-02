@@ -43,7 +43,7 @@ import { SparePi } from '../pi-rpc/spare.js'
 import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
   bashCommand,
@@ -1455,20 +1455,20 @@ export class PiAcpAgent implements ACPAgent {
               title: toolName,
               kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: 'completed',
-              rawInput: null,
-              rawOutput: m
+              rawInput: null
             }
           })
 
-          const text = toolResultToText(m)
+          const { images, text } = imageResultText(m, toolName)
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
+              ...(images[0] ? { title: imageLinkTitle(toolName, images[0]) } : {}),
               content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-              rawOutput: m
+              rawOutput: withoutImageData(m)
             }
           })
         }

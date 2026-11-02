@@ -1,32 +1,92 @@
-import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { lstatSync, mkdirSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, extname, join } from 'node:path'
+
+type ImageBlock = { type: 'image'; data: string; mimeType: string }
+
+function isImageBlock(c: unknown): c is ImageBlock {
+  const block = c as Partial<ImageBlock> | null
+  return block?.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string'
+}
+
+function imageBlocks(result: unknown): ImageBlock[] {
+  const content = (result as { content?: unknown } | null)?.content
+  return Array.isArray(content) ? content.filter(isImageBlock) : []
+}
 
 // Zed's "Go to File" on a tool call loads the file as a text buffer, which fails for images,
-// and Zed caches images by path for the app's lifetime, so an overwritten file would show a
-// stale picture. Saving each image under a fresh path and linking it sidesteps both.
-// ponytail: copies are left for the OS temp cleanup; delete per session if disk use matters.
-export function snapshotImageMarkdown(
-  result: unknown,
-  sourcePath: string,
-  dir = join(tmpdir(), 'pi-acp-images')
-): string | undefined {
-  const content = (result as any)?.content
-  const image = Array.isArray(content) ? content.find((c: any) => c?.type === 'image') : undefined
-  if (typeof image?.data !== 'string' || typeof image?.mimeType !== 'string') return undefined
-
-  const ext = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png'
-  const stem = basename(sourcePath, extname(sourcePath)).replace(/[^\p{L}\p{N}._-]+/gu, '-') || 'image'
-  const name = `${stem}.${ext}`
-  const file = join(dir, randomUUID(), name)
+// and Zed caches images by path for the app's lifetime. A folder per image content keeps
+// paths stable for the same picture (a reopened thread reuses its files) and new for a changed one.
+function saveImage(image: ImageBlock, name: string, dir: string): string | undefined {
+  const folder = join(dir, createHash('sha256').update(image.data).digest('hex').slice(0, 16))
   try {
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, Buffer.from(image.data, 'base64'))
+    const existing = readdirSync(folder).find(f => !f.endsWith('.tmp'))
+    if (existing) return join(folder, existing)
   } catch {
+    // not saved yet
+  }
+  const ext = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png'
+  const stem = basename(name, extname(name)).replace(/[^\p{L}\p{N}._-]+/gu, '-') || 'image'
+  const file = join(folder, `${stem}.${ext}`)
+  const tmp = `${file}.${process.pid}.tmp`
+  try {
+    mkdirSync(folder, { recursive: true, mode: 0o700 })
+    writeFileSync(tmp, Buffer.from(image.data, 'base64'), { mode: 0o600 })
+    renameSync(tmp, file)
+  } catch {
+    void rm(tmp, { force: true }).catch(() => {})
     return undefined
   }
-  return `[![${name}](<${file}>)](<${file}>)`
+  return file
+}
+
+// On Linux the temp dir is shared, so another user could create the folder first and plant files in it.
+function isOwnPrivateDir(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const stat = lstatSync(dir)
+    return stat.isDirectory() && stat.uid === (process.getuid?.() ?? stat.uid) && (stat.mode & 0o022) === 0
+  } catch {
+    return false
+  }
+}
+
+// ponytail: copies are left for the OS temp cleanup (about 3 days on macOS); reopening a thread saves them again.
+/** Saves each image in a tool result and returns the files, named after `name` (a file path or the tool's name). */
+export function saveImages(result: unknown, name: string, dir = join(tmpdir(), 'pi-acp-images')): string[] {
+  const images = imageBlocks(result)
+  if (!images.length || !isOwnPrivateDir(dir)) return []
+  return images.map(image => saveImage(image, name, dir)).filter((file): file is string => Boolean(file))
+}
+
+/** A clickable picture for each file. */
+export function imageMarkdown(files: string[]): string {
+  return files.map(file => `[![${basename(file)}](<${file}>)](<${file}>)`).join('\n\n')
+}
+
+/** Saves a tool result's images and returns them with the card text: the pictures, then the result's text. */
+export function imageResultText(result: unknown, name: string): { images: string[]; text: string } {
+  const images = saveImages(result, name)
+  return { images, text: [imageMarkdown(images), toolResultToText(result)].filter(Boolean).join('\n\n') }
+}
+
+// ponytail: Zed can't open an image from a card's location, only from a link. Once it can
+// (zed-industries/zed#65823), send the image as the card's location and drop this.
+/** The title as a link to the image. */
+export function imageLinkTitle(title: string, file: string): string {
+  return `[${title.replace(/[\\[\]]/g, '\\$&')}](<${file}>)`
+}
+
+/** The result with image data left out: Zed only ever shows `rawOutput` as JSON text, and the card shows the images. */
+export function withoutImageData(result: unknown): unknown {
+  if (!imageBlocks(result).length) return result
+  const { content } = result as { content: unknown[] }
+  return {
+    ...(result as object),
+    content: content.map(c => (isImageBlock(c) ? { type: 'image', mimeType: c.mimeType } : c))
+  }
 }
 
 export function toolResultToText(result: unknown): string {
@@ -79,7 +139,7 @@ export function toolResultToText(result: unknown): string {
   }
 
   try {
-    return JSON.stringify(result, null, 2)
+    return JSON.stringify(withoutImageData(result), null, 2)
   } catch {
     return String(result)
   }

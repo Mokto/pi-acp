@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -6,6 +7,10 @@ import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { NARRATED_TOOL_CALL_COMPACT_TIP } from '../../src/acp/translate/narrated-tool-calls.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+
+// Saved images are shared across runs and keep their first name, so each run uses new bytes.
+const readBytes = `png-bytes-${randomUUID()}`
+const screenshotBytes = `screenshot-bytes-${randomUUID()}`
 
 test('PiAcpSession: showInClient emits user_message_chunk; Zed prompt does not', async () => {
   const conn = new FakeAgentSideConnection()
@@ -1662,7 +1667,7 @@ test('PiAcpSession: an image read shows a clickable copy of the image in the too
     result: {
       content: [
         { type: 'text', text: 'Read image file [image/png]' },
-        { type: 'image', data: Buffer.from('png-bytes').toString('base64'), mimeType: 'image/png' }
+        { type: 'image', data: Buffer.from(readBytes).toString('base64'), mimeType: 'image/png' }
       ]
     }
   })
@@ -1672,5 +1677,47 @@ test('PiAcpSession: an image read shows a clickable copy of the image in the too
   const text = (conn.updates.at(-1)!.update as any).content[0].content.text as string
   const file = text.match(/^\[!\[shot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nRead image file \[image\/png\]$/)?.[1]
   assert.ok(file, text)
-  assert.equal(readFileSync(file, 'utf8'), 'png-bytes')
+  const update = conn.updates.at(-1)!.update as any
+  assert.equal(update.title, `[Read shot.png](<${file}>)`)
+  assert.deepEqual(update.locations, [], 'Zed only makes the title clickable without a location')
+  assert.equal(readFileSync(file, 'utf8'), readBytes)
+})
+
+test('PiAcpSession: a screenshot tool shows its images in the tool card, without their bytes in rawOutput', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: '/repo',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'page_snapshot', args: { path: '/' } })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    toolName: 'page_snapshot',
+    isError: false,
+    result: {
+      content: [
+        { type: 'text', text: 'Script on /, 1 image.' },
+        { type: 'image', data: Buffer.from(screenshotBytes).toString('base64'), mimeType: 'image/png' }
+      ]
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const update = conn.updates.at(-1)!.update as any
+  const text = update.content[0].content.text as string
+  const file = text.match(/^\[!\[page_snapshot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nScript on \/, 1 image\.$/)?.[1]
+  assert.ok(file, text)
+  assert.equal(readFileSync(file, 'utf8'), screenshotBytes)
+  assert.deepEqual(update.rawOutput.content[1], { type: 'image', mimeType: 'image/png' })
+  assert.equal(update.title, `[Page Snapshot: /](<${file}>)`, 'a click on the title opens the screenshot')
+  assert.equal(update.locations, undefined)
 })
