@@ -1944,18 +1944,12 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
-        if ((ev as any).success === false) {
-          const finalError = String((ev as any).finalError ?? '').trim()
-          const message = isRateLimitError(finalError)
-            ? extractRateLimitMessage(finalError)
-            : extractUserFacingError(finalError) || 'Request failed after retries.'
-          void this.handleTerminalFailure(message)
-          break
-        }
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: '\n\nRetry finished, resuming.' } satisfies ContentBlock
-        })
+        if ((ev as any).success !== false) break
+        const finalError = String((ev as any).finalError ?? '').trim()
+        const message = isRateLimitError(finalError)
+          ? extractRateLimitMessage(finalError)
+          : extractUserFacingError(finalError) || 'Request failed after retries.'
+        void this.handleTerminalFailure(message)
         break
       }
 
@@ -2265,7 +2259,7 @@ function optionIndex(optionId: string): number | null {
 }
 
 const NETWORK_ERROR_PATTERN =
-  /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i
+  /fetch failed|\bterminated\b|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i
 
 const RATE_LIMIT_USER_MESSAGE = "This request would exceed your account's rate limit. Please try again later."
 
@@ -2406,7 +2400,7 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const delayMs = Number((ev as any).delayMs)
 
   if (!Number.isFinite(attempt) || !Number.isFinite(maxAttempts) || !Number.isFinite(delayMs)) {
-    return 'Retrying...'
+    return 'Retrying…'
   }
 
   let delaySeconds = Math.round(delayMs / 1000)
@@ -2415,9 +2409,10 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   const errorMessage = String((ev as any).errorMessage ?? '').trim()
   const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage)
   const facing = extractUserFacingError(errorMessage)
-  const reason = isNetworkError || !facing ? (isNetworkError ? 'Network error' : null) : truncateTitle(facing, 150)
-  const prefix = reason ? `${reason} — r` : 'R'
-  return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
+  const reason = isNetworkError ? 'Connection lost' : facing ? truncateTitle(facing, 150) : null
+  const wait = delaySeconds > 0 ? ` in ${delaySeconds}s` : ''
+  const retry = `Retrying${wait} (attempt ${attempt} of ${maxAttempts})…`
+  return reason ? `${reason}${/[.!?…]$/.test(reason) ? '' : '.'} ${retry}` : retry
 }
 
 const TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g
