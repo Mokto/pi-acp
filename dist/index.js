@@ -409,8 +409,8 @@ var PiRpcProcess = class _PiRpcProcess {
       const sessionFile = typeof state?.sessionFile === "string" ? state.sessionFile : null;
       if (sessionFile) {
         const { mkdirSync: mkdirSync4 } = await import("fs");
-        const { dirname: dirname6 } = await import("path");
-        mkdirSync4(dirname6(sessionFile), { recursive: true });
+        const { dirname: dirname5 } = await import("path");
+        mkdirSync4(dirname5(sessionFile), { recursive: true });
       }
     } catch {
     }
@@ -699,25 +699,72 @@ var SessionStore = class {
 };
 
 // src/acp/translate/pi-tools.ts
-import { randomUUID } from "crypto";
-import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2 } from "fs";
+import { createHash } from "crypto";
+import { lstatSync, mkdirSync as mkdirSync2, readdirSync, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "fs";
+import { rm } from "fs/promises";
 import { tmpdir } from "os";
-import { basename, dirname as dirname3, extname, join as join3 } from "path";
-function snapshotImageMarkdown(result, sourcePath, dir = join3(tmpdir(), "pi-acp-images")) {
+import { basename, extname, join as join3 } from "path";
+function isImageBlock(c) {
+  const block = c;
+  return block?.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string";
+}
+function imageBlocks(result) {
   const content = result?.content;
-  const image = Array.isArray(content) ? content.find((c) => c?.type === "image") : void 0;
-  if (typeof image?.data !== "string" || typeof image?.mimeType !== "string") return void 0;
-  const ext = image.mimeType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
-  const stem = basename(sourcePath, extname(sourcePath)).replace(/[^\p{L}\p{N}._-]+/gu, "-") || "image";
-  const name = `${stem}.${ext}`;
-  const file = join3(dir, randomUUID(), name);
+  return Array.isArray(content) ? content.filter(isImageBlock) : [];
+}
+function saveImage(image, name, dir) {
+  const folder = join3(dir, createHash("sha256").update(image.data).digest("hex").slice(0, 16));
   try {
-    mkdirSync2(dirname3(file), { recursive: true });
-    writeFileSync2(file, Buffer.from(image.data, "base64"));
+    const existing = readdirSync(folder).find((f) => !f.endsWith(".tmp"));
+    if (existing) return join3(folder, existing);
   } catch {
+  }
+  const ext = image.mimeType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
+  const stem = basename(name, extname(name)).replace(/[^\p{L}\p{N}._-]+/gu, "-") || "image";
+  const file = join3(folder, `${stem}.${ext}`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    mkdirSync2(folder, { recursive: true, mode: 448 });
+    writeFileSync2(tmp, Buffer.from(image.data, "base64"), { mode: 384 });
+    renameSync2(tmp, file);
+  } catch {
+    void rm(tmp, { force: true }).catch(() => {
+    });
     return void 0;
   }
-  return `[![${name}](<${file}>)](<${file}>)`;
+  return file;
+}
+function isOwnPrivateDir(dir) {
+  try {
+    mkdirSync2(dir, { recursive: true, mode: 448 });
+    const stat = lstatSync(dir);
+    return stat.isDirectory() && stat.uid === (process.getuid?.() ?? stat.uid) && (stat.mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function saveImages(result, name, dir = join3(tmpdir(), "pi-acp-images")) {
+  const images = imageBlocks(result);
+  if (!images.length || !isOwnPrivateDir(dir)) return [];
+  return images.map((image) => saveImage(image, name, dir)).filter((file) => Boolean(file));
+}
+function imageMarkdown(files) {
+  return files.map((file) => `[![${basename(file)}](<${file}>)](<${file}>)`).join("\n\n");
+}
+function imageResultText(result, name) {
+  const images = saveImages(result, name);
+  return { images, text: [imageMarkdown(images), toolResultToText(result)].filter(Boolean).join("\n\n") };
+}
+function imageLinkTitle(title, file) {
+  return `[${title.replace(/[\\[\]]/g, "\\$&")}](<${file}>)`;
+}
+function withoutImageData(result) {
+  if (!imageBlocks(result).length) return result;
+  const { content } = result;
+  return {
+    ...result,
+    content: content.map((c) => isImageBlock(c) ? { type: "image", mimeType: c.mimeType } : c)
+  };
 }
 function toolResultToText(result) {
   if (!result) return "";
@@ -746,7 +793,7 @@ ${stderr}`);
     return parts.join("\n\n").trimEnd();
   }
   try {
-    return JSON.stringify(result, null, 2);
+    return JSON.stringify(withoutImageData(result), null, 2);
   } catch {
     return String(result);
   }
@@ -835,7 +882,7 @@ function planNarratedToolCallEmit(accumulated, alreadyEmitted) {
 }
 
 // src/acp/translate/plan-usage.ts
-import { readdirSync, readFileSync as readFileSync4 } from "fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync4 } from "fs";
 import { basename as basename2, join as join5 } from "path";
 
 // src/acp/pi-settings.ts
@@ -963,7 +1010,7 @@ function isUsageWindow(w) {
 function readPlanUsage(dir = getPlanUsageDir()) {
   let files;
   try {
-    files = readdirSync(dir).filter((f) => /^[a-z0-9-]+\.json$/.test(f));
+    files = readdirSync2(dir).filter((f) => /^[a-z0-9-]+\.json$/.test(f));
   } catch {
     return null;
   }
@@ -1262,7 +1309,7 @@ function buildSessionConfigOptions(models, thinking, usage = null, compactAt = n
 }
 
 // src/acp/slash-commands.ts
-import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { existsSync as existsSync4, readdirSync as readdirSync3, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir3 } from "os";
 import { join as join6, resolve as resolve3 } from "path";
 function parseFrontmatter(content) {
@@ -1282,7 +1329,7 @@ function loadCommandsFromDir(dir, source, subdir = "") {
   const commands = [];
   if (!existsSync4(dir)) return commands;
   try {
-    const entries = readdirSync2(dir, { withFileTypes: true });
+    const entries = readdirSync3(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = join6(dir, entry.name);
       if (entry.isDirectory()) {
@@ -1458,8 +1505,8 @@ var TimeoutError = class extends Error {
 };
 
 // src/acp/background-compaction.ts
-import { randomUUID as randomUUID2 } from "crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { randomUUID } from "crypto";
+import { chmod, mkdir, readFile, rename, rm as rm2, writeFile } from "fs/promises";
 import { join as join7 } from "path";
 function backgroundLead(limit) {
   return Math.min(32e3, Math.max(8e3, Math.round(limit * 0.125)));
@@ -1514,15 +1561,15 @@ var BackgroundCompaction = class {
     this.stopRunning = null;
     const file = this.ready?.file;
     this.ready = null;
-    if (file) await rm(file, { force: true });
+    if (file) await rm2(file, { force: true });
   }
   async write(session, tokens, limit, generation) {
     const { file, id } = await session;
     const dir = getPiAcpCompactionDir();
     await mkdir(dir, { recursive: true, mode: 448 });
     await chmod(dir, 448);
-    const copy = join7(dir, `${randomUUID2()}.jsonl`);
-    const partial = join7(dir, `${randomUUID2()}.json.tmp`);
+    const copy = join7(dir, `${randomUUID()}.jsonl`);
+    const partial = join7(dir, `${randomUUID()}.json.tmp`);
     const text = await readFile(file, "utf8");
     try {
       await writeFile(copy, text.slice(0, text.lastIndexOf("\n") + 1), { mode: 384 });
@@ -1549,13 +1596,13 @@ var BackgroundCompaction = class {
       if (this.generation !== generation) return;
       await rename(partial, handoff);
       if (this.generation !== generation) {
-        await rm(handoff, { force: true });
+        await rm2(handoff, { force: true });
         return;
       }
       this.ready = { refreshAt, maxTokensBefore, file: handoff };
     } finally {
-      await rm(copy, { force: true });
-      await rm(partial, { force: true });
+      await rm2(copy, { force: true });
+      await rm2(partial, { force: true });
     }
   }
 };
@@ -1870,8 +1917,8 @@ var PiAcpSession = class _PiAcpSession {
   customTitledToolCallIds = /* @__PURE__ */ new Set();
   // Set when a retry/rate-limit failure rejects the ACP prompt (Zed error state).
   turnTerminalFailureHandled = false;
-  // pi can emit several `turn_end` and `agent_end` events for one prompt (tool use, retry,
-  // compaction, queued follow-ups). The prompt is done only when pi emits `agent_settled`.
+  // From `agent_start` to `agent_settled`. pi can emit several `turn_end` and `agent_end` events for
+  // one prompt (tool use, retry, compaction, queued follow-ups); it is idle only after `agent_settled`.
   inAgentLoop = false;
   // Error from the current run's `agent_end`, reported on `agent_settled`. Cleared on
   // `agent_start`, so a failed attempt that pi retried doesn't fail the turn.
@@ -2332,28 +2379,15 @@ var PiAcpSession = class _PiAcpSession {
         void (async () => {
           await this.flushEmits();
           const authErr = maybeAuthRequiredError(err);
-          if (authErr) {
-            this.pendingTurn?.reject(authErr);
-          } else {
+          if (!authErr) {
             const errorMessage = err instanceof Error ? err.message : String(err ?? "Unknown error");
             this.emit({
               sessionUpdate: "agent_message_chunk",
               content: { type: "text", text: `Error: ${errorMessage}` }
             });
             await this.flushEmits();
-            const reason = this.cancelRequested ? "cancelled" : "error";
-            this.pendingTurn?.resolve(reason);
           }
-          this.pendingTurn = null;
-          this.inFlightTurn = null;
-          this.cursorSdkAuthRetries = 0;
-          this.pendingTurnIsExtensionCommand = false;
-          this.inAgentLoop = false;
-          this.clearTurnWatchdog();
-          this.emit({
-            sessionUpdate: "session_info_update",
-            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-          });
+          if (this.pendingTurn) this.completeTurn(this.cancelRequested ? "cancelled" : "error", authErr ?? void 0);
         })();
       }
     );
@@ -2445,15 +2479,27 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
   }
   // Resolve the current turn and start the next queued one (if any). Shared by the
   // `agent_settled` event and synchronous command turns that produce no agent loop.
-  completeTurn(reason) {
+  completeTurn(reason, error) {
+    this.answerTurn(reason, error);
+    this.afterTurn(reason);
+  }
+  /** Answers the client's prompt request; `afterTurn` follows once pi is idle. */
+  answerTurn(reason, error) {
     this.finishLiveTurnIndicator();
     this.clearTurnWatchdog();
-    this.pendingTurn?.resolve(reason);
+    if (error === void 0) this.pendingTurn?.resolve(reason);
+    else this.pendingTurn?.reject(error);
     this.pendingTurn = null;
     this.inFlightTurn = null;
     this.cursorSdkAuthRetries = 0;
     this.pendingTurnIsExtensionCommand = false;
-    this.inAgentLoop = false;
+  }
+  /**
+   * Sends pi the model or thinking picked during the reply, then compacts or starts the next queued message.
+   * Needs the client answered and pi idle: after a retry or rate-limit failure, whichever of
+   * handleTerminalFailure and `agent_settled` comes second calls it.
+   */
+  afterTurn(reason) {
     void this.flushDeferredConfig().finally(() => {
       if (this.shouldCompactAfterReply(reason)) void this.compactAfterReply();
       else {
@@ -2507,18 +2553,8 @@ ${message}` }
     }
     await this.flushEmits();
     if (this.pendingTurnIsExtensionCommand) return;
-    this.finishLiveTurnIndicator();
-    this.clearTurnWatchdog();
-    this.pendingTurn?.reject(RequestError2.internalError({}, message));
-    this.pendingTurn = null;
-    this.inFlightTurn = null;
-    this.cursorSdkAuthRetries = 0;
-    this.pendingTurnIsExtensionCommand = false;
-    this.inAgentLoop = false;
-    this.emit({
-      sessionUpdate: "session_info_update",
-      _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-    });
+    this.answerTurn("error", RequestError2.internalError({}, message));
+    if (!this.inAgentLoop) this.afterTurn("error");
   }
   startNextQueuedTurn() {
     const next = this.turnQueue.shift();
@@ -2920,10 +2956,12 @@ ${message}` }
           });
         } else {
           this.currentToolCalls.set(toolCallId, "in_progress");
+          const title = toToolTitle(toolName, args, this.cwd);
+          this.originalToolTitles.set(toolCallId, title);
           this.emit({
             sessionUpdate: "tool_call_update",
             toolCallId,
-            title: toToolTitle(toolName, args, this.cwd),
+            title,
             status: "in_progress",
             locations,
             content: initialFileContent,
@@ -2989,7 +3027,7 @@ ${message}` }
           toolCallId,
           status: "in_progress",
           content: text ? [{ type: "content", content: { type: "text", text } }] : void 0,
-          ...this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial }
+          ...this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: withoutImageData(partial) }
         });
         break;
       }
@@ -3013,10 +3051,7 @@ ${message}` }
           break;
         }
         const readPath = this.readToolCallPaths.get(toolCallId);
-        const imageMarkdown = readPath && !isError ? snapshotImageMarkdown(result, readPath) : void 0;
-        const text = imageMarkdown ? `${imageMarkdown}
-
-${toolResultToText(result)}` : toolResultToText(result);
+        const { images, text } = imageResultText(result, readPath ?? String(ev.toolName ?? "image"));
         const snapshot = this.fileSnapshots.get(toolCallId);
         const initialDiffEmitted = this.fileMutationDiffsEmitted.has(toolCallId);
         let content;
@@ -3044,14 +3079,18 @@ ${toolResultToText(result)}` : toolResultToText(result);
         if (!content && !hasStructuredDiff && text) {
           content = [{ type: "content", content: { type: "text", text } }];
         }
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? this.originalToolTitles.get(toolCallId) : void 0;
+        const baseTitle = this.originalToolTitles.get(toolCallId);
+        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0;
+        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
-          ...restoredTitle ? { title: restoredTitle } : {},
+          ...title ? { title } : {},
+          // Zed makes a title with a location unclickable, so an image read drops it for the link.
+          ...images[0] && readPath ? { locations: [] } : {},
           content,
-          ...hasStructuredDiff ? {} : { rawOutput: result }
+          ...hasStructuredDiff ? {} : { rawOutput: withoutImageData(result) }
         });
         this.cleanupToolCall(toolCallId);
         break;
@@ -3148,7 +3187,11 @@ ${formatAutoRetryMessage(ev)}` }
         break;
       }
       case "agent_settled": {
-        if (this.turnTerminalFailureHandled) break;
+        this.inAgentLoop = false;
+        if (this.turnTerminalFailureHandled) {
+          if (!this.pendingTurn) this.afterTurn("error");
+          break;
+        }
         const turnError = this.agentRunError;
         if (this.tryRetryCursorSdkAuthFlake(turnError)) break;
         if (turnError) {
@@ -3514,9 +3557,9 @@ function toToolKind(toolName) {
 }
 
 // src/pi-rpc/spare.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import { readFileSync as readFileSync7, statSync } from "fs";
-import { dirname as dirname4, join as join8 } from "path";
+import { dirname as dirname3, join as join8 } from "path";
 var MAX_AGE_MS = 10 * 6e4;
 function startupInputs(cwd) {
   const agentDir = getAgentDir();
@@ -3524,11 +3567,11 @@ function startupInputs(cwd) {
     (f) => join8(agentDir, f)
   );
   paths.push(join8(cwd, ".pi", "settings.json"), join8(cwd, ".pi", "extensions"));
-  for (let dir = cwd; ; dir = dirname4(dir)) {
+  for (let dir = cwd; ; dir = dirname3(dir)) {
     paths.push(join8(dir, "AGENTS.md"), join8(dir, "CLAUDE.md"));
-    if (dirname4(dir) === dir) break;
+    if (dirname3(dir) === dir) break;
   }
-  const hash = createHash("sha1");
+  const hash = createHash2("sha1");
   for (const p of paths) {
     try {
       const st = statSync(p);
@@ -3595,7 +3638,7 @@ function disposeSpare(spare) {
 }
 
 // src/acp/pi-sessions.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync8, statSync as statSync2, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
+import { readdirSync as readdirSync4, readFileSync as readFileSync8, statSync as statSync2, openSync, readSync, closeSync, existsSync as existsSync6 } from "fs";
 import { homedir as homedir4 } from "os";
 import { join as join9, resolve as resolve4, isAbsolute as isAbsolute3 } from "path";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
@@ -3624,7 +3667,7 @@ function getPiSessionsDir() {
 function walkJsonlFiles(dir, out) {
   let entries;
   try {
-    entries = readdirSync3(dir, { withFileTypes: true, encoding: "utf8" });
+    entries = readdirSync4(dir, { withFileTypes: true, encoding: "utf8" });
   } catch {
     return;
   }
@@ -4082,9 +4125,9 @@ import {
   chmodSync,
   existsSync as existsSync7,
   mkdirSync as mkdirSync3,
-  readdirSync as readdirSync4,
+  readdirSync as readdirSync5,
   readFileSync as readFileSync9,
-  renameSync as renameSync2,
+  renameSync as renameSync3,
   unlinkSync,
   writeFileSync as writeFileSync3
 } from "fs";
@@ -4111,7 +4154,7 @@ function sweepStaleLiveFiles(liveDir = getPiAcpLiveDir()) {
   if (!existsSync7(liveDir)) return;
   let names = [];
   try {
-    names = readdirSync4(liveDir);
+    names = readdirSync5(liveDir);
   } catch {
     return;
   }
@@ -4246,7 +4289,7 @@ var LiveServer = class {
     const tmp = `${this.registryPath}.tmp`;
     try {
       writeFileSync3(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf-8", mode: 384 });
-      renameSync2(tmp, this.registryPath);
+      renameSync3(tmp, this.registryPath);
       chmodSync(this.registryPath, 384);
     } catch {
       try {
@@ -4386,10 +4429,10 @@ var LiveServer = class {
 
 // src/acp/agent.ts
 import { isAbsolute as isAbsolute4 } from "path";
-import { existsSync as existsSync8, readFileSync as readFileSync10, realpathSync as realpathSync2, readdirSync as readdirSync5, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
-import { join as join11, dirname as dirname5, basename as basename4 } from "path";
+import { existsSync as existsSync8, readFileSync as readFileSync10, realpathSync as realpathSync2, readdirSync as readdirSync6, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
+import { join as join11, dirname as dirname4, basename as basename4 } from "path";
 import { spawnSync as spawnSync2 } from "child_process";
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL2 } from "url";
 function getMessagesTimeoutMs() {
   const v = Number(process.env.PI_ACP_GET_MESSAGES_TIMEOUT_MS);
@@ -4852,7 +4895,7 @@ ${text}`;
     if (!options.length) return null;
     const res = await this.conn.requestPermission({
       sessionId,
-      toolCall: { toolCallId: `pi-auth-${randomUUID3()}`, title, kind: "other", status: "pending" },
+      toolCall: { toolCallId: `pi-auth-${randomUUID2()}`, title, kind: "other", status: "pending" },
       options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
     });
     if (res.outcome.outcome !== "selected") return null;
@@ -5128,7 +5171,7 @@ ${JSON.stringify(stats, null, 2)}`;
             const piPath = String(which.stdout ?? "").split(/\r?\n/)[0]?.trim();
             if (piPath) {
               const resolved = realpathSync2(piPath);
-              const pkgRoot = dirname5(dirname5(resolved));
+              const pkgRoot = dirname4(dirname4(resolved));
               const p = join11(pkgRoot, "CHANGELOG.md");
               if (existsSync8(p)) return p;
             }
@@ -5444,7 +5487,7 @@ ${JSON.stringify(stats, null, 2)}`;
             await this.conn.sessionUpdate({
               sessionId: session.sessionId,
               update: compactionUpdate(
-                `compaction-${timestamp ?? randomUUID3()}`,
+                `compaction-${timestamp ?? randomUUID2()}`,
                 {
                   status: "completed",
                   summary,
@@ -5498,19 +5541,19 @@ ${JSON.stringify(stats, null, 2)}`;
               title: toolName,
               kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: "completed",
-              rawInput: null,
-              rawOutput: m
+              rawInput: null
             }
           });
-          const text = toolResultToText(m);
+          const { images, text } = imageResultText(m, toolName);
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: "tool_call_update",
               toolCallId,
               status: isError ? "failed" : "completed",
+              ...images[0] ? { title: imageLinkTitle(toolName, images[0]) } : {},
               content: text ? [{ type: "content", content: { type: "text", text } }] : null,
-              rawOutput: m
+              rawOutput: withoutImageData(m)
             }
           });
         }
@@ -5793,7 +5836,7 @@ function buildStartupInfo(opts) {
   const skillsItems = [];
   const pushSkillFromRoot = (root) => {
     try {
-      for (const e of readdirSync5(root)) {
+      for (const e of readdirSync6(root)) {
         const p = join11(root, e);
         try {
           const st = statSync3(p);
@@ -5808,7 +5851,7 @@ function buildStartupInfo(opts) {
         const dir = stack.pop();
         let entries = [];
         try {
-          entries = readdirSync5(dir);
+          entries = readdirSync6(dir);
         } catch {
           continue;
         }
@@ -5841,7 +5884,7 @@ function buildStartupInfo(opts) {
   const promptsItems = [];
   const promptsDir = join11(process.env.HOME ?? "", ".pi", "agent", "prompts");
   try {
-    const prompts = readdirSync5(promptsDir).filter((f) => f.endsWith(".md"));
+    const prompts = readdirSync6(promptsDir).filter((f) => f.endsWith(".md"));
     for (const f of prompts) promptsItems.push(`/${basename4(f, ".md")}`);
   } catch {
   }
@@ -5849,7 +5892,7 @@ function buildStartupInfo(opts) {
   const extItems = [];
   const extDir = join11(process.env.HOME ?? "", ".pi", "agent", "extensions");
   try {
-    const exts = readdirSync5(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
+    const exts = readdirSync6(extDir).filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
     for (const f of exts) extItems.push(join11(extDir, f));
   } catch {
   }
@@ -5878,14 +5921,14 @@ function buildStartupInfo(opts) {
 }
 function readNearestPackageJson(metaUrl) {
   try {
-    let dir = dirname5(fileURLToPath2(metaUrl));
+    let dir = dirname4(fileURLToPath2(metaUrl));
     for (let i = 0; i < 6; i++) {
       const p = join11(dir, "package.json");
       if (existsSync8(p)) {
         const json = JSON.parse(readFileSync10(p, "utf-8"));
         return { name: json?.name, version: json?.version };
       }
-      dir = dirname5(dir);
+      dir = dirname4(dir);
     }
   } catch {
   }
