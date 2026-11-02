@@ -3121,16 +3121,10 @@ ${formatAutoRetryMessage(ev)}` }
         break;
       }
       case "auto_retry_end": {
-        if (ev.success === false) {
-          const finalError = String(ev.finalError ?? "").trim();
-          const message = isRateLimitError(finalError) ? extractRateLimitMessage(finalError) : extractUserFacingError(finalError) || "Request failed after retries.";
-          void this.handleTerminalFailure(message);
-          break;
-        }
-        this.emit({
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "\n\nRetry finished, resuming." }
-        });
+        if (ev.success !== false) break;
+        const finalError = String(ev.finalError ?? "").trim();
+        const message = isRateLimitError(finalError) ? extractRateLimitMessage(finalError) : extractUserFacingError(finalError) || "Request failed after retries.";
+        void this.handleTerminalFailure(message);
         break;
       }
       // pi emits compaction_start/end (with reason: "auto" | "manual").
@@ -3371,7 +3365,7 @@ function optionIndex(optionId) {
   const index = Number(rawIndex);
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null;
 }
-var NETWORK_ERROR_PATTERN = /fetch failed|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i;
+var NETWORK_ERROR_PATTERN = /fetch failed|\bterminated\b|network.?error|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|connection.?refused|connection.?reset|connection.?error|unable to connect|no network/i;
 var RATE_LIMIT_USER_MESSAGE = "This request would exceed your account's rate limit. Please try again later.";
 function isRateLimitError(errorMessage) {
   const s = errorMessage.trim();
@@ -3475,16 +3469,17 @@ function formatAutoRetryMessage(ev) {
   const maxAttempts = Number(ev.maxAttempts);
   const delayMs = Number(ev.delayMs);
   if (!Number.isFinite(attempt) || !Number.isFinite(maxAttempts) || !Number.isFinite(delayMs)) {
-    return "Retrying...";
+    return "Retrying\u2026";
   }
   let delaySeconds = Math.round(delayMs / 1e3);
   if (delayMs > 0 && delaySeconds === 0) delaySeconds = 1;
   const errorMessage = String(ev.errorMessage ?? "").trim();
   const isNetworkError = NETWORK_ERROR_PATTERN.test(errorMessage);
   const facing = extractUserFacingError(errorMessage);
-  const reason = isNetworkError || !facing ? isNetworkError ? "Network error" : null : truncateTitle(facing, 150);
-  const prefix = reason ? `${reason} \u2014 r` : "R";
-  return `${prefix}etrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`;
+  const reason = isNetworkError ? "Connection lost" : facing ? truncateTitle(facing, 150) : null;
+  const wait = delaySeconds > 0 ? ` in ${delaySeconds}s` : "";
+  const retry = `Retrying${wait} (attempt ${attempt} of ${maxAttempts})\u2026`;
+  return reason ? `${reason}${/[.!?…]$/.test(reason) ? "" : "."} ${retry}` : retry;
 }
 var TITLE_ARG_PATTERN = /"(path|file_path|query|url|command)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 function streamedTitleArgs(json) {
