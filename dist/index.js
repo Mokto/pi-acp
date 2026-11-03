@@ -1904,6 +1904,7 @@ var PiAcpSession = class _PiAcpSession {
   // state. Supplied by the agent so the session can refresh selectors when pi
   // changes thinking/model outside of an ACP set request.
   refreshConfigOptions = null;
+  sentConfigOptions = null;
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -2633,9 +2634,17 @@ ${message}` }
     if (!refresh) return;
     try {
       const configOptions = this.withDeferredConfig(await refresh());
+      const json = JSON.stringify(configOptions);
+      if (json === this.sentConfigOptions) return;
+      this.sentConfigOptions = json;
       this.emit({ sessionUpdate: "config_option_update", configOptions });
     } catch {
     }
+  }
+  /** Records options Zed got some other way (a response), so a push only sends real changes. */
+  configOptionsSent(options) {
+    this.sentConfigOptions = JSON.stringify(options);
+    return options;
   }
   // Drives Zed's context ring next to the composer dropdowns. Skipped when pi doesn't
   // know the model's window or has no post-compaction count yet.
@@ -4719,7 +4728,9 @@ var PiAcpAgent = class {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
+      configOptions: session.configOptionsSent(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      ),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -4920,7 +4931,9 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          configOptions: fresh.configOptionsSent(
+            buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          )
         }
       });
     } catch (e) {
@@ -4967,7 +4980,9 @@ ${text}`;
         sessionId,
         update: {
           sessionUpdate: "config_option_update",
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          configOptions: fresh.configOptionsSent(
+            buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          )
         }
       });
     } catch (e) {
@@ -5572,7 +5587,9 @@ ${JSON.stringify(stats, null, 2)}`;
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
+      configOptions: session.configOptionsSent(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      ),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -5630,8 +5647,8 @@ ${JSON.stringify(stats, null, 2)}`;
     const models = await getModelState(session.proc, { cwd: session.cwd });
     const thinking = await getThinkingState(session.proc);
     return {
-      configOptions: session.withDeferredConfig(
-        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      configOptions: session.configOptionsSent(
+        session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt))
       )
     };
   }
