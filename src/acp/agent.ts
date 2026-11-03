@@ -443,7 +443,9 @@ export class PiAcpAgent implements ACPAgent {
       sessionId: session.sessionId,
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
+      configOptions: session.configOptionsSent(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      ),
       _meta: {
         piAcp: {
           startupInfo: preludeText || null
@@ -706,7 +708,9 @@ export class PiAcpAgent implements ACPAgent {
         sessionId,
         update: {
           sessionUpdate: 'config_option_update',
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          configOptions: fresh.configOptionsSent(
+            buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          )
         }
       })
     } catch (e) {
@@ -759,7 +763,9 @@ export class PiAcpAgent implements ACPAgent {
         sessionId,
         update: {
           sessionUpdate: 'config_option_update',
-          configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          configOptions: fresh.configOptionsSent(
+            buildSessionConfigOptions(models, thinking, readPlanUsage(), fresh.compactAt)
+          )
         }
       })
     } catch (e) {
@@ -1496,7 +1502,9 @@ export class PiAcpAgent implements ACPAgent {
     const response = {
       models,
       modes: thinking,
-      configOptions: buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt),
+      configOptions: session.configOptionsSent(
+        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      ),
       _meta: {
         piAcp: {
           startupInfo: null
@@ -1565,8 +1573,8 @@ export class PiAcpAgent implements ACPAgent {
     const models = await getModelState(session.proc, { cwd: session.cwd })
     const thinking = await getThinkingState(session.proc)
     return {
-      configOptions: session.withDeferredConfig(
-        buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt)
+      configOptions: session.configOptionsSent(
+        session.withDeferredConfig(buildSessionConfigOptions(models, thinking, readPlanUsage(), session.compactAt))
       )
     }
   }

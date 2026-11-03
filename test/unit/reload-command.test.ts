@@ -10,6 +10,7 @@ function fakeSession(command: string, opts: { activeTurn?: boolean } = {}) {
     mcpServers: [],
     hasActiveTurn: () => opts.activeTurn ?? false,
     setPiExtensionCommands() {},
+    configOptionsSent: <T>(options: T) => options,
     proc: {
       getCommands: async () => ({ commands: [{ name: command, source: 'prompt' }] }),
       getState: async () => ({}),

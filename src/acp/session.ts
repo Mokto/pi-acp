@@ -421,6 +421,7 @@ export class PiAcpSession {
   // state. Supplied by the agent so the session can refresh selectors when pi
   // changes thinking/model outside of an ACP set request.
   private refreshConfigOptions: (() => Promise<SessionConfigOption[]>) | null = null
+  private sentConfigOptions: string | null = null
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -1355,10 +1356,20 @@ export class PiAcpSession {
     if (!refresh) return
     try {
       const configOptions = this.withDeferredConfig(await refresh())
+      const json = JSON.stringify(configOptions)
+      // Zed rebuilds every composer dropdown on each update, and this runs after every model call.
+      if (json === this.sentConfigOptions) return
+      this.sentConfigOptions = json
       this.emit({ sessionUpdate: 'config_option_update', configOptions })
     } catch {
       // ignore
     }
+  }
+
+  /** Records options Zed got some other way (a response), so a push only sends real changes. */
+  configOptionsSent<T extends SessionConfigOption[]>(options: T): T {
+    this.sentConfigOptions = JSON.stringify(options)
+    return options
   }
 
   // Drives Zed's context ring next to the composer dropdowns. Skipped when pi doesn't
