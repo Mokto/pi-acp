@@ -456,6 +456,60 @@ test('PiAcpSession: handles extension select via ACP permission request', async 
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-1', value: 'Beta' }])
 })
 
+test('PiAcpSession: extension select becomes an elicitation form when the client supports it', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.nextElicitationResponse = { action: 'accept', content: { choice: 'choice-1' } }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    elicitationForm: true
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui-1',
+    method: 'select',
+    title: 'Pick one',
+    options: ['Alpha', 'Beta']
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.permissionRequests.length, 0)
+  assert.deepEqual(conn.elicitationRequests, [
+    {
+      mode: 'form',
+      sessionId: 's1',
+      message: 'Pick one',
+      requestedSchema: {
+        type: 'object',
+        required: ['choice'],
+        properties: {
+          choice: {
+            type: 'string',
+            title: 'Choose one',
+            oneOf: [
+              { const: 'choice-0', title: 'Alpha' },
+              { const: 'choice-1', title: 'Beta' }
+            ]
+          }
+        }
+      }
+    }
+  ])
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-1', value: 'Beta' }])
+
+  conn.nextElicitationResponse = { action: 'decline' }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-2', method: 'select', title: 'Pick one', options: ['Alpha'] })
+  await new Promise(r => setTimeout(r, 0))
+  assert.deepEqual(proc.extensionUiResponses.at(-1), { id: 'ui-2', cancelled: true })
+})
+
 test('PiAcpSession: handles extension confirm via ACP permission request', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'no' } }

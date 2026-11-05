@@ -188,6 +188,7 @@ export class PiAcpAgent implements ACPAgent {
   private lastSessionCwd: string | null = null
   private clientSupportsCompaction = false
   private clientSupportsNotices = false
+  private clientSupportsElicitationForm = false
 
   /**
    * Returns the session for the given ID, auto-restoring it from session-map.json
@@ -231,7 +232,8 @@ export class PiAcpAgent implements ACPAgent {
       proc,
       fileCommands,
       compactionEntries: this.clientSupportsCompaction,
-      notices: this.clientSupportsNotices
+      notices: this.clientSupportsNotices,
+      elicitationForm: this.clientSupportsElicitationForm
     })
     session.replayEarlyEvents()
     session.setConfigOptionsRefresher(async () =>
@@ -299,6 +301,7 @@ export class PiAcpAgent implements ACPAgent {
     const requested = params.protocolVersion
     this.clientSupportsCompaction = Boolean(params.clientCapabilities?.session?.compaction)
     this.clientSupportsNotices = Boolean(params.clientCapabilities?.session?.notices)
+    this.clientSupportsElicitationForm = Boolean(params.clientCapabilities?.elicitation?.form)
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -348,7 +351,8 @@ export class PiAcpAgent implements ACPAgent {
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
       compactionEntries: this.clientSupportsCompaction,
-      notices: this.clientSupportsNotices
+      notices: this.clientSupportsNotices,
+      elicitationForm: this.clientSupportsElicitationForm
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -1305,7 +1309,8 @@ export class PiAcpAgent implements ACPAgent {
       proc,
       fileCommands,
       compactionEntries: this.clientSupportsCompaction,
-      notices: this.clientSupportsNotices
+      notices: this.clientSupportsNotices,
+      elicitationForm: this.clientSupportsElicitationForm
     })
 
     return this.finishLoadSession(session, proc, params, { replayHistory: true, sessionFile })
