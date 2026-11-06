@@ -4,17 +4,28 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BackgroundCompaction, backgroundLead, type SummaryWriter } from '../../src/acp/background-compaction.js'
+import {
+  BackgroundCompaction,
+  backgroundLead,
+  SUMMARY_FOCUS,
+  type SummaryWriter
+} from '../../src/acp/background-compaction.js'
 import { getPiAcpCompactionDir } from '../../src/acp/paths.js'
 import { until } from '../helpers/until.js'
 
 function fakeWriter(result: unknown = { summary: 'S', firstKeptEntryId: 'k1', estimatedTokensAfter: 20_000 }) {
-  const calls = { copies: [] as string[], disposed: 0 }
+  const calls = { copies: [] as string[], instructions: [] as (string | undefined)[], disposed: 0 }
   let finish: (r: unknown) => void = () => {}
   const pending = new Promise(r => (finish = r))
   const start = async (copy: string): Promise<SummaryWriter> => {
     calls.copies.push(readFileSync(copy, 'utf8'))
-    return { compact: () => pending, dispose: () => void (calls.disposed += 1) }
+    return {
+      compact: (customInstructions?: string) => {
+        calls.instructions.push(customInstructions)
+        return pending
+      },
+      dispose: () => void (calls.disposed += 1)
+    }
   }
   return { calls, start, finish: () => finish(result) }
 }
@@ -46,13 +57,14 @@ test('background compaction: starts a lead below the size, rewrites an outgrown 
   await bg.discard()
 })
 
-test('background compaction: summarizes a copy cut at the last full line and leaves the summary for pi', async () => {
+test('background compaction: summarizes a copy cut at the last full line, asking to keep errors and rejected options, and leaves the summary for pi', async () => {
   const w = fakeWriter()
   const bg = new BackgroundCompaction(w.start)
   const session = sessionFile('{"a":1}\n{"b":2}\n{"c":')
   bg.start(Promise.resolve(session), 270_000, 300_000)
   await until(() => w.calls.copies.length > 0)
   assert.deepEqual(w.calls.copies, ['{"a":1}\n{"b":2}\n'])
+  assert.deepEqual(w.calls.instructions, [SUMMARY_FOCUS])
   w.finish()
   await bg.untilUsable(0)
 

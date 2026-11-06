@@ -41,6 +41,7 @@ import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
 import { SparePi } from '../pi-rpc/spare.js'
 import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.js'
+import { SUMMARY_FOCUS } from './background-compaction.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
 import { imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
@@ -800,7 +801,10 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (cmd === 'compact') {
-        const customInstructions = args.join(' ').trim() || undefined
+        const note = args.join(' ').trim()
+        // Any instructions make pi-acp's compaction extension skip the summary written in the background,
+        // so a plain /compact sends none.
+        const customInstructions = note ? `${SUMMARY_FOCUS}\n\n${note}` : undefined
         // pi reports the outcome in `compaction_end`, which the session draws as a
         // compaction entry; handle here only a failure before compaction started, or a
         // result that arrives without that event.

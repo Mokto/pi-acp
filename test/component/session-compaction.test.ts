@@ -9,7 +9,7 @@ import { PiAcpSession } from '../../src/acp/session.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
-import type { SummaryWriter } from '../../src/acp/background-compaction.js'
+import { SUMMARY_FOCUS, type SummaryWriter } from '../../src/acp/background-compaction.js'
 import { SessionStore } from '../../src/acp/session-store.js'
 import { until } from '../helpers/until.js'
 import { getPiAcpCompactionDir } from '../../src/acp/paths.js'
@@ -227,6 +227,25 @@ test('compaction: /compact shows the result pi returns when no compaction_end ar
     const entry = conn.updates.map(u => u.update as any).find(u => u.sessionUpdate === 'compaction_update')
     assert.equal(entry?.status, 'completed')
     assert.deepEqual(entry?.summary, [{ type: 'text', text: SUMMARY }])
+  } finally {
+    restore()
+  }
+})
+
+test('compaction: a plain /compact sends no instructions, so the background summary still applies; a note gets the summary focus first', async () => {
+  const sent: (string | undefined)[] = []
+  const restore = stubSpawn({
+    onEvent: () => () => {},
+    compact: async (customInstructions?: string) => {
+      sent.push(customInstructions)
+      return { summary: SUMMARY, tokensBefore: 150_000, estimatedTokensAfter: 32_000 }
+    }
+  })
+  try {
+    const { agent } = await loadedAgent(true)
+    await agent.prompt({ sessionId: 's1', prompt: [{ type: 'text', text: '/compact' }] } as any)
+    await agent.prompt({ sessionId: 's1', prompt: [{ type: 'text', text: '/compact focus on the auth bug' }] } as any)
+    assert.deepEqual(sent, [undefined, `${SUMMARY_FOCUS}\n\nfocus on the auth bug`])
   } finally {
     restore()
   }
