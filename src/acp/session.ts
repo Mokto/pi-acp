@@ -51,6 +51,8 @@ type SessionCreateParams = {
   compactionEntries?: boolean
   /** The client advertised `session.notices`, so warnings outside a reply become notices. */
   notices?: boolean
+  /** The client advertised `elicitation.form`, so extension choices render as a form, not as permission buttons. */
+  elicitationForm?: boolean
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
 }
@@ -320,7 +322,8 @@ export class SessionManager {
       store: this.store,
       onDead: () => this.forget(sessionId),
       compactionEntries: params.compactionEntries,
-      notices: params.notices
+      notices: params.notices,
+      elicitationForm: params.elicitationForm
     })
 
     this.sessions.set(sessionId, session)
@@ -352,7 +355,8 @@ export class SessionManager {
       store: this.store,
       onDead: () => this.forget(sessionId),
       compactionEntries: params.compactionEntries,
-      notices: params.notices
+      notices: params.notices,
+      elicitationForm: params.elicitationForm
     })
 
     this.sessions.set(sessionId, session)
@@ -381,6 +385,7 @@ export class PiAcpSession {
   private readonly onDead: (() => void) | null
   private readonly compactionEntries: boolean
   private readonly notices: boolean
+  private readonly elicitationForm: boolean
   private compactionId: string | null = null
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
@@ -536,6 +541,7 @@ export class PiAcpSession {
     onDead?: () => void
     compactionEntries?: boolean
     notices?: boolean
+    elicitationForm?: boolean
     /** Starts the pi that writes a summary in the background; tests swap in a fake. */
     startSummaryWriter?: (sessionPath: string) => Promise<SummaryWriter>
   }) {
@@ -551,6 +557,7 @@ export class PiAcpSession {
     this.onDead = opts.onDead ?? null
     this.compactionEntries = opts.compactionEntries ?? false
     this.notices = opts.notices ?? false
+    this.elicitationForm = opts.elicitationForm ?? false
     this.background = new BackgroundCompaction(
       opts.startSummaryWriter ??
         (sessionPath => PiRpcProcess.spawn({ cwd: this.cwd, sessionPath, summaryWriter: true }))
@@ -2175,6 +2182,53 @@ export class PiAcpSession {
       return
     }
 
+    const selectedOptionId = this.elicitationForm
+      ? await this.selectViaElicitation(id, ev, options)
+      : await this.selectViaPermission(id, ev, options)
+    if (selectedOptionId === undefined) {
+      return
+    }
+
+    const index = selectedOptionId === null ? null : optionIndex(selectedOptionId)
+    const value = index === null ? null : (options.at(index) ?? null)
+    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+  }
+
+  /**
+   * Radio buttons plus Submit. Permission buttons would all show Zed's "allow" checkmark.
+   * Returns the chosen option id, null when cancelled, undefined when the prompt failed and pi was already told.
+   */
+  private async selectViaElicitation(
+    id: string,
+    ev: PiRpcEvent,
+    options: string[]
+  ): Promise<string | null | undefined> {
+    const response = await this.whileAwaitingUser(id, () =>
+      this.conn.createElicitation({
+        mode: 'form',
+        sessionId: this.sessionId,
+        message: stringProp(ev, 'title') ?? 'Pick one',
+        requestedSchema: {
+          type: 'object',
+          required: ['choice'],
+          properties: {
+            choice: {
+              type: 'string',
+              title: 'Choose one',
+              oneOf: options.map((name, index) => ({ const: `${CHOICE_OPTION_PREFIX}${index}`, title: name }))
+            }
+          }
+        }
+      })
+    )
+    if (response === null) return undefined
+    const content = response.action === 'accept' && 'content' in response ? response.content : null
+    const choice = typeof content === 'object' && content !== null && 'choice' in content ? content.choice : null
+    return typeof choice === 'string' ? choice : null
+  }
+
+  /** Same return values as `selectViaElicitation`. */
+  private async selectViaPermission(id: string, ev: PiRpcEvent, options: string[]): Promise<string | null | undefined> {
     const permissionOptions: PermissionOption[] = options.map((name, index) => ({
       optionId: `${CHOICE_OPTION_PREFIX}${index}`,
       name,
@@ -2182,14 +2236,8 @@ export class PiAcpSession {
     }))
 
     const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
-    if (selected === null) {
-      return
-    }
-
-    const selectedOptionId = selected.outcome.outcome === 'selected' ? selected.outcome.optionId : null
-    const index = selectedOptionId === null ? null : optionIndex(selectedOptionId)
-    const value = index === null ? null : (options.at(index) ?? null)
-    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+    if (selected === null) return undefined
+    return selected.outcome.outcome === 'selected' ? selected.outcome.optionId : null
   }
 
   private async handleExtensionConfirm(ev: PiRpcEvent, id: string): Promise<void> {
@@ -2206,21 +2254,28 @@ export class PiAcpSession {
     await this.proc.sendExtensionUiResponse({ id, confirmed: selected.outcome.optionId === 'yes' })
   }
 
-  private async requestExtensionPermission(
+  private requestExtensionPermission(
     id: string,
     ev: PiRpcEvent,
     options: PermissionOption[]
   ): Promise<PermissionResponse | null> {
+    return this.whileAwaitingUser(id, () =>
+      this.conn.requestPermission({
+        sessionId: this.sessionId,
+        toolCall: extensionUiToolCall(id, ev),
+        options
+      })
+    )
+  }
+
+  /** Runs a client prompt; null (after cancelling the pi request) when it throws. */
+  private async whileAwaitingUser<T>(id: string, ask: () => Promise<T>): Promise<T | null> {
     // The user may take arbitrarily long to answer; that is not pi inactivity.
     this.awaitingUserInput++
     this.clearTurnWatchdog()
     const resumeAwake = pauseStayAwake()
     try {
-      return await this.conn.requestPermission({
-        sessionId: this.sessionId,
-        toolCall: extensionUiToolCall(id, ev),
-        options
-      })
+      return await ask()
     } catch {
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return null
