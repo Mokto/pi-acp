@@ -3312,34 +3312,14 @@ ${message}` }
     const value = index === null ? null : options.at(index) ?? null;
     await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value });
   }
-  /**
-   * Radio buttons plus Submit. Permission buttons would all show Zed's "allow" checkmark.
-   * Returns the chosen option id, null when cancelled, undefined when the prompt failed and pi was already told.
-   */
+  /** Returns the chosen option id, null when cancelled, undefined when the prompt failed and pi was already told. */
   async selectViaElicitation(id, ev, options) {
+    const choices = options.map((label, index) => ({ id: `${CHOICE_OPTION_PREFIX}${index}`, label }));
     const response = await this.whileAwaitingUser(
       id,
-      () => this.conn.createElicitation({
-        mode: "form",
-        sessionId: this.sessionId,
-        message: stringProp(ev, "title") ?? "Pick one",
-        requestedSchema: {
-          type: "object",
-          required: ["choice"],
-          properties: {
-            choice: {
-              type: "string",
-              title: "Choose one",
-              oneOf: options.map((name, index) => ({ const: `${CHOICE_OPTION_PREFIX}${index}`, title: name }))
-            }
-          }
-        }
-      })
+      () => this.conn.createElicitation(choiceForm(this.sessionId, stringProp(ev, "title") ?? "Pick one", choices))
     );
-    if (response === null) return void 0;
-    const content = response.action === "accept" && "content" in response ? response.content : null;
-    const choice = typeof content === "object" && content !== null && "choice" in content ? content.choice : null;
-    return typeof choice === "string" ? choice : null;
+    return response === null ? void 0 : pickedChoice(response);
   }
   /** Same return values as `selectViaElicitation`. */
   async selectViaPermission(id, ev, options) {
@@ -3404,6 +3384,29 @@ function extensionUiToolCall(id, ev) {
     status: "pending",
     rawInput
   };
+}
+function choiceForm(sessionId, message, options) {
+  return {
+    mode: "form",
+    sessionId,
+    message,
+    requestedSchema: {
+      type: "object",
+      required: ["choice"],
+      properties: {
+        choice: {
+          type: "string",
+          title: "Choose one",
+          oneOf: options.map((o) => ({ const: o.id, title: o.label }))
+        }
+      }
+    }
+  };
+}
+function pickedChoice(response) {
+  const content = response.action === "accept" && "content" in response ? response.content : null;
+  const choice = typeof content === "object" && content !== null && "choice" in content ? content.choice : null;
+  return typeof choice === "string" ? choice : null;
 }
 function stringProp(source, key) {
   const value = source[key];
@@ -4836,7 +4839,7 @@ ${text}`;
       }).catch(() => {
       });
     };
-    const select = (title, options) => this.selectViaPermission(sessionId, title, options);
+    const select = (title, options) => this.pickOne(sessionId, title, options);
     if (session.hasActiveTurn() || this.authFlows.has(sessionId)) {
       say(`Wait for the current turn or login to finish before running /${cmd}.`);
       return { stopReason: "end_turn" };
@@ -4947,15 +4950,19 @@ ${text}`;
     say(`Removed stored credentials for ${nameOf(id)}. Environment variables and models.json are unchanged.`);
     return true;
   }
-  async selectViaPermission(sessionId, title, options) {
+  async pickOne(sessionId, title, options) {
     if (!options.length) return null;
-    const res = await this.conn.requestPermission({
-      sessionId,
-      toolCall: { toolCallId: `pi-auth-${randomUUID2()}`, title, kind: "other", status: "pending" },
-      options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
-    });
-    if (res.outcome.outcome !== "selected") return null;
-    const picked = res.outcome.optionId;
+    let picked;
+    if (this.clientSupportsElicitationForm) {
+      picked = pickedChoice(await this.conn.createElicitation(choiceForm(sessionId, title, options)));
+    } else {
+      const res = await this.conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: `pi-auth-${randomUUID2()}`, title, kind: "other", status: "pending" },
+        options: options.map((o) => ({ optionId: o.id, name: o.label, kind: "allow_once" }))
+      });
+      picked = res.outcome.outcome === "selected" ? res.outcome.optionId : null;
+    }
     return options.some((o) => o.id === picked) ? picked : null;
   }
   /**
