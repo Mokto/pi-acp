@@ -1,6 +1,8 @@
 import type {
   AgentSideConnection,
   ContentBlock,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
   McpServer,
   PermissionOption,
   PlanEntry,
@@ -2194,37 +2196,17 @@ export class PiAcpSession {
     await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
   }
 
-  /**
-   * Radio buttons plus Submit. Permission buttons would all show Zed's "allow" checkmark.
-   * Returns the chosen option id, null when cancelled, undefined when the prompt failed and pi was already told.
-   */
+  /** Returns the chosen option id, null when cancelled, undefined when the prompt failed and pi was already told. */
   private async selectViaElicitation(
     id: string,
     ev: PiRpcEvent,
     options: string[]
   ): Promise<string | null | undefined> {
+    const choices = options.map((label, index) => ({ id: `${CHOICE_OPTION_PREFIX}${index}`, label }))
     const response = await this.whileAwaitingUser(id, () =>
-      this.conn.createElicitation({
-        mode: 'form',
-        sessionId: this.sessionId,
-        message: stringProp(ev, 'title') ?? 'Pick one',
-        requestedSchema: {
-          type: 'object',
-          required: ['choice'],
-          properties: {
-            choice: {
-              type: 'string',
-              title: 'Choose one',
-              oneOf: options.map((name, index) => ({ const: `${CHOICE_OPTION_PREFIX}${index}`, title: name }))
-            }
-          }
-        }
-      })
+      this.conn.createElicitation(choiceForm(this.sessionId, stringProp(ev, 'title') ?? 'Pick one', choices))
     )
-    if (response === null) return undefined
-    const content = response.action === 'accept' && 'content' in response ? response.content : null
-    const choice = typeof content === 'object' && content !== null && 'choice' in content ? content.choice : null
-    return typeof choice === 'string' ? choice : null
+    return response === null ? undefined : pickedChoice(response)
   }
 
   /** Same return values as `selectViaElicitation`. */
@@ -2303,6 +2285,37 @@ function extensionUiToolCall(id: string, ev: PiRpcEvent) {
     status: 'pending' as const,
     rawInput
   }
+}
+
+/** A pick-one question as radio buttons plus Submit. Zed's permission buttons would all show an "allow" checkmark. */
+export function choiceForm(
+  sessionId: string,
+  message: string,
+  options: { id: string; label: string }[]
+): CreateElicitationRequest {
+  return {
+    mode: 'form',
+    sessionId,
+    message,
+    requestedSchema: {
+      type: 'object',
+      required: ['choice'],
+      properties: {
+        choice: {
+          type: 'string',
+          title: 'Choose one',
+          oneOf: options.map(o => ({ const: o.id, title: o.label }))
+        }
+      }
+    }
+  }
+}
+
+/** The id picked in a `choiceForm`, or null when the user dismissed it. */
+export function pickedChoice(response: CreateElicitationResponse): string | null {
+  const content = response.action === 'accept' && 'content' in response ? response.content : null
+  const choice = typeof content === 'object' && content !== null && 'choice' in content ? content.choice : null
+  return typeof choice === 'string' ? choice : null
 }
 
 function stringProp(source: Record<string, unknown>, key: string): string | null {
