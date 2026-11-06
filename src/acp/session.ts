@@ -95,7 +95,7 @@ const CONTEXT_USAGE_TIMEOUT_MS = 2_000
 // 90% of the 1-hour prompt cache, so the summary is ready when the cache expires.
 const IDLE_SUMMARY_AFTER_MS = 54 * 60_000
 const PROMPT_CACHE_MS = 60 * 60_000
-const IDLE_COMPACTION_MIN_TOKENS = 200_000
+const IDLE_COMPACTION_MIN_TOKENS = 150_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -1405,9 +1405,9 @@ export class PiAcpSession {
   private armIdleCompaction(): void {
     this.clearIdleCompaction()
     const since = this.lastModelRequestAt
-    if (process.env.PI_ACP_IDLE_COMPACTION !== '1' || process.env.PI_CACHE_RETENTION !== 'long') return
-    if (since === null || this.compactAtPick === null) return
-    if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return
+    if (process.env.PI_CACHE_RETENTION !== 'long' || since === null || this.compactAtPick === null) return
+    const minTokens = Math.max(IDLE_COMPACTION_MIN_TOKENS, this.compactAtPick / 2)
+    if (this.peakContextTokens < minTokens || this.compactAfterReplyFailed) return
     this.idleSummaryTimer = setTimeout(
       () => void this.writeIdleSummary(since),
       since + IDLE_SUMMARY_AFTER_MS - Date.now()

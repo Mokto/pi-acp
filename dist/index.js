@@ -1516,6 +1516,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
@@ -1650,7 +1651,7 @@ var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONTEXT_USAGE_TIMEOUT_MS = 2e3;
 var IDLE_SUMMARY_AFTER_MS = 54 * 6e4;
 var PROMPT_CACHE_MS = 60 * 6e4;
-var IDLE_COMPACTION_MIN_TOKENS = 2e5;
+var IDLE_COMPACTION_MIN_TOKENS = 15e4;
 var MAX_CURSOR_SDK_AUTH_RETRIES = 2;
 var CONFIRM_PERMISSION_OPTIONS = [
   { optionId: "yes", name: "Yes", kind: "allow_once" },
@@ -2674,9 +2675,9 @@ ${message}` }
   armIdleCompaction() {
     this.clearIdleCompaction();
     const since = this.lastModelRequestAt;
-    if (process.env.PI_ACP_IDLE_COMPACTION !== "1" || process.env.PI_CACHE_RETENTION !== "long") return;
-    if (since === null || this.compactAtPick === null) return;
-    if (this.peakContextTokens < IDLE_COMPACTION_MIN_TOKENS || this.compactAfterReplyFailed) return;
+    if (process.env.PI_CACHE_RETENTION !== "long" || since === null || this.compactAtPick === null) return;
+    const minTokens = Math.max(IDLE_COMPACTION_MIN_TOKENS, this.compactAtPick / 2);
+    if (this.peakContextTokens < minTokens || this.compactAfterReplyFailed) return;
     this.idleSummaryTimer = setTimeout(
       () => void this.writeIdleSummary(since),
       since + IDLE_SUMMARY_AFTER_MS - Date.now()
