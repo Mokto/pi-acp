@@ -1516,7 +1516,6 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
-  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
