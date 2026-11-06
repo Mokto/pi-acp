@@ -35,7 +35,14 @@ import {
   runOAuthLogin,
   type ModelRuntimeLike
 } from './login.js'
-import { SessionManager, toToolKind, type PiAcpSession, type StopReason as PiStopReason } from './session.js'
+import {
+  choiceForm,
+  pickedChoice,
+  SessionManager,
+  toToolKind,
+  type PiAcpSession,
+  type StopReason as PiStopReason
+} from './session.js'
 import { TimeoutError, withTimeout } from './timeout.js'
 import { SessionStore } from './session-store.js'
 import { isThinkingLevel, PiRpcProcess, THINKING_LEVELS, type ThinkingLevel } from '../pi-rpc/process.js'
@@ -527,8 +534,7 @@ export class PiAcpAgent implements ACPAgent {
         })
         .catch(() => {})
     }
-    const select = (title: string, options: { id: string; label: string }[]) =>
-      this.selectViaPermission(sessionId, title, options)
+    const select = (title: string, options: { id: string; label: string }[]) => this.pickOne(sessionId, title, options)
 
     if (session.hasActiveTurn() || this.authFlows.has(sessionId)) {
       say(`Wait for the current turn or login to finish before running /${cmd}.`)
@@ -674,19 +680,23 @@ export class PiAcpAgent implements ACPAgent {
     return true
   }
 
-  private async selectViaPermission(
+  private async pickOne(
     sessionId: string,
     title: string,
     options: { id: string; label: string }[]
   ): Promise<string | null> {
     if (!options.length) return null
-    const res = await this.conn.requestPermission({
-      sessionId,
-      toolCall: { toolCallId: `pi-auth-${randomUUID()}`, title, kind: 'other', status: 'pending' },
-      options: options.map(o => ({ optionId: o.id, name: o.label, kind: 'allow_once' }))
-    })
-    if (res.outcome.outcome !== 'selected') return null
-    const picked = res.outcome.optionId
+    let picked: string | null
+    if (this.clientSupportsElicitationForm) {
+      picked = pickedChoice(await this.conn.createElicitation(choiceForm(sessionId, title, options)))
+    } else {
+      const res = await this.conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: `pi-auth-${randomUUID()}`, title, kind: 'other', status: 'pending' },
+        options: options.map(o => ({ optionId: o.id, name: o.label, kind: 'allow_once' }))
+      })
+      picked = res.outcome.outcome === 'selected' ? res.outcome.optionId : null
+    }
     return options.some(o => o.id === picked) ? picked : null
   }
 
