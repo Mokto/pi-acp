@@ -559,9 +559,7 @@ test('compaction: Stop while the background summary is still being written skips
 const MIN = 60_000
 const realSetTimeout = setTimeout
 
-async function idleThread(
-  opts: { provider?: string; pick?: string; tokens?: number; retention?: string; optedIn?: boolean } = {}
-) {
+async function idleThread(opts: { provider?: string; pick?: string; tokens?: number; retention?: string } = {}) {
   const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-idle-')), 'session.jsonl')
   writeFileSync(sessionFile, '{"type":"session","id":"e1"}\n')
   let writers = 0
@@ -576,11 +574,8 @@ async function idleThread(
     sessionId: `idle-${Math.random()}`
   })
   const prev = process.env.PI_CACHE_RETENTION
-  const prevSwitch = process.env.PI_ACP_IDLE_COMPACTION
   if (opts.retention === undefined) process.env.PI_CACHE_RETENTION = 'long'
   else delete process.env.PI_CACHE_RETENTION
-  if (opts.optedIn === false) delete process.env.PI_ACP_IDLE_COMPACTION
-  else process.env.PI_ACP_IDLE_COMPACTION = '1'
   test.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const settle = () => new Promise(r => realSetTimeout(r, 30))
   const eventually = async (ok: () => boolean, message: string) => {
@@ -611,8 +606,6 @@ async function idleThread(
     s.markClosed()
     if (prev == null) delete process.env.PI_CACHE_RETENTION
     else process.env.PI_CACHE_RETENTION = prev
-    if (prevSwitch == null) delete process.env.PI_ACP_IDLE_COMPACTION
-    else process.env.PI_ACP_IDLE_COMPACTION = prevSwitch
   }
   return {
     proc,
@@ -628,8 +621,8 @@ async function idleThread(
   }
 }
 
-test('idle compaction: a thread over 200k left alone gets its summary at 54 minutes and is compacted at the hour', async () => {
-  const t = await idleThread()
+test('idle compaction: a thread over half its Compaction size left alone gets its summary at 54 minutes and is compacted at the hour', async () => {
+  const t = await idleThread({ tokens: 160_000 })
   try {
     await t.wait(53 * MIN)
     assert.equal(t.writers(), 0)
@@ -661,11 +654,11 @@ test('idle compaction: a message before the hour keeps the full thread', async (
   }
 })
 
-test('idle compaction: skipped unless opted in, asleep past the hour, under 200k, on Model limit, off Anthropic, or without the 1-hour cache', async () => {
+test('idle compaction: skipped asleep past the hour, under 150k, under half the size, on Model limit, off Anthropic, or without the 1-hour cache', async () => {
   const cases = [
-    { name: 'not opted in', opts: { optedIn: false } },
     { name: 'asleep', opts: {}, asleep: true },
-    { name: 'under 200k', opts: { tokens: 150_000 } },
+    { name: 'under 150k', opts: { pick: '200000', tokens: 140_000 } },
+    { name: 'under half the size', opts: { pick: '400000', tokens: 190_000 } },
     { name: 'Model limit', opts: { pick: 'model_limit' } },
     { name: 'other provider', opts: { provider: 'cursor' } },
     { name: 'short cache', opts: { retention: 'short' } }
