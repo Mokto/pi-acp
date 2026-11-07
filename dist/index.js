@@ -65,7 +65,12 @@ async function loadModelRuntime(pkgDir = findPiPackageDir()) {
     const sdk = await import(pathToFileURL(entry).href);
     if (typeof sdk?.ModelRuntime?.create !== "function") return null;
     const rt = await sdk.ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
-    return typeof rt?.login === "function" ? rt : null;
+    if (typeof rt?.login !== "function") return null;
+    const settings = sdk.SettingsManager?.create?.(process.cwd());
+    if (typeof settings?.getOrCreateDeviceId === "function") {
+      rt.getDeviceId = () => settings.getOrCreateDeviceId();
+    }
+    return rt;
   } catch {
     return null;
   }
@@ -99,38 +104,43 @@ function rejectOnAbort(signal) {
 }
 async function runOAuthLogin(rt, providerId, io, signal) {
   const loginSignal = AbortSignal.any([AbortSignal.timeout(LOGIN_TIMEOUT_MS), ...signal ? [signal] : []]);
-  await rt.login(providerId, "oauth", {
-    signal: loginSignal,
-    async prompt(p) {
-      const s = AbortSignal.any([loginSignal, ...p.signal ? [p.signal] : []]);
-      if (p.type === "select") {
-        const picked = await Promise.race([io.select(p.message, [...p.options ?? []]), rejectOnAbort(s)]);
-        if (picked === null) throw new Error("Login cancelled");
-        return picked;
+  await rt.login(
+    providerId,
+    "oauth",
+    {
+      signal: loginSignal,
+      async prompt(p) {
+        const s = AbortSignal.any([loginSignal, ...p.signal ? [p.signal] : []]);
+        if (p.type === "select") {
+          const picked = await Promise.race([io.select(p.message, [...p.options ?? []]), rejectOnAbort(s)]);
+          if (picked === null) throw new Error("Login cancelled");
+          return picked;
+        }
+        if (p.type === "text") return io.text ?? "";
+        if (p.type === "secret") {
+          throw new Error(
+            "This provider needs a secret pi cannot collect in chat. Run `pi` in a terminal and use /login."
+          );
+        }
+        return Promise.race([io.code ? io.code(s) : rejectOnAbort(s), rejectOnAbort(s)]);
+      },
+      notify(e) {
+        if (e.type === "auth_url") {
+          io.openUrl?.(e.url);
+          io.say(
+            `[Open the login page](${e.url}) and finish signing in there.` + (io.code ? "\n\nIf the browser can't reach this machine, or the page shows a code, stop this turn and send the final redirect URL or the code as your next message." : "")
+          );
+        } else if (e.type === "device_code") {
+          io.openUrl?.(e.verificationUri);
+          io.say(`Enter code **${e.userCode}** at ${e.verificationUri}`);
+        } else {
+          const links = (e.links ?? []).map((l) => `[${l.label ?? l.url}](${l.url})`).join(" ");
+          io.say(links ? `${e.message} ${links}` : e.message);
+        }
       }
-      if (p.type === "text") return io.text ?? "";
-      if (p.type === "secret") {
-        throw new Error(
-          "This provider needs a secret pi cannot collect in chat. Run `pi` in a terminal and use /login."
-        );
-      }
-      return Promise.race([io.code ? io.code(s) : rejectOnAbort(s), rejectOnAbort(s)]);
     },
-    notify(e) {
-      if (e.type === "auth_url") {
-        io.openUrl?.(e.url);
-        io.say(
-          `[Open the login page](${e.url}) and finish signing in there.` + (io.code ? "\n\nIf the browser can't reach this machine, or the page shows a code, stop this turn and send the final redirect URL or the code as your next message." : "")
-        );
-      } else if (e.type === "device_code") {
-        io.openUrl?.(e.verificationUri);
-        io.say(`Enter code **${e.userCode}** at ${e.verificationUri}`);
-      } else {
-        const links = (e.links ?? []).map((l) => `[${l.label ?? l.url}](${l.url})`).join(" ");
-        io.say(links ? `${e.message} ${links}` : e.message);
-      }
-    }
-  });
+    { getDeviceId: rt.getDeviceId }
+  );
 }
 var ZED_OAUTH_METHOD_PREFIX = "pi_oauth:";
 var AUTHENTICATE_PROVIDERS = [
