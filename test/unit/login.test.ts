@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  loadModelRuntime,
   looksLikeAuthCode,
   providerFromAuthMethodId,
   runOAuthLogin,
@@ -71,4 +75,18 @@ test('looksLikeAuthCode: pasted codes and redirect URLs, not normal prompts', ()
   assert.ok(looksLikeAuthCode('a1b2c3d4e5f6g7h8#state123'))
   assert.ok(!looksLikeAuthCode('https://github.com/org/repo/pull/12'))
   assert.ok(!looksLikeAuthCode('fix the failing test'))
+})
+
+test("runOAuthLogin: passes pi's installation ID to logins that need one (ChatGPT)", async () => {
+  const pkg = mkdtempSync(join(tmpdir(), 'pi-sdk-'))
+  mkdirSync(join(pkg, 'dist'))
+  writeFileSync(
+    join(pkg, 'dist', 'index.js'),
+    `export const ModelRuntime = { create: async () => ({ login: async (_p, _t, _i, o) => { globalThis.loginDeviceId = o?.getDeviceId?.() } }) }
+export const SettingsManager = { create: () => ({ getOrCreateDeviceId: () => '3b7def49-6f2f-40de-bf00-4806676472a3' }) }`
+  )
+  const rt = await loadModelRuntime(pkg)
+  assert.ok(rt)
+  await runOAuthLogin(rt, 'openai', { say: () => {}, select: async () => null })
+  assert.equal((globalThis as { loginDeviceId?: string }).loginDeviceId, '3b7def49-6f2f-40de-bf00-4806676472a3')
 })
