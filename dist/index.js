@@ -1040,13 +1040,6 @@ function formatPercent(fraction) {
   const whole = Math.round(pct);
   return whole === 0 && pct > 0 ? `${Number(pct.toFixed(2))}%` : `${whole}%`;
 }
-function formatTimeUntil(ms) {
-  const minutes = Math.ceil(ms / 6e4);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m`;
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
 var TIME = { hour: "2-digit", minute: "2-digit", hour12: false };
 function formatClock(date, now) {
   if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], TIME);
@@ -1055,14 +1048,6 @@ function formatClock(date, now) {
 function providerRank(id) {
   const i = PROVIDER_ORDER.indexOf(id);
   return i === -1 ? PROVIDER_ORDER.length : i;
-}
-function headingFor(msLeft, resetsAt, now) {
-  if (msLeft <= 0) return "Updates after the next reply";
-  const countdown = `Resets in ${formatTimeUntil(msLeft)}`;
-  if (msLeft < DAY_MS) return countdown;
-  if (msLeft < 7 * DAY_MS && resetsAt.getDay() !== now.getDay())
-    return `${countdown} \xB7 ${resetsAt.toLocaleString([], { weekday: "short", ...TIME })}`;
-  return `Resets in ${Math.floor(msLeft / DAY_MS)}d \xB7 ${resetsAt.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 function limitRows(usage, now) {
   const seen = /* @__PURE__ */ new Set();
@@ -1079,7 +1064,7 @@ function limitRows(usage, now) {
         {
           id,
           value,
-          heading: headingFor(msLeft, resetsAt, now),
+          heading: expired ? "Updates after the next reply" : `Resets at ${formatClock(resetsAt, now)}`,
           name: `${providerDisplayName(id)} / ${shortName}`,
           shortName,
           description: `${expired ? "Reset at" : "Resets"} ${formatClock(resetsAt, now)}`,
@@ -1526,6 +1511,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
