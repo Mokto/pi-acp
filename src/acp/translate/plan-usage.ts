@@ -70,14 +70,6 @@ function formatPercent(fraction: number): string {
   return whole === 0 && pct > 0 ? `${Number(pct.toFixed(2))}%` : `${whole}%`
 }
 
-function formatTimeUntil(ms: number): string {
-  const minutes = Math.ceil(ms / 60_000)
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ${minutes % 60}m`
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`
-}
-
 const TIME = { hour: '2-digit', minute: '2-digit', hour12: false } as const
 
 function formatClock(date: Date, now: Date): string {
@@ -100,15 +92,6 @@ type LimitRow = {
   utilization: number
 }
 
-function headingFor(msLeft: number, resetsAt: Date, now: Date): string {
-  if (msLeft <= 0) return 'Updates after the next reply'
-  const countdown = `Resets in ${formatTimeUntil(msLeft)}`
-  if (msLeft < DAY_MS) return countdown
-  if (msLeft < 7 * DAY_MS && resetsAt.getDay() !== now.getDay())
-    return `${countdown} · ${resetsAt.toLocaleString([], { weekday: 'short', ...TIME })}`
-  return `Resets in ${Math.floor(msLeft / DAY_MS)}d · ${resetsAt.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
-}
-
 function limitRows(usage: PlanUsage, now: Date): LimitRow[] {
   const seen = new Set<string>()
   return Object.entries(usage)
@@ -127,7 +110,7 @@ function limitRows(usage: PlanUsage, now: Date): LimitRow[] {
           {
             id,
             value,
-            heading: headingFor(msLeft, resetsAt, now),
+            heading: expired ? 'Updates after the next reply' : `Resets at ${formatClock(resetsAt, now)}`,
             name: `${providerDisplayName(id)} / ${shortName}`,
             shortName,
             description: `${expired ? 'Reset at' : 'Resets'} ${formatClock(resetsAt, now)}`,
