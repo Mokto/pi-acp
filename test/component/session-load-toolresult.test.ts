@@ -32,10 +32,18 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
       getMessages: async () => ({
         messages: [
           {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'echo hello' } },
+              { type: 'toolCall', id: 'call_3', name: 'grep', arguments: { pattern: 'match', path: 'src' } },
+              { type: 'toolCall', id: 'call_4', name: 'page_snapshot', arguments: { url: 'https://example.com' } },
+              { type: 'toolCall', id: 'call_5', name: 'ui_screenshot', arguments: { url: 'https://example.com' } }
+            ]
+          },
+          {
             role: 'toolResult',
             toolCallId: 'call_1',
             toolName: 'bash',
-            args: { command: 'echo hello' },
             content: [{ type: 'text', text: 'hello from bash' }],
             isError: false
           },
@@ -62,6 +70,14 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
               { type: 'text', text: 'Script on /, 1 image.' },
               { type: 'image', data: Buffer.from(replayedBytes).toString('base64'), mimeType: 'image/png' }
             ],
+            isError: false
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call_5',
+            toolName: 'ui_screenshot',
+            content: [{ type: 'text', text: 'http://localhost:5173/pricing, 1440x900.' }],
+            details: { _label: 'Screenshot http://localhost:5173/pricing' },
             isError: false
           }
         ]
@@ -106,6 +122,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
 
     const grepCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_3')
     assert.equal(grepCall?.kind, 'search')
+    assert.equal(grepCall?.title, 'Grep src', 'titled from the call’s arguments, like a live card')
 
     const shotCall = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_4')
     assert.equal(shotCall?.rawOutput, undefined, 'the result goes once, on the update')
@@ -114,7 +131,10 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     const file = text.match(/^\[!\[page_snapshot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nScript on \/, 1 image\.$/)?.[1]
     assert.ok(file, text)
     assert.equal(readFileSync(file, 'utf8'), replayedBytes)
-    assert.equal(shotDone.title, `[page_snapshot](<${file}>)`)
+    assert.equal(shotDone.title, `[Page Snapshot: https://example.com](<${file}>)`)
+
+    const labelled = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_5')
+    assert.equal(labelled?.title, 'Screenshot http://localhost:5173/pricing', 'the finished result’s _label wins')
     assert.doesNotMatch(JSON.stringify(shotDone.rawOutput), /cG5n/, 'no image bytes in rawOutput')
   } finally {
     PiRpcProcess.spawn = originalSpawn

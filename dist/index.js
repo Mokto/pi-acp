@@ -768,6 +768,10 @@ function imageResultText(result, name) {
 function imageLinkTitle(title, file) {
   return `[${title.replace(/[\\[\]]/g, "\\$&")}](<${file}>)`;
 }
+function finalLabel(result) {
+  const label = result?.details?._label;
+  return typeof label === "string" && label.trim() ? label : void 0;
+}
 function withoutImageData(result) {
   if (!imageBlocks(result).length) return result;
   const { content } = result;
@@ -1511,6 +1515,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
@@ -3089,8 +3094,10 @@ ${message}` }
           content = [{ type: "content", content: { type: "text", text } }];
         }
         const baseTitle = this.originalToolTitles.get(toolCallId);
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0;
-        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle;
+        const label = finalLabel(result);
+        const restoredTitle = label ?? (this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0);
+        const linkText = label ?? baseTitle;
+        const title = images[0] && linkText ? imageLinkTitle(linkText, images[0]) : restoredTitle;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
@@ -5521,6 +5528,11 @@ ${JSON.stringify(stats, null, 2)}`;
       }
       const messages = Array.isArray(data?.messages) ? data.messages : [];
       const toolKinds = getToolKinds(params.cwd);
+      const toolArgs = /* @__PURE__ */ new Map();
+      for (const m of messages) {
+        if (m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+        for (const c of m.content) if (c?.type === "toolCall") toolArgs.set(String(c.id), c.arguments);
+      }
       for (const m of messages) {
         const role = String(m?.role ?? "");
         if (role === "user") {
@@ -5571,6 +5583,7 @@ ${JSON.stringify(stats, null, 2)}`;
           const toolCallId = String(m?.toolCallId ?? crypto.randomUUID());
           const isError = Boolean(m?.isError);
           const isBash = isBashTool(toolName);
+          const args = toolArgs.get(toolCallId);
           if (isBash) {
             const text2 = bashResultText(m);
             await this.conn.sessionUpdate({
@@ -5578,7 +5591,7 @@ ${JSON.stringify(stats, null, 2)}`;
               update: {
                 sessionUpdate: "tool_call",
                 toolCallId,
-                title: bashCommand(m) ?? toolName,
+                title: bashCommand(m) ?? bashCommand(args) ?? toolName,
                 kind: "execute",
                 status: "completed",
                 content: bashTerminalContent(toolCallId),
@@ -5599,12 +5612,13 @@ ${JSON.stringify(stats, null, 2)}`;
             });
             continue;
           }
+          const title = finalLabel(m) ?? toToolTitle(toolName, args, params.cwd);
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: "tool_call",
               toolCallId,
-              title: toolName,
+              title,
               kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: "completed",
               rawInput: null
@@ -5617,7 +5631,7 @@ ${JSON.stringify(stats, null, 2)}`;
               sessionUpdate: "tool_call_update",
               toolCallId,
               status: isError ? "failed" : "completed",
-              ...images[0] ? { title: imageLinkTitle(toolName, images[0]) } : {},
+              ...images[0] ? { title: imageLinkTitle(title, images[0]) } : {},
               content: text ? [{ type: "content", content: { type: "text", text } }] : null,
               rawOutput: withoutImageData(m)
             }
