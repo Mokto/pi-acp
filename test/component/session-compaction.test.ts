@@ -556,6 +556,68 @@ test('compaction: Stop while the background summary is still being written skips
   }
 })
 
+test('compaction: a message held over 3 minutes for a summary still being written runs, and later replies stop waiting for that summary', async () => {
+  const sessionFile = join(mkdtempSync(join(tmpdir(), 'pi-acp-bg-')), 'session.jsonl')
+  writeFileSync(sessionFile, '{"type":"session","id":"e1"}\n')
+  const sessionId = `bg-${Date.now()}`
+  let finishWriter: (result: unknown) => void = () => {}
+  let writers = 0
+  const { proc, s, updates } = session(true, async () => ({
+    compact: () => {
+      writers += 1
+      return new Promise(resolve => (finishWriter = resolve))
+    },
+    dispose: () => {}
+  }))
+  proc.getState = async () => ({ sessionFile, sessionId })
+  const settle = () => new Promise(r => realSetTimeout(r, 20))
+  const compactions = async () =>
+    (await updates()).filter(u => u.sessionUpdate === 'compaction_update').map(u => u.status)
+  try {
+    s.setCompactAt('300000')
+    await finishReply(s, proc, 280_000)
+    await until(() => writers > 0)
+    await finishReply(s, proc, 305_000)
+
+    test.mock.timers.enable({ apis: ['setTimeout'] })
+    const held = s.prompt('next')
+    test.mock.timers.tick(3 * 60_000 - 1)
+    await settle()
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'work'],
+      'held while the summary may still land'
+    )
+
+    test.mock.timers.tick(1)
+    test.mock.timers.reset()
+    await settle()
+    assert.deepEqual(
+      proc.prompts.map(p => p.message),
+      ['work', 'work', 'next']
+    )
+    assert.deepEqual(await compactions(), ['in_progress', 'cancelled'])
+    proc.sessionStats = { contextUsage: { tokens: 310_000, contextWindow: 1_000_000 } }
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await held, 'end_turn')
+
+    await finishReply(s, proc, 312_000)
+    assert.deepEqual(await compactions(), ['in_progress', 'cancelled'], 'no second wait on the same summary')
+    assert.equal(proc.compactCalls, 0)
+
+    finishWriter({ summary: SUMMARY, firstKeptEntryId: 'e1', estimatedTokensAfter: 30_000 })
+    await until(() => existsSync(join(getPiAcpCompactionDir(), `${sessionId}.json`)))
+    await finishReply(s, proc, 314_000)
+    assert.equal(proc.compactCalls, 1, 'the summary is swapped in once it lands')
+    assert.equal(writers, 1)
+  } finally {
+    test.mock.timers.reset()
+    s.markClosed()
+  }
+})
+
 const MIN = 60_000
 const realSetTimeout = setTimeout
 
