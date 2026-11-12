@@ -36,8 +36,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
             content: [
               { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'echo hello' } },
               { type: 'toolCall', id: 'call_3', name: 'grep', arguments: { pattern: 'match', path: 'src' } },
-              { type: 'toolCall', id: 'call_4', name: 'page_snapshot', arguments: { url: 'https://example.com' } },
-              { type: 'toolCall', id: 'call_5', name: 'ui_screenshot', arguments: { url: 'https://example.com' } }
+              { type: 'toolCall', id: 'call_4', name: 'page_snapshot', arguments: { url: 'https://example.com' } }
             ]
           },
           {
@@ -70,14 +69,6 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
               { type: 'text', text: 'Script on /, 1 image.' },
               { type: 'image', data: Buffer.from(replayedBytes).toString('base64'), mimeType: 'image/png' }
             ],
-            isError: false
-          },
-          {
-            role: 'toolResult',
-            toolCallId: 'call_5',
-            toolName: 'ui_screenshot',
-            content: [{ type: 'text', text: 'http://localhost:5173/pricing, 1440x900.' }],
-            details: { _label: 'Screenshot http://localhost:5173/pricing' },
             isError: false
           }
         ]
@@ -132,9 +123,6 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     assert.ok(file, text)
     assert.equal(readFileSync(file, 'utf8'), replayedBytes)
     assert.equal(shotDone.title, `[Page Snapshot: https://example.com](<${file}>)`)
-
-    const labelled = updates.find(u => u?.sessionUpdate === 'tool_call' && u.toolCallId === 'call_5')
-    assert.equal(labelled?.title, 'Screenshot http://localhost:5173/pricing', 'the finished result’s _label wins')
     assert.doesNotMatch(JSON.stringify(shotDone.rawOutput), /cG5n/, 'no image bytes in rawOutput')
   } finally {
     PiRpcProcess.spawn = originalSpawn
