@@ -52,7 +52,7 @@ import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.
 import { SUMMARY_FOCUS } from './background-compaction.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
-import { finalLabel, imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
+import { imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
   bashCommand,
@@ -1479,7 +1479,7 @@ export class PiAcpAgent implements ACPAgent {
           }
 
           // Create a synthetic ACP tool call to render historic tool usage.
-          const title = finalLabel(m) ?? toToolTitle(toolName, args, params.cwd)
+          const title = toToolTitle(toolName, args, params.cwd)
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {

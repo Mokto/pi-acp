@@ -768,10 +768,6 @@ function imageResultText(result, name) {
 function imageLinkTitle(title, file) {
   return `[${title.replace(/[\\[\]]/g, "\\$&")}](<${file}>)`;
 }
-function finalLabel(result) {
-  const label = result?.details?._label;
-  return typeof label === "string" && label.trim() ? label : void 0;
-}
 function withoutImageData(result) {
   if (!imageBlocks(result).length) return result;
   const { content } = result;
@@ -1515,6 +1511,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
@@ -3093,10 +3090,8 @@ ${message}` }
           content = [{ type: "content", content: { type: "text", text } }];
         }
         const baseTitle = this.originalToolTitles.get(toolCallId);
-        const label = finalLabel(result);
-        const restoredTitle = label ?? (this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0);
-        const linkText = label ?? baseTitle;
-        const title = images[0] && linkText ? imageLinkTitle(linkText, images[0]) : restoredTitle;
+        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0;
+        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
@@ -5611,7 +5606,7 @@ ${JSON.stringify(stats, null, 2)}`;
             });
             continue;
           }
-          const title = finalLabel(m) ?? toToolTitle(toolName, args, params.cwd);
+          const title = toToolTitle(toolName, args, params.cwd);
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
