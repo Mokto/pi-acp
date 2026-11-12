@@ -79,6 +79,12 @@ export function imageLinkTitle(title: string, file: string): string {
   return `[${title.replace(/[\\[\]]/g, '\\$&')}](<${file}>)`
 }
 
+/** The title an extension set in its finished result's `details._label`, which outlasts the card's running labels. */
+export function finalLabel(result: unknown): string | undefined {
+  const label = (result as { details?: { _label?: unknown } } | null | undefined)?.details?._label
+  return typeof label === 'string' && label.trim() ? label : undefined
+}
+
 /** The result with image data left out: Zed only ever shows `rawOutput` as JSON text, and the card shows the images. */
 export function withoutImageData(result: unknown): unknown {
   if (!imageBlocks(result).length) return result

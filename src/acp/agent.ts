@@ -40,6 +40,7 @@ import {
   pickedChoice,
   SessionManager,
   toToolKind,
+  toToolTitle,
   type PiAcpSession,
   type StopReason as PiStopReason
 } from './session.js'
@@ -51,7 +52,7 @@ import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.
 import { SUMMARY_FOCUS } from './background-compaction.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
-import { imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
+import { finalLabel, imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
   bashCommand,
@@ -1383,6 +1384,11 @@ export class PiAcpAgent implements ACPAgent {
 
       const messages = Array.isArray((data as any)?.messages) ? (data as any).messages : []
       const toolKinds = getToolKinds(params.cwd)
+      const toolArgs = new Map<string, unknown>()
+      for (const m of messages) {
+        if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue
+        for (const c of m.content) if (c?.type === 'toolCall') toolArgs.set(String(c.id), c.arguments)
+      }
 
       for (const m of messages) {
         const role = String(m?.role ?? '')
@@ -1440,6 +1446,7 @@ export class PiAcpAgent implements ACPAgent {
           const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
           const isError = Boolean((m as any)?.isError)
           const isBash = isBashTool(toolName)
+          const args = toolArgs.get(toolCallId)
 
           if (isBash) {
             const text = bashResultText(m)
@@ -1448,7 +1455,7 @@ export class PiAcpAgent implements ACPAgent {
               update: {
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: bashCommand(m) ?? toolName,
+                title: bashCommand(m) ?? bashCommand(args) ?? toolName,
                 kind: 'execute',
                 status: 'completed',
                 content: bashTerminalContent(toolCallId),
@@ -1472,12 +1479,13 @@ export class PiAcpAgent implements ACPAgent {
           }
 
           // Create a synthetic ACP tool call to render historic tool usage.
+          const title = finalLabel(m) ?? toToolTitle(toolName, args, params.cwd)
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call',
               toolCallId,
-              title: toolName,
+              title,
               kind: toolKinds.get(toolName) ?? toToolKind(toolName),
               status: 'completed',
               rawInput: null
@@ -1491,7 +1499,7 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
-              ...(images[0] ? { title: imageLinkTitle(toolName, images[0]) } : {}),
+              ...(images[0] ? { title: imageLinkTitle(title, images[0]) } : {}),
               content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
               rawOutput: withoutImageData(m)
             }

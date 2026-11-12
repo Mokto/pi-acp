@@ -1798,3 +1798,63 @@ test('PiAcpSession: a screenshot tool shows its images in the tool card, without
   assert.equal(update.title, `[Page Snapshot: /](<${file}>)`, 'a click on the title opens the screenshot')
   assert.equal(update.locations, undefined)
 })
+
+test('PiAcpSession: a finished result’s _label is the card title; running labels give way to the base title', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: '/repo',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const shotBytes = `labelled-shot-${randomUUID()}`
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 't1',
+    toolName: 'ui_screenshot',
+    args: { url: 'https://example.com' }
+  })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't1',
+    toolName: 'ui_screenshot',
+    partialResult: { content: [], details: { _label: 'Browser script on https://example.com' } }
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    toolName: 'ui_screenshot',
+    isError: false,
+    result: {
+      content: [{ type: 'image', data: Buffer.from(shotBytes).toString('base64'), mimeType: 'image/png' }],
+      details: { _label: 'Browser script on http://localhost:5173/pricing' }
+    }
+  })
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'scout', args: { task: 'look' } })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't2',
+    toolName: 'scout',
+    partialResult: { content: [], details: { _label: 'Scout: look' } }
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't2',
+    toolName: 'scout',
+    isError: false,
+    result: { content: [{ type: 'text', text: 'done' }] }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const done = (id: string) =>
+    conn.updates.map(u => u.update as any).find(u => u.toolCallId === id && u.status === 'completed')
+  assert.match(done('t1').title, /^\[Browser script on http:\/\/localhost:5173\/pricing\]\(<.+>\)$/)
+  assert.equal(done('t2').title, 'Scout')
+})

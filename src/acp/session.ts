@@ -21,7 +21,13 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import type { SparePi } from '../pi-rpc/spare.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { imageLinkTitle, imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
+import {
+  finalLabel,
+  imageLinkTitle,
+  imageResultText,
+  toolResultToText,
+  withoutImageData
+} from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1919,9 +1925,11 @@ export class PiAcpSession {
         // it — otherwise the row is left showing a stale progress message like
         // "Reviewing with claude-opus-4.8 (round 2/3)…" forever after completion.
         const baseTitle = this.originalToolTitles.get(toolCallId)
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : undefined
+        const label = finalLabel(result)
+        const restoredTitle = label ?? (this.customTitledToolCallIds.has(toolCallId) ? baseTitle : undefined)
+        const linkText = label ?? baseTitle
         // ponytail: the title links the first image only; the card links them all.
-        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle
+        const title = images[0] && linkText ? imageLinkTitle(linkText, images[0]) : restoredTitle
 
         this.emit({
           sessionUpdate: 'tool_call_update',
@@ -2515,7 +2523,7 @@ function truncateTitle(s: string, max = 60): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`
 }
 
-function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
+export function toToolTitle(toolName: string, args: unknown, cwd?: string): string {
   const p = getToolPath(toolName, args)
   if (p) {
     // Show a short relative path when possible; fall back to basename, then full path.
