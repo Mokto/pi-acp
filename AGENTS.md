@@ -20,7 +20,7 @@ Pi RPC mode is effectively single-session, so the adapter maps (one client conne
 Use `@agentclientprotocol/sdk`:
 
 - `ndJsonStream(input, output)` to speak ACP over stdio
-- `new AgentSideConnection((conn) => new PiAcpAgent(conn, config), stream)`
+- `new AgentSideConnection((conn) => new PiAcpAgent(conn), stream)`
 
 ## Implementation constraints / decisions
 
@@ -77,7 +77,7 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 
 ## Source control
 
-- **DO NOT** commit unless explicitly asked!
+- Commit, push or call `create_pr` only when the user asks. This overrides any rule that opens a PR on its own.
 - When working from a personal fork, `origin` is the fork, `upstream` is `Mokto/pi-acp`, and PRs target `upstream`'s `main`. Branch from `upstream/main`, not the fork's `main`, which falls behind.
 - When merging `main` into a branch, conflicts are usually only in `dist/`. Resolve them by rebuilding (`npm run build`) rather than hand-merging the generated files.
 
@@ -128,11 +128,11 @@ Manual fallback (if the workflow is broken), for version `X.Y.Z`:
   - The button shows the selected option's `name`, so that text doubles as the label.
   - The only non-clickable text in the menu is group headings (`SessionConfigSelectGroup.name` in the SDK), and a heading only appears above at least one option.
   - Hovering an option shows its `description`; Zed also adds a "favorite" star to every row.
-  - Zed saves a picked value to its settings (`default_config_options`) and replays it into new sessions via `session/set_config_option` (before Zed 1.26, also into reopened ones), so handlers must accept stale or unknown values without throwing.
+  - Zed saves a picked value to its settings (`default_config_options`) and replays it into new sessions via `session/set_config_option` (before Zed 1.26, also into reopened ones), so a replayed value can be stale. The `compact_at` and `plan_usage` handlers accept one without throwing; `model`, `thinking` and an unknown `configId` reject it with invalid params on purpose (`test/component/session-set-config-option.test.ts`).
 - **Zed holds messages sent mid-turn in its own queue** for external agents and only sends them when the turn ends (or cancels the turn first, with "Send Now"), so pi-acp never sees them early. Steering can't be built here until ACP adds it (RFD `session/inject`).
-- Extension `ctx.ui.notify` warnings and errors that arrive outside a reply become Zed notices, split at the first ". " or line break into title and description (`src/acp/translate/notice.ts`). Ocean's `extensions` repo writes its notify text as "Title. Detail." for that split; change both sides together.
-- Extensions shape a tool's Zed card through `details` fields (`src/acp/translate/pi-tools.ts`, `session.ts`): `_label` sets the title while it runs, and `_display` (Markdown) replaces the agent-facing result text, also on reopen. A card's icon comes from the `acpToolKinds` pi setting (`src/acp/pi-settings.ts`) or pi-acp's list of pi's built-in tools. Ocean's extensions repo sets `_display` (`create_pr`) and lists its tools in `acpToolKinds`, so change both sides together; keep extension tool names out of pi-acp.
-- `update_plan` tool calls become Zed's plan panel (`src/acp/translate/plan.ts`). The tool and its argument shape (`goal`, `plan: [{ step, status }]`) live in the `todo` extension in Ocean's extensions repo, so change both sides together. A v1 plan loses its completed rows at each new user message (Zed's `clear_completed_plan_entries`); the tool re-sends the whole list on every update. After each compaction the extension re-sends the list as a custom message (`customType: "todo"`, tool arguments in `details`), since pi drops the summarized tool call from what it returns.
+- Extension `ctx.ui.notify` warnings and errors that arrive outside a reply become Zed notices, split at the first ". " or line break into title and description (`src/acp/translate/notice.ts`). Ocean's `ocean-extensions` repo writes its notify text as "Title. Detail." for that split; change both sides together.
+- Extensions shape a tool's Zed card through `details` fields (`src/acp/translate/pi-tools.ts`, `session.ts`): `_label` sets the title while it runs, and `_display` (Markdown) replaces the agent-facing result text, also on reopen. A card's icon comes from the `acpToolKinds` pi setting (`src/acp/pi-settings.ts`) or pi-acp's list of pi's built-in tools. Ocean's `ocean-extensions` repo sets `_display` (`create_pr`) and lists its tools in `acpToolKinds`, so change both sides together; keep extension tool names out of pi-acp.
+- `update_plan` tool calls become Zed's plan panel (`src/acp/translate/plan.ts`). The tool and its argument shape (`goal`, `plan: [{ step, status }]`) live in the `todo` extension in Ocean's `ocean-extensions` repo, so change both sides together. A v1 plan loses its completed rows at each new user message (Zed's `clear_completed_plan_entries`); the tool re-sends the whole list on every update. After each compaction the extension re-sends the list as a custom message (`customType: "todo"`, tool arguments in `details`), since pi drops the summarized tool call from what it returns.
 - The `plan_usage` option reads `~/.pi/agent/plan-usage/<provider>.json`, written by the `plan-usage` extension in Ocean's `ocean-extensions` repo. That file format is a contract between the two repos (see the README); change both sides together.
 
 ## References
