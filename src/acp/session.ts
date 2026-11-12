@@ -97,6 +97,8 @@ const CONTEXT_USAGE_TIMEOUT_MS = 2_000
 // 90% of the 1-hour prompt cache, so the summary is ready when the cache expires.
 const IDLE_SUMMARY_AFTER_MS = 54 * 60_000
 const PROMPT_CACHE_MS = 60 * 60_000
+// The longest of 208 measured waits for a background summary after a reply was 103 s.
+const HELD_MESSAGE_WAIT_MS = 3 * 60_000
 const IDLE_COMPACTION_MIN_TOKENS = 150_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
@@ -392,6 +394,7 @@ export class PiAcpSession {
   private compactionsFinishedCount = 0
   private compactionAfterReply: Promise<void> | null = null
   private stopWaitingForSummary: (() => void) | null = null
+  private heldMessageTimer: ReturnType<typeof setTimeout> | null = null
   private compactAfterReplyFailed = false
   private compactAtPick: number | null = null
   // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
@@ -664,6 +667,13 @@ export class PiAcpSession {
       // completeTurn setting pendingTurn=null and startNextQueuedTurn firing).
       if (this.pendingTurn || this.turnQueue.length > 0 || this.compactionAfterReply) {
         this.turnQueue.push(queued)
+        if (this.compactionAfterReply && !this.heldMessageTimer) {
+          this.heldMessageTimer = setTimeout(() => {
+            if (!this.stopWaitingForSummary) return
+            this.background.abandonWait()
+            this.stopWaitingForSummary()
+          }, HELD_MESSAGE_WAIT_MS).unref()
+        }
 
         // Best-effort: notify client that a prompt was queued.
         // This doesn't work in Zed yet, needs to be revisited
@@ -1223,7 +1233,8 @@ export class PiAcpSession {
       !this.turnQueue.length &&
       limit !== null &&
       this.peakContextTokens >= limit &&
-      !this.compactAfterReplyFailed
+      !this.compactAfterReplyFailed &&
+      !this.background.waitsOnAbandoned(this.peakContextTokens)
     )
   }
 
@@ -1241,7 +1252,8 @@ export class PiAcpSession {
         new Promise<void>(resolve => (this.stopWaitingForSummary = resolve))
       ])
       this.stopWaitingForSummary = null
-      if (this.cancelRequested) return finishIfPiDidNot({ status: 'cancelled' })
+      if (this.cancelRequested || this.background.waitsOnAbandoned(this.peakContextTokens))
+        return finishIfPiDidNot({ status: 'cancelled' })
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }))
     })().catch(err => finishIfPiDidNot({ status: 'failed', error: err instanceof Error ? err.message : String(err) }))
     try {
@@ -1249,6 +1261,8 @@ export class PiAcpSession {
     } catch {
       // The compaction entry may stay unfinished; the waiting messages must still run.
     } finally {
+      if (this.heldMessageTimer) clearTimeout(this.heldMessageTimer)
+      this.heldMessageTimer = null
       this.compactionAfterReply = null
       this.startNextQueuedTurn()
     }

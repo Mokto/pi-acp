@@ -1511,11 +1511,13 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
   generation = 0;
   failed = false;
+  waitAbandoned = false;
   shouldStart(tokens, limit) {
     if (this.running || this.failed || tokens < limit - backgroundLead(limit)) return false;
     if (!this.ready) return true;
@@ -1524,6 +1526,7 @@ var BackgroundCompaction = class {
   }
   start(session, tokens, limit) {
     const generation = ++this.generation;
+    this.waitAbandoned = false;
     this.running = this.write(session, tokens, limit, generation).catch(() => {
       if (this.generation === generation) this.failed = true;
     }).finally(() => {
@@ -1549,9 +1552,18 @@ var BackgroundCompaction = class {
     if (this.isReadyFor(tokens)) return;
     await this.running;
   }
+  /** Stops waiting for the summary being written; it is still swapped in if it finishes. */
+  abandonWait() {
+    if (this.running) this.waitAbandoned = true;
+  }
+  /** Whether a compaction for `tokens` would only wait for a summary already given up on. */
+  waitsOnAbandoned(tokens) {
+    return this.waitAbandoned && this.running !== null && !this.isReadyFor(tokens);
+  }
   async discard() {
     this.generation += 1;
     this.failed = false;
+    this.waitAbandoned = false;
     this.stopRunning?.();
     this.running = null;
     this.stopRunning = null;
@@ -1645,6 +1657,7 @@ var DEFAULT_INFERENCE_STARTUP_MS = 5 * 6e4;
 var CONTEXT_USAGE_TIMEOUT_MS = 2e3;
 var IDLE_SUMMARY_AFTER_MS = 54 * 6e4;
 var PROMPT_CACHE_MS = 60 * 6e4;
+var HELD_MESSAGE_WAIT_MS = 3 * 6e4;
 var IDLE_COMPACTION_MIN_TOKENS = 15e4;
 var MAX_CURSOR_SDK_AUTH_RETRIES = 2;
 var CONFIRM_PERMISSION_OPTIONS = [
@@ -1872,6 +1885,7 @@ var PiAcpSession = class _PiAcpSession {
   compactionsFinishedCount = 0;
   compactionAfterReply = null;
   stopWaitingForSummary = null;
+  heldMessageTimer = null;
   compactAfterReplyFailed = false;
   compactAtPick = null;
   // A stats reply pi measured before a compaction can arrive after it; until the next model step, any size it reports is stale.
@@ -2075,6 +2089,13 @@ var PiAcpSession = class _PiAcpSession {
       };
       if (this.pendingTurn || this.turnQueue.length > 0 || this.compactionAfterReply) {
         this.turnQueue.push(queued);
+        if (this.compactionAfterReply && !this.heldMessageTimer) {
+          this.heldMessageTimer = setTimeout(() => {
+            if (!this.stopWaitingForSummary) return;
+            this.background.abandonWait();
+            this.stopWaitingForSummary();
+          }, HELD_MESSAGE_WAIT_MS).unref();
+        }
         this.emit({
           sessionUpdate: "agent_message_chunk",
           content: {
@@ -2511,7 +2532,7 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
   }
   shouldCompactAfterReply(reason) {
     const limit = this.compactAtPick;
-    return reason === "end_turn" && !this.pendingTurn && !this.turnQueue.length && limit !== null && this.peakContextTokens >= limit && !this.compactAfterReplyFailed;
+    return reason === "end_turn" && !this.pendingTurn && !this.turnQueue.length && limit !== null && this.peakContextTokens >= limit && !this.compactAfterReplyFailed && !this.background.waitsOnAbandoned(this.peakContextTokens);
   }
   /** Runs while the user reads the reply; a prompt sent meanwhile waits in the turn queue. */
   async compactAfterReply() {
@@ -2526,13 +2547,16 @@ Cursor SDK API key rejected \u2014 retrying (${this.cursorSdkAuthRetries}/${MAX_
         new Promise((resolve5) => this.stopWaitingForSummary = resolve5)
       ]);
       this.stopWaitingForSummary = null;
-      if (this.cancelRequested) return finishIfPiDidNot({ status: "cancelled" });
+      if (this.cancelRequested || this.background.waitsOnAbandoned(this.peakContextTokens))
+        return finishIfPiDidNot({ status: "cancelled" });
       finishIfPiDidNot(compactionStateFromPiEnd({ result: await this.proc.compact() }));
     })().catch((err) => finishIfPiDidNot({ status: "failed", error: err instanceof Error ? err.message : String(err) }));
     try {
       await this.compactionAfterReply;
     } catch {
     } finally {
+      if (this.heldMessageTimer) clearTimeout(this.heldMessageTimer);
+      this.heldMessageTimer = null;
       this.compactionAfterReply = null;
       this.startNextQueuedTurn();
     }

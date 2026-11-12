@@ -41,6 +41,7 @@ export class BackgroundCompaction {
   private ready: { refreshAt: number; maxTokensBefore: number; file: string } | null = null
   private generation = 0
   private failed = false
+  private waitAbandoned = false
 
   constructor(private readonly startWriter: (sessionPath: string) => Promise<SummaryWriter>) {}
 
@@ -54,6 +55,7 @@ export class BackgroundCompaction {
 
   start(session: Promise<SessionFileInfo>, tokens: number, limit: number): void {
     const generation = ++this.generation
+    this.waitAbandoned = false
     this.running = this.write(session, tokens, limit, generation)
       .catch(() => {
         // The normal compaction does the work; no retry until the next compaction or size pick.
@@ -87,9 +89,20 @@ export class BackgroundCompaction {
     await this.running
   }
 
+  /** Stops waiting for the summary being written; it is still swapped in if it finishes. */
+  abandonWait(): void {
+    if (this.running) this.waitAbandoned = true
+  }
+
+  /** Whether a compaction for `tokens` would only wait for a summary already given up on. */
+  waitsOnAbandoned(tokens: number): boolean {
+    return this.waitAbandoned && this.running !== null && !this.isReadyFor(tokens)
+  }
+
   async discard(): Promise<void> {
     this.generation += 1
     this.failed = false
+    this.waitAbandoned = false
     this.stopRunning?.()
     this.running = null
     this.stopRunning = null
