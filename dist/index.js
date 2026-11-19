@@ -1272,20 +1272,6 @@ function groupByProvider(models) {
 }
 function buildSessionConfigOptions(models, thinking, usage = null, compactAt = null) {
   const options = [];
-  const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt));
-  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
-  if (usageOption) options.push(usageOption);
-  if (models && models.availableModels.length) {
-    options.push({
-      type: "select",
-      id: MODEL_CONFIG_ID,
-      name: "Model",
-      category: "model",
-      currentValue: models.currentModelId,
-      options: groupByProvider(models.availableModels)
-    });
-  }
   if (thinking.availableModes.length) {
     options.push({
       type: "select",
@@ -1300,6 +1286,20 @@ function buildSessionConfigOptions(models, thinking, usage = null, compactAt = n
       }))
     });
   }
+  if (models && models.availableModels.length) {
+    options.push({
+      type: "select",
+      id: MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      currentValue: models.currentModelId,
+      options: groupByProvider(models.availableModels)
+    });
+  }
+  const currentModel = models?.availableModels.find((m) => m.modelId === models.currentModelId);
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split("/")[0] ?? null);
+  if (usageOption) options.push(usageOption);
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt));
   return options;
 }
 
@@ -1511,6 +1511,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;

@@ -115,23 +115,8 @@ export function buildSessionConfigOptions(
   usage: PlanUsage | null = null,
   compactAt: number | null = null
 ): SessionConfigOption[] {
+  // Zed 1.29+ draws the first option next to Send, so the bar reads right to left.
   const options: SessionConfigOption[] = []
-
-  const currentModel = models?.availableModels.find(m => m.modelId === models.currentModelId)
-  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt))
-  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split('/')[0] ?? null)
-  if (usageOption) options.push(usageOption)
-
-  if (models && models.availableModels.length) {
-    options.push({
-      type: 'select',
-      id: MODEL_CONFIG_ID,
-      name: 'Model',
-      category: 'model',
-      currentValue: models.currentModelId,
-      options: groupByProvider(models.availableModels)
-    })
-  }
 
   if (thinking.availableModes.length) {
     options.push({
@@ -147,6 +132,22 @@ export function buildSessionConfigOptions(
       }))
     })
   }
+
+  if (models && models.availableModels.length) {
+    options.push({
+      type: 'select',
+      id: MODEL_CONFIG_ID,
+      name: 'Model',
+      category: 'model',
+      currentValue: models.currentModelId,
+      options: groupByProvider(models.availableModels)
+    })
+  }
+
+  const currentModel = models?.availableModels.find(m => m.modelId === models.currentModelId)
+  const usageOption = buildPlanUsageOption(usage, models?.currentModelId.split('/')[0] ?? null)
+  if (usageOption) options.push(usageOption)
+  options.push(buildCompactAtOption(currentModel?.contextWindow ?? null, compactAt))
 
   return options
 }
