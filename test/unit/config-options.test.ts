@@ -93,11 +93,18 @@ test('buildSessionConfigOptions: currentValue is always one of the advertised mo
   assert.ok(model.options.flatMap(o => ('options' in o ? o.options : [o])).some(o => o.value === model.currentValue))
 })
 
+test('buildSessionConfigOptions: sends Thinking first, since Zed draws the first option next to Send', () => {
+  assert.deepEqual(
+    buildSessionConfigOptions(models, thinking).map(o => o.id),
+    [THINKING_CONFIG_ID, MODEL_CONFIG_ID, COMPACT_AT_CONFIG_ID]
+  )
+})
+
 test('buildSessionConfigOptions: omits model select when no models are available', () => {
   const options = buildSessionConfigOptions(null, thinking)
   assert.deepEqual(
     options.map(o => o.id),
-    [COMPACT_AT_CONFIG_ID, THINKING_CONFIG_ID]
+    [THINKING_CONFIG_ID, COMPACT_AT_CONFIG_ID]
   )
 })
 
@@ -105,7 +112,7 @@ test('buildSessionConfigOptions: omits thinking select when no modes are availab
   const options = buildSessionConfigOptions(models, { currentModeId: 'medium', availableModes: [] })
   assert.deepEqual(
     options.map(o => o.id),
-    [COMPACT_AT_CONFIG_ID, MODEL_CONFIG_ID]
+    [MODEL_CONFIG_ID, COMPACT_AT_CONFIG_ID]
   )
 })
 

@@ -199,7 +199,7 @@ test('plan usage: one file per provider is read from disk and listed right after
   const options = buildSessionConfigOptions(null, { availableModes: [], currentModeId: 'off' }, read)
   assert.deepEqual(
     options.map(o => o.id),
-    ['compact_at', 'plan_usage']
+    ['plan_usage', 'compact_at']
   )
 })
 
