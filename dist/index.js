@@ -765,9 +765,6 @@ function imageResultText(result, name) {
   const images = saveImages(result, name);
   return { images, text: [imageMarkdown(images), toolResultToText(result)].filter(Boolean).join("\n\n") };
 }
-function imageLinkTitle(title, file) {
-  return `[${title.replace(/[\\[\]]/g, "\\$&")}](<${file}>)`;
-}
 function withoutImageData(result) {
   if (!imageBlocks(result).length) return result;
   const { content } = result;
@@ -1511,6 +1508,7 @@ var BackgroundCompaction = class {
   constructor(startWriter) {
     this.startWriter = startWriter;
   }
+  startWriter;
   running = null;
   stopRunning = null;
   ready = null;
@@ -3112,15 +3110,14 @@ ${message}` }
           content = [{ type: "content", content: { type: "text", text } }];
         }
         const baseTitle = this.originalToolTitles.get(toolCallId);
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0;
-        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle;
+        const title = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : void 0;
         this.emit({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
           ...title ? { title } : {},
-          // Zed makes a title with a location unclickable, so an image read drops it for the link.
-          ...images[0] && readPath ? { locations: [] } : {},
+          // Zed opens only a card's single location from its title; a read keeps the file it read.
+          ...images[0] && !readPath ? { locations: [{ path: images[0] }] } : {},
           content,
           ...hasStructuredDiff ? {} : { rawOutput: withoutImageData(result) }
         });
@@ -5647,7 +5644,7 @@ ${JSON.stringify(stats, null, 2)}`;
               sessionUpdate: "tool_call_update",
               toolCallId,
               status: isError ? "failed" : "completed",
-              ...images[0] ? { title: imageLinkTitle(title, images[0]) } : {},
+              ...images[0] ? { locations: [{ path: images[0] }] } : {},
               content: text ? [{ type: "content", content: { type: "text", text } }] : null,
               rawOutput: withoutImageData(m)
             }
