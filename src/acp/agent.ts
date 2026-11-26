@@ -1,7 +1,5 @@
 import {
   RequestError,
-  type Agent as ACPAgent,
-  type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
   type CloseSessionRequest,
@@ -24,6 +22,7 @@ import {
   type StopReason
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
+import type { AcpClient } from './client.js'
 import {
   findProvider,
   looksLikeAuthCode,
@@ -168,8 +167,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const pkg = readNearestPackageJson(import.meta.url)
 
-export class PiAcpAgent implements ACPAgent {
-  private readonly conn: AgentSideConnection
+export class PiAcpAgent {
+  private readonly conn: AcpClient
   private readonly sessions: SessionManager
   private readonly store = new SessionStore()
   private readonly live: LiveServer | null
@@ -263,7 +262,7 @@ export class PiAcpAgent implements ACPAgent {
     return session
   }
 
-  constructor(conn: AgentSideConnection, _config?: unknown) {
+  constructor(conn: AcpClient, _config?: unknown) {
     this.conn = conn
     void _config
     this.live = isLiveEnabled() ? new LiveServer() : null

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { AgentSideConnection } from '@agentclientprotocol/sdk'
+import type { AcpClient } from '../../src/acp/client.js'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiAcpSession } from '../../src/acp/session.js'
 import type { PiRpcProcess } from '../../src/pi-rpc/process.js'
@@ -62,7 +62,7 @@ class FakeSessions {
 }
 
 function makeAgent(proc: FakeProc): PiAcpAgent {
-  const conn = { async sessionUpdate() {} } as unknown as AgentSideConnection
+  const conn = { async sessionUpdate() {} } as unknown as AcpClient
   const agent = new PiAcpAgent(conn)
   const session = new PiAcpSession({
     sessionId: 's1',

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import { AgentSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
+import { agent, methods as methods2, ndJsonStream } from "@agentclientprotocol/sdk";
 
 // src/acp/agent.ts
 import {
@@ -5020,8 +5020,8 @@ ${text}`;
   async advertiseCommands(session, fileCommands = loadSlashCommands(session.cwd)) {
     let commands;
     try {
-      const pi = await session.proc.getCommands();
-      const res = toAvailableCommandsFromPiGetCommands(pi, {
+      const pi2 = await session.proc.getCommands();
+      const res = toAvailableCommandsFromPiGetCommands(pi2, {
         enableSkillCommands: getEnableSkillCommands(session.cwd),
         includeExtensionCommands: getEnableExtensionCommands(session.cwd)
       });
@@ -6033,6 +6033,18 @@ function readNearestPackageJson(metaUrl) {
   return { name: "pi-acp", version: "0.0.0" };
 }
 
+// src/acp/client.ts
+import {
+  methods
+} from "@agentclientprotocol/sdk";
+function acpClient(client) {
+  return {
+    sessionUpdate: (params) => client.notify(methods.client.session.update, params),
+    requestPermission: (params) => client.request(methods.client.session.requestPermission, params),
+    createElicitation: (params) => client.request(methods.client.elicitation.create, params)
+  };
+}
+
 // src/index.ts
 if (process.argv.includes("--terminal-login")) {
   const { spawnSync: spawnSync3 } = await import("child_process");
@@ -6074,11 +6086,13 @@ var output = new ReadableStream({
   }
 });
 var stream = ndJsonStream(input, output);
-var agent = new AgentSideConnection((conn) => new PiAcpAgent(conn), stream);
+var pi;
+agent().onConnect(({ client }) => {
+  pi = new PiAcpAgent(acpClient(client));
+}).onRequest(methods2.agent.initialize, ({ params }) => pi.initialize(params)).onRequest(methods2.agent.authenticate, ({ params }) => pi.authenticate(params)).onRequest(methods2.agent.session.new, ({ params }) => pi.newSession(params)).onRequest(methods2.agent.session.load, ({ params }) => pi.loadSession(params)).onRequest(methods2.agent.session.list, ({ params }) => pi.listSessions(params)).onRequest(methods2.agent.session.close, ({ params }) => pi.closeSession(params)).onRequest(methods2.agent.session.setMode, ({ params }) => pi.setSessionMode(params)).onRequest(methods2.agent.session.setConfigOption, ({ params }) => pi.setSessionConfigOption(params)).onRequest(methods2.agent.session.prompt, ({ params }) => pi.prompt(params)).onNotification(methods2.agent.session.cancel, ({ params }) => pi.cancel(params)).connect(stream);
 function shutdown() {
   try {
-    ;
-    agent?.agent?.dispose?.();
+    pi?.dispose();
   } catch {
   }
   try {
