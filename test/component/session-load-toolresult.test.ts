@@ -122,7 +122,8 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     const file = text.match(/^\[!\[page_snapshot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nScript on \/, 1 image\.$/)?.[1]
     assert.ok(file, text)
     assert.equal(readFileSync(file, 'utf8'), replayedBytes)
-    assert.equal(shotDone.title, `[Page Snapshot: https://example.com](<${file}>)`)
+    assert.equal(shotDone.title, undefined, 'the title stays as on the tool call')
+    assert.deepEqual(shotDone.locations, [{ path: file }], 'a click on the title opens the screenshot')
     assert.doesNotMatch(JSON.stringify(shotDone.rawOutput), /cG5n/, 'no image bytes in rawOutput')
   } finally {
     PiRpcProcess.spawn = originalSpawn

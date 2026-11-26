@@ -21,7 +21,7 @@ import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/proces
 import type { SparePi } from '../pi-rpc/spare.js'
 import { isTransientCursorSdkAuthError, maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { imageLinkTitle, imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
+import { imageResultText, toolResultToText, withoutImageData } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1933,17 +1933,15 @@ export class PiAcpSession {
         // it — otherwise the row is left showing a stale progress message like
         // "Reviewing with claude-opus-4.8 (round 2/3)…" forever after completion.
         const baseTitle = this.originalToolTitles.get(toolCallId)
-        const restoredTitle = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : undefined
-        // ponytail: the title links the first image only; the card links them all.
-        const title = images[0] && baseTitle ? imageLinkTitle(baseTitle, images[0]) : restoredTitle
+        const title = this.customTitledToolCallIds.has(toolCallId) ? baseTitle : undefined
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: isError ? 'failed' : 'completed',
           ...(title ? { title } : {}),
-          // Zed makes a title with a location unclickable, so an image read drops it for the link.
-          ...(images[0] && readPath ? { locations: [] } : {}),
+          // Zed opens only a card's single location from its title; a read keeps the file it read.
+          ...(images[0] && !readPath ? { locations: [{ path: images[0] }] } : {}),
           content,
           ...(hasStructuredDiff ? {} : { rawOutput: withoutImageData(result) })
         })

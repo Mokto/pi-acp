@@ -1723,7 +1723,7 @@ test('PiAcpSession: session_info_changed forwards the pi session name as the ACP
   assert.deepEqual(titles, ['Fix payment retry', null])
 })
 
-test('PiAcpSession: an image read shows a clickable copy of the image in the tool card', async () => {
+test('PiAcpSession: an image read shows a clickable copy of the image and keeps the read file as its location', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -1755,8 +1755,9 @@ test('PiAcpSession: an image read shows a clickable copy of the image in the too
   const file = text.match(/^\[!\[shot\.png\]\(<(.+)>\)\]\(<\1>\)\n\nRead image file \[image\/png\]$/)?.[1]
   assert.ok(file, text)
   const update = conn.updates.at(-1)!.update as any
-  assert.equal(update.title, `[Read shot.png](<${file}>)`)
-  assert.deepEqual(update.locations, [], 'Zed only makes the title clickable without a location')
+  assert.equal(update.title, undefined, 'the title stays as sent at the start')
+  assert.equal(update.locations, undefined, 'the card keeps the image it read as its location')
+  assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: '/repo/shot.png' }])
   assert.equal(readFileSync(file, 'utf8'), readBytes)
 })
 
@@ -1795,6 +1796,6 @@ test('PiAcpSession: a screenshot tool shows its images in the tool card, without
   assert.ok(file, text)
   assert.equal(readFileSync(file, 'utf8'), screenshotBytes)
   assert.deepEqual(update.rawOutput.content[1], { type: 'image', mimeType: 'image/png' })
-  assert.equal(update.title, `[Page Snapshot: /](<${file}>)`, 'a click on the title opens the screenshot')
-  assert.equal(update.locations, undefined)
+  assert.equal(update.title, undefined, 'the title stays as sent at the start')
+  assert.deepEqual(update.locations, [{ path: file }], 'a click on the title opens the screenshot')
 })

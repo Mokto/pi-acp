@@ -51,7 +51,7 @@ import { listPiSessions, findPiSession, findPiSessionFile } from './pi-sessions.
 import { SUMMARY_FOCUS } from './background-compaction.js'
 import { estimatePiContextTokens, normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { latestPlanEntries, PLAN_TOOL } from './translate/plan.js'
-import { imageLinkTitle, imageResultText, withoutImageData } from './translate/pi-tools.js'
+import { imageResultText, withoutImageData } from './translate/pi-tools.js'
 import { compactionStateFromPiEnd, compactionUpdate } from './translate/compaction.js'
 import {
   bashCommand,
@@ -1498,7 +1498,7 @@ export class PiAcpAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
-              ...(images[0] ? { title: imageLinkTitle(title, images[0]) } : {}),
+              ...(images[0] ? { locations: [{ path: images[0] }] } : {}),
               content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
               rawOutput: withoutImageData(m)
             }
