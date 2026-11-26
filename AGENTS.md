@@ -15,12 +15,13 @@ Pi RPC mode is effectively single-session, so the adapter maps (one client conne
 - `session/prompt` → send `{type:"prompt"}` to that process and stream events back as `session/update`
 - `session/cancel` → send `{type:"abort"}`
 
-### ACP server wiring (modeled after opencode)
+### ACP server wiring
 
-Use `@agentclientprotocol/sdk`:
+Use `@agentclientprotocol/sdk` (stable v1 entrypoint; `/unstable` only for an unstable feature):
 
 - `ndJsonStream(input, output)` to speak ACP over stdio
-- `new AgentSideConnection((conn) => new PiAcpAgent(conn), stream)`
+- `src/index.ts` registers each ACP method on `agent()` and forwards it to `PiAcpAgent`. A method without a handler there answers Method Not Found, so a new `PiAcpAgent` method needs its line.
+- `PiAcpAgent` calls Zed through `AcpClient` (`src/acp/client.ts`); tests pass a fake of it.
 
 ## Implementation constraints / decisions
 

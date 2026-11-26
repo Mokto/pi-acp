@@ -1,5 +1,4 @@
 import type {
-  AgentSideConnection,
   ContentBlock,
   CreateElicitationRequest,
   CreateElicitationResponse,
@@ -13,6 +12,7 @@ import type {
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
+import type { AcpClient } from './client.js'
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
@@ -48,7 +48,7 @@ import { PLAN_TOOL, planEntries } from './translate/plan.js'
 type SessionCreateParams = {
   cwd: string
   mcpServers: McpServer[]
-  conn: AgentSideConnection
+  conn: AcpClient
   /** The client advertised `session.compaction`, so compactions use the client's compaction entry. */
   compactionEntries?: boolean
   /** The client advertised `session.notices`, so warnings outside a reply become notices. */
@@ -102,7 +102,7 @@ const HELD_MESSAGE_WAIT_MS = 3 * 60_000
 const IDLE_COMPACTION_MIN_TOKENS = 150_000
 const MAX_CURSOR_SDK_AUTH_RETRIES = 2
 
-type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
+type PermissionResponse = Awaited<ReturnType<AcpClient['requestPermission']>>
 
 const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
   { optionId: 'yes', name: 'Yes', kind: 'allow_once' },
@@ -384,7 +384,7 @@ export class PiAcpSession {
   private startupInfoSentInPrompt = false
 
   readonly proc: PiRpcProcess
-  private readonly conn: AgentSideConnection
+  private readonly conn: AcpClient
   private readonly fileCommands: FileSlashCommand[]
   private readonly onDead: (() => void) | null
   private readonly compactionEntries: boolean
@@ -539,7 +539,7 @@ export class PiAcpSession {
     cwd: string
     mcpServers: McpServer[]
     proc: PiRpcProcess
-    conn: AgentSideConnection
+    conn: AcpClient
     fileCommands?: FileSlashCommand[]
     store?: SessionStore
     /** Called once when the underlying pi process exits, so the owning SessionManager can evict this session. */

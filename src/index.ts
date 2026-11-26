@@ -1,5 +1,6 @@
-import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
+import { agent, methods, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
+import { acpClient } from './acp/client.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
@@ -49,12 +50,27 @@ const output = new ReadableStream<Uint8Array>({
 
 const stream = ndJsonStream(input, output)
 
-const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
+let pi: PiAcpAgent | undefined
+agent()
+  .onConnect(({ client }) => {
+    pi = new PiAcpAgent(acpClient(client))
+  })
+  .onRequest(methods.agent.initialize, ({ params }) => pi!.initialize(params))
+  .onRequest(methods.agent.authenticate, ({ params }) => pi!.authenticate(params))
+  .onRequest(methods.agent.session.new, ({ params }) => pi!.newSession(params))
+  .onRequest(methods.agent.session.load, ({ params }) => pi!.loadSession(params))
+  .onRequest(methods.agent.session.list, ({ params }) => pi!.listSessions(params))
+  .onRequest(methods.agent.session.close, ({ params }) => pi!.closeSession(params))
+  .onRequest(methods.agent.session.setMode, ({ params }) => pi!.setSessionMode(params))
+  .onRequest(methods.agent.session.setConfigOption, ({ params }) => pi!.setSessionConfigOption(params))
+  .onRequest(methods.agent.session.prompt, ({ params }) => pi!.prompt(params))
+  .onNotification(methods.agent.session.cancel, ({ params }) => pi!.cancel(params))
+  .connect(stream)
 
 function shutdown() {
   try {
     // Best-effort: dispose session subprocesses when the client disconnects.
-    ;(agent as any)?.agent?.dispose?.()
+    pi?.dispose()
   } catch {
     // ignore
   }
