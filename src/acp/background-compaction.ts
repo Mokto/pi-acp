@@ -18,14 +18,19 @@ export const SUMMARY_FOCUS =
   'file. Under Done, replace each recorded task with one line naming where it is recorded (PR number or ' +
   'file path) and nothing else; keep other finished work in full, except as below. ' +
   'In every other section, sort by kind, not by guessing whether something will matter again: drop facts ' +
-  'about recorded work itself (what changed, values, file lists, measurements, check results), but keep in ' +
-  'full anything about how to work in this environment (commands, workarounds, error fixes, tool and repo ' +
-  'quirks), even if it was learned during recorded work, until the conversation shows it written to a ' +
-  'named file. ' +
+  'about recorded work itself (what changed, values, file lists, measurements, check results), but keep ' +
+  'what is specific to this environment (its project commands, workarounds, error fixes, and quirks of its ' +
+  'tools, repos and services), even if it was learned during recorded work, until the conversation shows it ' +
+  'written to a named file. Drop general know-how a capable agent already has, such as standard git, shell ' +
+  'or language usage, even when it was used here. ' +
   'Under Critical Context, keep every error or surprise about how to work here (for example a command that ' +
   "hangs, a check that misses something, a tool's limitation): what broke, why, and the fix or workaround, " +
   'with error text verbatim, until the conversation shows it written to a named file. A bug in the code ' +
   'being built is a fact about that work: once the work is recorded, drop it. ' +
+  'Under Constraints & Preferences, state each preference once, as a rule in its latest form, not as a list ' +
+  'of the messages that showed it. ' +
+  'In every section, merge items about the same command, tool or problem into one, and when a newer item ' +
+  'replaces an older one, keep only the newer. ' +
   'Under Key Decisions, keep the reason for each decision, and each option the user rejected with why, so ' +
   "it isn't proposed again. When a later decision overrides an earlier one, keep the later one and why the " +
   'earlier one lost. ' +
